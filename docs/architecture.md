@@ -28,7 +28,7 @@ Two rules keep the feature crates independent of each other:
 
 ## What `serve` does
 
-1. Finds the project (`rayfin/rayfin.yml`) and opens `.rayfin-local/`, creating it on first use (`--reset` deletes it first).
+1. Finds the project (`rayfin/rayfin.yml`) and opens `.rayfin-local/`, creating it on first use (`--reset` first deletes the database and stored files).
 2. Finds Node.js 20 or later.
 3. Analyzes `rayfin/data` and `rayfin/storage` with the project's `@microsoft/rayfin-core` (`js/analyze.mjs`), as `rayfin dev db apply` does.
    The result is cached in `.rayfin-local/cache/analysis.json` while its inputs are unchanged.

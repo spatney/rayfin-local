@@ -183,7 +183,7 @@ Outside it, only build output is written: what your build commands produce (such
 | `secrets.json` | Local secret values. |
 
 `rayfin-local reset` deletes the folder after asking (`--yes` skips the question).
-`rayfin-local serve --reset` deletes it before starting, so the app starts with an empty database.
+`rayfin-local serve --reset` starts from an empty database: it deletes the database (users and data) and stored files, and keeps `state.json`, `keys/`, `secrets.json` and `cache/`.
 Both delete users, stored files and local secrets too.
 
 ## Schema changes
@@ -258,7 +258,7 @@ Every command takes these options:
 | `--token-source <auto\|az\|rayfin>` | Where Azure tokens come from. Default: `[tokens] source`, else `auto`. |
 | `--tenant <TENANT>` | Entra tenant for tokens. Default: your login's tenant. |
 | `--force-schema` | Apply schema changes that lose data. |
-| `--reset` | Delete `.rayfin-local/` first and start from an empty database. |
+| `--reset` | Start from an empty database: delete the database and stored files (keeps ports, keys and secrets). |
 | `--inspect[=PORT]` | Start the function host with the Node.js inspector, on port 9229 by default. |
 | `--open` | Open the app in the browser once it is ready. |
 

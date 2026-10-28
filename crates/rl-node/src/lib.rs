@@ -429,6 +429,10 @@ pub struct ManagedChild {
     status: Option<ExitStatus>,
     #[cfg(windows)]
     job: Option<windows::Job>,
+    /// Shell commands on Windows get no Ctrl+Break: cmd.exe running a batch file such as
+    /// `npm.cmd` answers it with "Terminate batch job (Y/N)?" instead of stopping.
+    #[cfg(windows)]
+    graceful_stop: bool,
 }
 
 impl ManagedChild {
@@ -482,6 +486,8 @@ impl ManagedChild {
             status: None,
             #[cfg(windows)]
             job,
+            #[cfg(windows)]
+            graceful_stop: spec.shell_command.is_none(),
         })
     }
 
@@ -557,7 +563,7 @@ impl ManagedChild {
         };
         #[cfg(windows)]
         {
-            windows::send_ctrl_break(pid)
+            self.graceful_stop && windows::send_ctrl_break(pid)
         }
         #[cfg(unix)]
         {
