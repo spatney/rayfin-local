@@ -1,0 +1,517 @@
+{
+  "coreVersion": "1.36.2",
+  "typescriptVersion": "5.9.3",
+  "dialect": "mssql",
+  "featureFlags": null,
+  "entities": [
+    {
+      "name": "AskMessage",
+      "tableName": "AskMessages",
+      "fields": [
+        {
+          "name": "id",
+          "originalName": "id",
+          "dbType": "UNIQUEIDENTIFIER",
+          "nullable": false,
+          "primaryKey": true,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "uuid",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "user_id",
+          "originalName": "user_id",
+          "dbType": "NVARCHAR(MAX)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "thread_id",
+          "originalName": "thread_id",
+          "dbType": "UNIQUEIDENTIFIER",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "uuid",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "thread",
+          "originalName": "thread",
+          "dbType": "RELATIONSHIP_SINGLE",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "foreignKey": {
+            "referencedEntity": "AskThread",
+            "referencedField": "id"
+          },
+          "isRelationship": true,
+          "relationshipType": "many-to-one",
+          "generatedForeignKeyColumn": "thread_id",
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "relationship": {
+              "type": "one",
+              "target": "AskThread"
+            }
+          }
+        },
+        {
+          "name": "role",
+          "originalName": "role",
+          "dbType": "NVARCHAR(9)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "checkConstraint": "[role] IN ('user', 'assistant')",
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "enum": [
+              "user",
+              "assistant"
+            ],
+            "isOptional": false,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "content",
+          "originalName": "content",
+          "dbType": "NVARCHAR(MAX)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "steps",
+          "originalName": "steps",
+          "dbType": "NVARCHAR(MAX)",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": true,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "citedIds",
+          "originalName": "citedIds",
+          "dbType": "NVARCHAR(MAX)",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": true,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "createdAt",
+          "originalName": "createdAt",
+          "dbType": "DATETIME2",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "date",
+            "jsType": "Date",
+            "isSystemType": false
+          }
+        }
+      ],
+      "permissions": {
+        "authenticated": [
+          {
+            "action": "*",
+            "policy": {
+              "database": "@claims.sub eq @item.user_id"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "AskThread",
+      "tableName": "AskThreads",
+      "fields": [
+        {
+          "name": "id",
+          "originalName": "id",
+          "dbType": "UNIQUEIDENTIFIER",
+          "nullable": false,
+          "primaryKey": true,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "uuid",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "user_id",
+          "originalName": "user_id",
+          "dbType": "NVARCHAR(MAX)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "title",
+          "originalName": "title",
+          "dbType": "NVARCHAR(200)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "checkConstraint": "LEN([title]) >= 1",
+          "checkConstraintNameSuffix": "_minlen",
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "min": 1,
+            "max": 200,
+            "isOptional": false,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "responseId",
+          "originalName": "responseId",
+          "dbType": "NVARCHAR(MAX)",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": true,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "createdAt",
+          "originalName": "createdAt",
+          "dbType": "DATETIME2",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "date",
+            "jsType": "Date",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "updatedAt",
+          "originalName": "updatedAt",
+          "dbType": "DATETIME2",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "date",
+            "jsType": "Date",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "messages",
+          "originalName": "messages",
+          "dbType": "RELATIONSHIP_ARRAY",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "foreignKey": {
+            "referencedEntity": "AskMessage",
+            "referencedField": "id"
+          },
+          "isRelationship": true,
+          "relationshipType": "one-to-many",
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "relationship": {
+              "type": "many",
+              "target": "AskMessage"
+            }
+          }
+        }
+      ],
+      "permissions": {
+        "authenticated": [
+          {
+            "action": "*",
+            "policy": {
+              "database": "@claims.sub eq @item.user_id"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "config": {
+    "$schema": "https://github.com/Azure/data-api-builder/releases/download/v1.5.56/dab.draft.schema.json",
+    "entities": {
+      "AskMessage": {
+        "source": "AskMessages",
+        "permissions": [
+          {
+            "role": "authenticated",
+            "actions": [
+              {
+                "action": "*",
+                "policy": {
+                  "database": "@claims.sub eq @item.user_id"
+                }
+              }
+            ]
+          }
+        ],
+        "x-schema": {
+          "fields": {
+            "id": {
+              "dbType": "UNIQUEIDENTIFIER",
+              "nullable": false
+            },
+            "user_id": {
+              "dbType": "NVARCHAR(MAX)",
+              "nullable": false
+            },
+            "thread_id": {
+              "dbType": "UNIQUEIDENTIFIER",
+              "nullable": false
+            },
+            "role": {
+              "dbType": "NVARCHAR(9)",
+              "nullable": false
+            },
+            "content": {
+              "dbType": "NVARCHAR(MAX)",
+              "nullable": false
+            },
+            "steps": {
+              "dbType": "NVARCHAR(MAX)",
+              "nullable": true
+            },
+            "citedIds": {
+              "dbType": "NVARCHAR(MAX)",
+              "nullable": true
+            },
+            "createdAt": {
+              "dbType": "DATETIME2",
+              "nullable": false
+            }
+          },
+          "constraints": {
+            "primaryKey": {
+              "name": "PK_AskMessages",
+              "columns": [
+                "id"
+              ]
+            },
+            "foreignKeys": [
+              {
+                "name": "FK_AskMessages_thread_id",
+                "columns": [
+                  "thread_id"
+                ],
+                "referencedTable": "AskThreads",
+                "referencedColumns": [
+                  "id"
+                ]
+              }
+            ],
+            "checkConstraints": [
+              {
+                "name": "CK_AskMessages_role",
+                "expression": "[role] IN ('user', 'assistant')"
+              }
+            ]
+          }
+        },
+        "relationships": {
+          "thread": {
+            "cardinality": "one",
+            "target.entity": "AskThread",
+            "source.fields": [
+              "thread_id"
+            ],
+            "target.fields": [
+              "id"
+            ]
+          }
+        }
+      },
+      "AskThread": {
+        "source": "AskThreads",
+        "permissions": [
+          {
+            "role": "authenticated",
+            "actions": [
+              {
+                "action": "*",
+                "policy": {
+                  "database": "@claims.sub eq @item.user_id"
+                }
+              }
+            ]
+          }
+        ],
+        "x-schema": {
+          "fields": {
+            "id": {
+              "dbType": "UNIQUEIDENTIFIER",
+              "nullable": false
+            },
+            "user_id": {
+              "dbType": "NVARCHAR(MAX)",
+              "nullable": false
+            },
+            "title": {
+              "dbType": "NVARCHAR(200)",
+              "nullable": false
+            },
+            "responseId": {
+              "dbType": "NVARCHAR(MAX)",
+              "nullable": true
+            },
+            "createdAt": {
+              "dbType": "DATETIME2",
+              "nullable": false
+            },
+            "updatedAt": {
+              "dbType": "DATETIME2",
+              "nullable": false
+            }
+          },
+          "constraints": {
+            "primaryKey": {
+              "name": "PK_AskThreads",
+              "columns": [
+                "id"
+              ]
+            },
+            "checkConstraints": [
+              {
+                "name": "CK_AskThreads_title_minlen",
+                "expression": "LEN([title]) >= 1"
+              }
+            ]
+          }
+        },
+        "relationships": {
+          "messages": {
+            "cardinality": "many",
+            "target.entity": "AskMessage",
+            "source.fields": [
+              "id"
+            ],
+            "target.fields": [
+              "thread_id"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "policies": [
+    {
+      "entity": "AskMessage",
+      "role": "authenticated",
+      "index": 0,
+      "action": "*",
+      "text": "@claims.sub eq @item.user_id",
+      "check": {
+        "op": "eq",
+        "lhs": {
+          "claim": "sub"
+        },
+        "rhs": {
+          "field": "user_id"
+        }
+      }
+    },
+    {
+      "entity": "AskThread",
+      "role": "authenticated",
+      "index": 0,
+      "action": "*",
+      "text": "@claims.sub eq @item.user_id",
+      "check": {
+        "op": "eq",
+        "lhs": {
+          "claim": "sub"
+        },
+        "rhs": {
+          "field": "user_id"
+        }
+      }
+    }
+  ],
+  "storage": null,
+  "sources": {
+    "data": [
+      "rayfin/data/AskMessage.ts",
+      "rayfin/data/AskThread.ts",
+      "rayfin/data/schema.ts"
+    ],
+    "storage": [],
+    "inputs": [
+      "rayfin/connectors/missioncontroltelemetry/schema.ts",
+      "rayfin/data/AskMessage.ts",
+      "rayfin/data/AskThread.ts",
+      "rayfin/data/schema.ts"
+    ]
+  },
+  "diagnostics": []
+}

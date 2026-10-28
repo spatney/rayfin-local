@@ -1,0 +1,2355 @@
+{
+  "coreVersion": "1.36.2",
+  "typescriptVersion": "5.9.3",
+  "dialect": "mssql",
+  "featureFlags": null,
+  "entities": [
+    {
+      "name": "Category",
+      "tableName": "Categories",
+      "fields": [
+        {
+          "name": "id",
+          "originalName": "id",
+          "dbType": "UNIQUEIDENTIFIER",
+          "nullable": false,
+          "primaryKey": true,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "uuid",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "name",
+          "originalName": "name",
+          "dbType": "NVARCHAR(100)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": true,
+          "checkConstraint": "LEN([name]) >= 2",
+          "checkConstraintNameSuffix": "_minlen",
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "min": 2,
+            "max": 100,
+            "isUnique": true,
+            "isOptional": false,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "label",
+          "originalName": "label",
+          "dbType": "NVARCHAR(200)",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "max": 200,
+            "isOptional": true,
+            "columnName": "display_label",
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          },
+          "columnName": "display_label"
+        },
+        {
+          "name": "sortOrder",
+          "originalName": "sortOrder",
+          "dbType": "INT",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "default": 0,
+            "min": 0,
+            "max": 1000,
+            "isOptional": false,
+            "format": "int",
+            "jsType": "number",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "parent",
+          "originalName": "parent",
+          "dbType": "RELATIONSHIP_SINGLE",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "foreignKey": {
+            "referencedEntity": "Category",
+            "referencedField": "id"
+          },
+          "isRelationship": true,
+          "relationshipType": "many-to-one",
+          "generatedForeignKeyColumn": "parent_id",
+          "originalFieldMetadata": {
+            "isOptional": true,
+            "relationship": {
+              "type": "one",
+              "target": "Category"
+            }
+          }
+        },
+        {
+          "name": "todos",
+          "originalName": "todos",
+          "dbType": "RELATIONSHIP_ARRAY",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "foreignKey": {
+            "referencedEntity": "Todo",
+            "referencedField": "id"
+          },
+          "isRelationship": true,
+          "relationshipType": "one-to-many",
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "relationship": {
+              "type": "many",
+              "target": "Todo"
+            }
+          }
+        }
+      ],
+      "permissions": {
+        "anonymous": [
+          "read"
+        ],
+        "authenticated": [
+          "create",
+          "read",
+          "update",
+          "delete"
+        ]
+      }
+    },
+    {
+      "name": "Comment",
+      "tableName": "Comments",
+      "fields": [
+        {
+          "name": "id",
+          "originalName": "id",
+          "dbType": "UNIQUEIDENTIFIER",
+          "nullable": false,
+          "primaryKey": true,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "uuid",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "author_id",
+          "originalName": "author_id",
+          "dbType": "NVARCHAR(MAX)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "authorEmail",
+          "originalName": "authorEmail",
+          "dbType": "NVARCHAR(320)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "checkConstraint": "[authorEmail] LIKE '_%@_%._%' AND CHARINDEX(' ', [authorEmail]) = 0 AND LEN([authorEmail]) >= 6",
+          "checkConstraintNameSuffix": "_email",
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "max": 320,
+            "min": 6,
+            "isOptional": false,
+            "regex": {
+              "$regex": "^([-!#-'*+/\\-0-9=?A-Z^-~]+(\\.[-!#-'*+/\\-0-9=?A-Z^-~]+)*|\"([]!#-[^-~ \\t]|(\\\\[\\t -~]))+\")@[0-9A-Za-z]([0-9A-Za-z-]{0,61}[0-9A-Za-z])?(\\.[0-9A-Za-z]([0-9A-Za-z-]{0,61}[0-9A-Za-z])?)*(\\.[0-9A-Za-z]{2,})$",
+              "flags": ""
+            },
+            "format": "email",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "body",
+          "originalName": "body",
+          "dbType": "NVARCHAR(2000)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "max": 2000,
+            "isOptional": false,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "createdAt",
+          "originalName": "createdAt",
+          "dbType": "DATETIME2",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "date",
+            "jsType": "Date",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "todo",
+          "originalName": "todo",
+          "dbType": "RELATIONSHIP_SINGLE",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "foreignKey": {
+            "referencedEntity": "Todo",
+            "referencedField": "id"
+          },
+          "isRelationship": true,
+          "relationshipType": "many-to-one",
+          "generatedForeignKeyColumn": "todo_id",
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "relationship": {
+              "type": "one",
+              "target": "Todo"
+            }
+          }
+        }
+      ],
+      "permissions": {
+        "anonymous": [
+          {
+            "action": "read",
+            "fields": {
+              "exclude": [
+                "authorEmail"
+              ],
+              "include": [
+                "*"
+              ]
+            }
+          }
+        ],
+        "authenticated": [
+          {
+            "action": "create",
+            "policy": {
+              "database": "(@claims.email eq @item.authorEmail) and ((@claims.sub eq @item.author_id) or (@claims.role eq 'authenticated'))"
+            }
+          },
+          {
+            "action": "update",
+            "policy": {
+              "database": "(@claims.email eq @item.authorEmail) and ((@claims.sub eq @item.author_id) or (@claims.role eq 'authenticated'))"
+            }
+          },
+          {
+            "action": "delete",
+            "policy": {
+              "database": "(@claims.email eq @item.authorEmail) and ((@claims.sub eq @item.author_id) or (@claims.role eq 'authenticated'))"
+            }
+          },
+          "read"
+        ]
+      }
+    },
+    {
+      "name": "Milestone",
+      "tableName": "Milestones",
+      "fields": [
+        {
+          "name": "id",
+          "originalName": "id",
+          "dbType": "UNIQUEIDENTIFIER",
+          "nullable": false,
+          "primaryKey": true,
+          "unique": false,
+          "isRelationship": false
+        },
+        {
+          "name": "title",
+          "originalName": "title",
+          "dbType": "NVARCHAR(120)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "max": 120,
+            "isOptional": false,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "due",
+          "originalName": "due",
+          "dbType": "DATETIME2",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": true,
+            "format": "date",
+            "jsType": "Date",
+            "isSystemType": false
+          }
+        }
+      ],
+      "permissions": {}
+    },
+    {
+      "name": "Person",
+      "tableName": "People",
+      "fields": [
+        {
+          "name": "id",
+          "originalName": "id",
+          "dbType": "UNIQUEIDENTIFIER",
+          "nullable": false,
+          "primaryKey": true,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "uuid",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "nickname",
+          "originalName": "nickname",
+          "dbType": "NVARCHAR(50)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "default": "n/a",
+            "max": 50,
+            "isOptional": false,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "level",
+          "originalName": "level",
+          "dbType": "INT",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "default": 1,
+            "isOptional": false,
+            "format": "int",
+            "jsType": "number",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "rate",
+          "originalName": "rate",
+          "dbType": "DECIMAL(18,2)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "default": 9.99,
+            "isOptional": false,
+            "format": "decimal",
+            "jsType": "number",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "active",
+          "originalName": "active",
+          "dbType": "BIT",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "default": true,
+            "isOptional": false,
+            "format": "boolean",
+            "jsType": "boolean",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "memberSince",
+          "originalName": "memberSince",
+          "dbType": "DATETIME2",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "default": "2024-01-01T00:00:00.000Z",
+            "isOptional": false,
+            "format": "date",
+            "jsType": "Date",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "account_id",
+          "originalName": "account_id",
+          "dbType": "UNIQUEIDENTIFIER",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": true,
+            "format": "uuid",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "account",
+          "originalName": "account",
+          "dbType": "RELATIONSHIP_SINGLE",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "foreignKey": {
+            "referencedEntity": "User",
+            "referencedField": "id"
+          },
+          "isRelationship": true,
+          "relationshipType": "many-to-one",
+          "generatedForeignKeyColumn": "account_id",
+          "originalFieldMetadata": {
+            "isOptional": true,
+            "relationship": {
+              "type": "one",
+              "target": "User"
+            }
+          }
+        }
+      ],
+      "permissions": {
+        "authenticated": [
+          {
+            "action": "*",
+            "policy": {
+              "database": "@claims.sub eq @item.account_id"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Project",
+      "tableName": "Projects",
+      "fields": [
+        {
+          "name": "id",
+          "originalName": "id",
+          "dbType": "UNIQUEIDENTIFIER",
+          "nullable": false,
+          "primaryKey": true,
+          "unique": false,
+          "isRelationship": false
+        },
+        {
+          "name": "owner_id",
+          "originalName": "owner_id",
+          "dbType": "NVARCHAR(MAX)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "name",
+          "originalName": "name",
+          "dbType": "NVARCHAR(120)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "max": 120,
+            "isOptional": false,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "budget",
+          "originalName": "budget",
+          "dbType": "DECIMAL(12,2)",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "precision": 12,
+            "scale": 2,
+            "isOptional": true,
+            "format": "decimal",
+            "jsType": "number",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "startsOn",
+          "originalName": "startsOn",
+          "dbType": "DATETIME2",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": true,
+            "format": "date",
+            "jsType": "Date",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "closedAt",
+          "originalName": "closedAt",
+          "dbType": "DATETIME2",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": true,
+            "format": "date",
+            "jsType": "Date",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "milestones",
+          "originalName": "milestones",
+          "dbType": "RELATIONSHIP_ARRAY",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "foreignKey": {
+            "referencedEntity": "Milestone",
+            "referencedField": "id"
+          },
+          "isRelationship": true,
+          "relationshipType": "one-to-many",
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "relationship": {
+              "type": "many",
+              "target": "Milestone"
+            }
+          }
+        }
+      ],
+      "permissions": {
+        "anonymous": [
+          {
+            "action": "read",
+            "policy": {
+              "database": "(@item.startsOn ne 2000-01-01T00:00:00.000Z) and (@item.budget ne 0.5)"
+            }
+          }
+        ],
+        "authenticated": [
+          {
+            "action": "*",
+            "policy": {
+              "database": "(@item.owner_id eq @claims.sub) or (@item.closedAt eq null)"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Todo",
+      "tableName": "Todos",
+      "fields": [
+        {
+          "name": "id",
+          "originalName": "id",
+          "dbType": "UNIQUEIDENTIFIER",
+          "nullable": false,
+          "primaryKey": true,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "uuid",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "user_id",
+          "originalName": "user_id",
+          "dbType": "NVARCHAR(MAX)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "title",
+          "originalName": "title",
+          "dbType": "NVARCHAR(200)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "checkConstraint": "LEN([title]) >= 1",
+          "checkConstraintNameSuffix": "_minlen",
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "min": 1,
+            "max": 200,
+            "isOptional": false,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "slug",
+          "originalName": "slug",
+          "dbType": "NVARCHAR(80)",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": true,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "max": 80,
+            "regex": {
+              "$regex": "^[a-z0-9-]+$",
+              "flags": "i"
+            },
+            "isUnique": true,
+            "isOptional": true,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "contactEmail",
+          "originalName": "contactEmail",
+          "dbType": "NVARCHAR(320)",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": true,
+          "checkConstraint": "[contactEmail] LIKE '_%@_%._%' AND CHARINDEX(' ', [contactEmail]) = 0",
+          "checkConstraintNameSuffix": "_email",
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "max": 320,
+            "isUnique": true,
+            "isOptional": true,
+            "regex": {
+              "$regex": "^([-!#-'*+/\\-0-9=?A-Z^-~]+(\\.[-!#-'*+/\\-0-9=?A-Z^-~]+)*|\"([]!#-[^-~ \\t]|(\\\\[\\t -~]))+\")@[0-9A-Za-z]([0-9A-Za-z-]{0,61}[0-9A-Za-z])?(\\.[0-9A-Za-z]([0-9A-Za-z-]{0,61}[0-9A-Za-z])?)*(\\.[0-9A-Za-z]{2,})$",
+              "flags": ""
+            },
+            "format": "email",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "status",
+          "originalName": "status",
+          "dbType": "NVARCHAR(12)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "checkConstraint": "[status] IN ('its new', 'doing', 'done', 'its archived')",
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "default": "it's new",
+            "enum": [
+              "it's new",
+              "doing",
+              "done",
+              "it's archived"
+            ],
+            "isOptional": false,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "priority",
+          "originalName": "priority",
+          "dbType": "NVARCHAR(4)",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "checkConstraint": "[priority] IN ('low', 'high')",
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "enum": [
+              "low",
+              "high"
+            ],
+            "isOptional": true,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "estimate",
+          "originalName": "estimate",
+          "dbType": "INT",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "min": 0,
+            "isOptional": true,
+            "format": "int",
+            "jsType": "number",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "cost",
+          "originalName": "cost",
+          "dbType": "DECIMAL(18,2)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "decimal",
+            "jsType": "number",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "weight",
+          "originalName": "weight",
+          "dbType": "DECIMAL(10,4)",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "precision": 10,
+            "scale": 4,
+            "min": 0,
+            "max": 99999,
+            "isOptional": true,
+            "format": "decimal",
+            "jsType": "number",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "isPublic",
+          "originalName": "isPublic",
+          "dbType": "BIT",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "default": false,
+            "isOptional": false,
+            "format": "boolean",
+            "jsType": "boolean",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "done",
+          "originalName": "done",
+          "dbType": "BIT",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": true,
+            "format": "boolean",
+            "jsType": "boolean",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "createdAt",
+          "originalName": "createdAt",
+          "dbType": "DATETIME2",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "date",
+            "jsType": "Date",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "dueDate",
+          "originalName": "dueDate",
+          "dbType": "DATETIME2",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": true,
+            "format": "date",
+            "jsType": "Date",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "externalRef",
+          "originalName": "externalRef",
+          "dbType": "UNIQUEIDENTIFIER",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": true,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isUnique": true,
+            "isOptional": true,
+            "format": "uuid",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "secretNote",
+          "originalName": "secretNote",
+          "dbType": "NVARCHAR(MAX)",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": true,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "category_id",
+          "originalName": "category_id",
+          "dbType": "UNIQUEIDENTIFIER",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": true,
+            "format": "uuid",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "category",
+          "originalName": "category",
+          "dbType": "RELATIONSHIP_SINGLE",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "foreignKey": {
+            "referencedEntity": "Category",
+            "referencedField": "id"
+          },
+          "isRelationship": true,
+          "relationshipType": "many-to-one",
+          "generatedForeignKeyColumn": "category_id",
+          "originalFieldMetadata": {
+            "isOptional": true,
+            "relationship": {
+              "type": "one",
+              "target": "Category"
+            }
+          }
+        },
+        {
+          "name": "comments",
+          "originalName": "comments",
+          "dbType": "RELATIONSHIP_ARRAY",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "foreignKey": {
+            "referencedEntity": "Comment",
+            "referencedField": "id"
+          },
+          "isRelationship": true,
+          "relationshipType": "one-to-many",
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "relationship": {
+              "type": "many",
+              "target": "Comment"
+            }
+          }
+        }
+      ],
+      "permissions": {
+        "anonymous": [
+          {
+            "action": "read",
+            "policy": {
+              "database": "@item.isPublic eq true"
+            },
+            "fields": {
+              "include": [
+                "category_id",
+                "dueDate",
+                "id",
+                "status",
+                "title"
+              ]
+            }
+          }
+        ],
+        "authenticated": [
+          {
+            "action": "update",
+            "policy": {
+              "database": "(@item.user_id eq @claims.sub) and (((@item.status ne 'it''s archived') or (@item.estimate eq null)) or (@item.estimate ne 0))"
+            },
+            "fields": {
+              "include": [
+                "done",
+                "dueDate",
+                "estimate",
+                "priority",
+                "secretNote",
+                "status",
+                "title",
+                "weight"
+              ],
+              "exclude": [
+                "secretNote"
+              ]
+            }
+          },
+          {
+            "action": "delete",
+            "policy": {
+              "database": "(@item.user_id eq @claims.sub) and (((@item.status ne 'it''s archived') or (@item.estimate eq null)) or (@item.estimate ne 0))"
+            },
+            "fields": {
+              "include": [
+                "done",
+                "dueDate",
+                "estimate",
+                "priority",
+                "secretNote",
+                "status",
+                "title",
+                "weight"
+              ],
+              "exclude": [
+                "secretNote"
+              ]
+            }
+          },
+          {
+            "action": "read",
+            "policy": {
+              "database": "(@claims.sub eq @item.user_id) or (@item.isPublic eq true)"
+            },
+            "fields": {
+              "exclude": [
+                "secretNote"
+              ],
+              "include": [
+                "*"
+              ]
+            }
+          },
+          {
+            "action": "create",
+            "policy": {
+              "database": "@claims.sub eq @item.user_id"
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "config": {
+    "$schema": "https://github.com/Azure/data-api-builder/releases/download/v1.5.56/dab.draft.schema.json",
+    "entities": {
+      "Category": {
+        "source": "Categories",
+        "permissions": [
+          {
+            "role": "anonymous",
+            "actions": [
+              "read"
+            ]
+          },
+          {
+            "role": "authenticated",
+            "actions": [
+              "create",
+              "read",
+              "update",
+              "delete"
+            ]
+          }
+        ],
+        "x-schema": {
+          "fields": {
+            "id": {
+              "dbType": "UNIQUEIDENTIFIER",
+              "nullable": false
+            },
+            "name": {
+              "dbType": "NVARCHAR(100)",
+              "nullable": false
+            },
+            "display_label": {
+              "dbType": "NVARCHAR(200)",
+              "nullable": true
+            },
+            "sortOrder": {
+              "dbType": "INT",
+              "nullable": false,
+              "defaultValue": 0
+            },
+            "parent_id": {
+              "dbType": "UNIQUEIDENTIFIER",
+              "nullable": true
+            }
+          },
+          "constraints": {
+            "primaryKey": {
+              "name": "PK_Categories",
+              "columns": [
+                "id"
+              ]
+            },
+            "foreignKeys": [
+              {
+                "name": "FK_Categories_parent_id",
+                "columns": [
+                  "parent_id"
+                ],
+                "referencedTable": "Categories",
+                "referencedColumns": [
+                  "id"
+                ]
+              }
+            ],
+            "uniqueConstraints": [
+              {
+                "name": "UQ_Categories_name",
+                "columns": [
+                  "name"
+                ]
+              }
+            ],
+            "checkConstraints": [
+              {
+                "name": "CK_Categories_name_minlen",
+                "expression": "LEN([name]) >= 2"
+              }
+            ]
+          }
+        },
+        "relationships": {
+          "parent": {
+            "cardinality": "one",
+            "target.entity": "Category",
+            "source.fields": [
+              "parent_id"
+            ],
+            "target.fields": [
+              "id"
+            ]
+          },
+          "todos": {
+            "cardinality": "many",
+            "target.entity": "Todo",
+            "source.fields": [
+              "id"
+            ],
+            "target.fields": [
+              "category_id"
+            ]
+          }
+        },
+        "mappings": {
+          "display_label": "label"
+        }
+      },
+      "Comment": {
+        "source": "Comments",
+        "permissions": [
+          {
+            "role": "anonymous",
+            "actions": [
+              {
+                "action": "read",
+                "fields": {
+                  "exclude": [
+                    "authorEmail"
+                  ],
+                  "include": [
+                    "*"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "role": "authenticated",
+            "actions": [
+              {
+                "action": "create",
+                "policy": {
+                  "database": "(@claims.email eq @item.authorEmail) and ((@claims.sub eq @item.author_id) or (@claims.role eq 'authenticated'))"
+                }
+              },
+              {
+                "action": "update",
+                "policy": {
+                  "database": "(@claims.email eq @item.authorEmail) and ((@claims.sub eq @item.author_id) or (@claims.role eq 'authenticated'))"
+                }
+              },
+              {
+                "action": "delete",
+                "policy": {
+                  "database": "(@claims.email eq @item.authorEmail) and ((@claims.sub eq @item.author_id) or (@claims.role eq 'authenticated'))"
+                }
+              },
+              "read"
+            ]
+          }
+        ],
+        "x-schema": {
+          "fields": {
+            "id": {
+              "dbType": "UNIQUEIDENTIFIER",
+              "nullable": false
+            },
+            "author_id": {
+              "dbType": "NVARCHAR(MAX)",
+              "nullable": false
+            },
+            "authorEmail": {
+              "dbType": "NVARCHAR(320)",
+              "nullable": false
+            },
+            "body": {
+              "dbType": "NVARCHAR(2000)",
+              "nullable": false
+            },
+            "createdAt": {
+              "dbType": "DATETIME2",
+              "nullable": false
+            },
+            "todo_id": {
+              "dbType": "UNIQUEIDENTIFIER",
+              "nullable": false
+            }
+          },
+          "constraints": {
+            "primaryKey": {
+              "name": "PK_Comments",
+              "columns": [
+                "id"
+              ]
+            },
+            "foreignKeys": [
+              {
+                "name": "FK_Comments_todo_id",
+                "columns": [
+                  "todo_id"
+                ],
+                "referencedTable": "Todos",
+                "referencedColumns": [
+                  "id"
+                ]
+              }
+            ],
+            "checkConstraints": [
+              {
+                "name": "CK_Comments_authorEmail_email",
+                "expression": "[authorEmail] LIKE '_%@_%._%' AND CHARINDEX(' ', [authorEmail]) = 0 AND LEN([authorEmail]) >= 6"
+              }
+            ]
+          }
+        },
+        "relationships": {
+          "todo": {
+            "cardinality": "one",
+            "target.entity": "Todo",
+            "source.fields": [
+              "todo_id"
+            ],
+            "target.fields": [
+              "id"
+            ]
+          }
+        }
+      },
+      "Milestone": {
+        "source": "Milestones",
+        "permissions": [
+          {
+            "role": "authenticated",
+            "actions": [
+              "*"
+            ]
+          }
+        ],
+        "x-schema": {
+          "fields": {
+            "id": {
+              "dbType": "UNIQUEIDENTIFIER",
+              "nullable": false
+            },
+            "title": {
+              "dbType": "NVARCHAR(120)",
+              "nullable": false
+            },
+            "due": {
+              "dbType": "DATETIME2",
+              "nullable": true
+            },
+            "Project_id": {
+              "dbType": "UNIQUEIDENTIFIER",
+              "nullable": false
+            }
+          },
+          "constraints": {
+            "primaryKey": {
+              "name": "PK_Milestones",
+              "columns": [
+                "id"
+              ]
+            },
+            "foreignKeys": [
+              {
+                "name": "FK_Milestones_Project_id",
+                "columns": [
+                  "Project_id"
+                ],
+                "referencedTable": "Projects",
+                "referencedColumns": [
+                  "id"
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "Person": {
+        "source": "People",
+        "permissions": [
+          {
+            "role": "authenticated",
+            "actions": [
+              {
+                "action": "*",
+                "policy": {
+                  "database": "@claims.sub eq @item.account_id"
+                }
+              }
+            ]
+          }
+        ],
+        "x-schema": {
+          "fields": {
+            "id": {
+              "dbType": "UNIQUEIDENTIFIER",
+              "nullable": false
+            },
+            "nickname": {
+              "dbType": "NVARCHAR(50)",
+              "nullable": false,
+              "defaultValue": "n/a"
+            },
+            "level": {
+              "dbType": "INT",
+              "nullable": false,
+              "defaultValue": 1
+            },
+            "rate": {
+              "dbType": "DECIMAL(18,2)",
+              "nullable": false,
+              "defaultValue": 9.99
+            },
+            "active": {
+              "dbType": "BIT",
+              "nullable": false,
+              "defaultValue": true
+            },
+            "memberSince": {
+              "dbType": "DATETIME2",
+              "nullable": false,
+              "defaultValue": "2024-01-01T00:00:00.000Z"
+            },
+            "account_id": {
+              "dbType": "UNIQUEIDENTIFIER",
+              "nullable": true
+            }
+          },
+          "constraints": {
+            "primaryKey": {
+              "name": "PK_People",
+              "columns": [
+                "id"
+              ]
+            },
+            "foreignKeys": [
+              {
+                "name": "FK_People_account_id",
+                "columns": [
+                  "account_id"
+                ],
+                "referencedTable": "Users",
+                "referencedColumns": [
+                  "Id"
+                ]
+              }
+            ]
+          }
+        },
+        "relationships": {
+          "account": {
+            "cardinality": "one",
+            "target.entity": "User",
+            "source.fields": [
+              "account_id"
+            ],
+            "target.fields": [
+              "Id"
+            ]
+          }
+        }
+      },
+      "Project": {
+        "source": "Projects",
+        "permissions": [
+          {
+            "role": "anonymous",
+            "actions": [
+              {
+                "action": "read",
+                "policy": {
+                  "database": "(@item.startsOn ne 2000-01-01T00:00:00.000Z) and (@item.budget ne 0.5)"
+                }
+              }
+            ]
+          },
+          {
+            "role": "authenticated",
+            "actions": [
+              {
+                "action": "*",
+                "policy": {
+                  "database": "(@item.owner_id eq @claims.sub) or (@item.closedAt eq null)"
+                }
+              }
+            ]
+          }
+        ],
+        "x-schema": {
+          "fields": {
+            "id": {
+              "dbType": "UNIQUEIDENTIFIER",
+              "nullable": false
+            },
+            "owner_id": {
+              "dbType": "NVARCHAR(MAX)",
+              "nullable": false
+            },
+            "name": {
+              "dbType": "NVARCHAR(120)",
+              "nullable": false
+            },
+            "budget": {
+              "dbType": "DECIMAL(12,2)",
+              "nullable": true
+            },
+            "startsOn": {
+              "dbType": "DATETIME2",
+              "nullable": true
+            },
+            "closedAt": {
+              "dbType": "DATETIME2",
+              "nullable": true
+            }
+          },
+          "constraints": {
+            "primaryKey": {
+              "name": "PK_Projects",
+              "columns": [
+                "id"
+              ]
+            }
+          }
+        },
+        "relationships": {
+          "milestones": {
+            "cardinality": "many",
+            "target.entity": "Milestone",
+            "source.fields": [
+              "id"
+            ],
+            "target.fields": [
+              "Project_id"
+            ]
+          }
+        }
+      },
+      "Todo": {
+        "source": "Todos",
+        "permissions": [
+          {
+            "role": "anonymous",
+            "actions": [
+              {
+                "action": "read",
+                "fields": {
+                  "include": [
+                    "category_id",
+                    "dueDate",
+                    "id",
+                    "status",
+                    "title"
+                  ]
+                },
+                "policy": {
+                  "database": "@item.isPublic eq true"
+                }
+              }
+            ]
+          },
+          {
+            "role": "authenticated",
+            "actions": [
+              {
+                "action": "update",
+                "fields": {
+                  "include": [
+                    "done",
+                    "dueDate",
+                    "estimate",
+                    "priority",
+                    "secretNote",
+                    "status",
+                    "title",
+                    "weight"
+                  ],
+                  "exclude": [
+                    "secretNote"
+                  ]
+                },
+                "policy": {
+                  "database": "(@item.user_id eq @claims.sub) and (((@item.status ne 'it''s archived') or (@item.estimate eq null)) or (@item.estimate ne 0))"
+                }
+              },
+              {
+                "action": "delete",
+                "fields": {
+                  "include": [
+                    "done",
+                    "dueDate",
+                    "estimate",
+                    "priority",
+                    "secretNote",
+                    "status",
+                    "title",
+                    "weight"
+                  ],
+                  "exclude": [
+                    "secretNote"
+                  ]
+                },
+                "policy": {
+                  "database": "(@item.user_id eq @claims.sub) and (((@item.status ne 'it''s archived') or (@item.estimate eq null)) or (@item.estimate ne 0))"
+                }
+              },
+              {
+                "action": "read",
+                "fields": {
+                  "exclude": [
+                    "secretNote"
+                  ],
+                  "include": [
+                    "*"
+                  ]
+                },
+                "policy": {
+                  "database": "(@claims.sub eq @item.user_id) or (@item.isPublic eq true)"
+                }
+              },
+              {
+                "action": "create",
+                "policy": {
+                  "database": "@claims.sub eq @item.user_id"
+                }
+              }
+            ]
+          }
+        ],
+        "x-schema": {
+          "fields": {
+            "id": {
+              "dbType": "UNIQUEIDENTIFIER",
+              "nullable": false
+            },
+            "user_id": {
+              "dbType": "NVARCHAR(MAX)",
+              "nullable": false
+            },
+            "title": {
+              "dbType": "NVARCHAR(200)",
+              "nullable": false
+            },
+            "slug": {
+              "dbType": "NVARCHAR(80)",
+              "nullable": true
+            },
+            "contactEmail": {
+              "dbType": "NVARCHAR(320)",
+              "nullable": true
+            },
+            "status": {
+              "dbType": "NVARCHAR(12)",
+              "nullable": false,
+              "defaultValue": "it's new"
+            },
+            "priority": {
+              "dbType": "NVARCHAR(4)",
+              "nullable": true
+            },
+            "estimate": {
+              "dbType": "INT",
+              "nullable": true
+            },
+            "cost": {
+              "dbType": "DECIMAL(18,2)",
+              "nullable": false
+            },
+            "weight": {
+              "dbType": "DECIMAL(10,4)",
+              "nullable": true
+            },
+            "isPublic": {
+              "dbType": "BIT",
+              "nullable": false,
+              "defaultValue": false
+            },
+            "done": {
+              "dbType": "BIT",
+              "nullable": true
+            },
+            "createdAt": {
+              "dbType": "DATETIME2",
+              "nullable": false
+            },
+            "dueDate": {
+              "dbType": "DATETIME2",
+              "nullable": true
+            },
+            "externalRef": {
+              "dbType": "UNIQUEIDENTIFIER",
+              "nullable": true
+            },
+            "secretNote": {
+              "dbType": "NVARCHAR(MAX)",
+              "nullable": true
+            },
+            "category_id": {
+              "dbType": "UNIQUEIDENTIFIER",
+              "nullable": true
+            }
+          },
+          "constraints": {
+            "primaryKey": {
+              "name": "PK_Todos",
+              "columns": [
+                "id"
+              ]
+            },
+            "foreignKeys": [
+              {
+                "name": "FK_Todos_category_id",
+                "columns": [
+                  "category_id"
+                ],
+                "referencedTable": "Categories",
+                "referencedColumns": [
+                  "id"
+                ]
+              }
+            ],
+            "uniqueConstraints": [
+              {
+                "name": "UQ_Todos_slug",
+                "columns": [
+                  "slug"
+                ]
+              },
+              {
+                "name": "UQ_Todos_contactEmail",
+                "columns": [
+                  "contactEmail"
+                ]
+              },
+              {
+                "name": "UQ_Todos_externalRef",
+                "columns": [
+                  "externalRef"
+                ]
+              }
+            ],
+            "checkConstraints": [
+              {
+                "name": "CK_Todos_title_minlen",
+                "expression": "LEN([title]) >= 1"
+              },
+              {
+                "name": "CK_Todos_contactEmail_email",
+                "expression": "[contactEmail] LIKE '_%@_%._%' AND CHARINDEX(' ', [contactEmail]) = 0"
+              },
+              {
+                "name": "CK_Todos_status",
+                "expression": "[status] IN ('its new', 'doing', 'done', 'its archived')"
+              },
+              {
+                "name": "CK_Todos_priority",
+                "expression": "[priority] IN ('low', 'high')"
+              }
+            ]
+          }
+        },
+        "relationships": {
+          "category": {
+            "cardinality": "one",
+            "target.entity": "Category",
+            "source.fields": [
+              "category_id"
+            ],
+            "target.fields": [
+              "id"
+            ]
+          },
+          "comments": {
+            "cardinality": "many",
+            "target.entity": "Comment",
+            "source.fields": [
+              "id"
+            ],
+            "target.fields": [
+              "todo_id"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "policies": [
+    {
+      "entity": "Comment",
+      "role": "authenticated",
+      "index": 0,
+      "action": "create",
+      "text": "(@claims.email eq @item.authorEmail) and ((@claims.sub eq @item.author_id) or (@claims.role eq 'authenticated'))",
+      "check": {
+        "op": "and",
+        "args": [
+          {
+            "op": "eq",
+            "lhs": {
+              "claim": "email"
+            },
+            "rhs": {
+              "field": "authorEmail"
+            }
+          },
+          {
+            "op": "or",
+            "args": [
+              {
+                "op": "eq",
+                "lhs": {
+                  "claim": "sub"
+                },
+                "rhs": {
+                  "field": "author_id"
+                }
+              },
+              {
+                "op": "eq",
+                "lhs": {
+                  "claim": "role"
+                },
+                "rhs": "authenticated"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "entity": "Comment",
+      "role": "authenticated",
+      "index": 1,
+      "action": "update",
+      "text": "(@claims.email eq @item.authorEmail) and ((@claims.sub eq @item.author_id) or (@claims.role eq 'authenticated'))",
+      "check": {
+        "op": "and",
+        "args": [
+          {
+            "op": "eq",
+            "lhs": {
+              "claim": "email"
+            },
+            "rhs": {
+              "field": "authorEmail"
+            }
+          },
+          {
+            "op": "or",
+            "args": [
+              {
+                "op": "eq",
+                "lhs": {
+                  "claim": "sub"
+                },
+                "rhs": {
+                  "field": "author_id"
+                }
+              },
+              {
+                "op": "eq",
+                "lhs": {
+                  "claim": "role"
+                },
+                "rhs": "authenticated"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "entity": "Comment",
+      "role": "authenticated",
+      "index": 2,
+      "action": "delete",
+      "text": "(@claims.email eq @item.authorEmail) and ((@claims.sub eq @item.author_id) or (@claims.role eq 'authenticated'))",
+      "check": {
+        "op": "and",
+        "args": [
+          {
+            "op": "eq",
+            "lhs": {
+              "claim": "email"
+            },
+            "rhs": {
+              "field": "authorEmail"
+            }
+          },
+          {
+            "op": "or",
+            "args": [
+              {
+                "op": "eq",
+                "lhs": {
+                  "claim": "sub"
+                },
+                "rhs": {
+                  "field": "author_id"
+                }
+              },
+              {
+                "op": "eq",
+                "lhs": {
+                  "claim": "role"
+                },
+                "rhs": "authenticated"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "entity": "Person",
+      "role": "authenticated",
+      "index": 0,
+      "action": "*",
+      "text": "@claims.sub eq @item.account_id",
+      "check": {
+        "op": "eq",
+        "lhs": {
+          "claim": "sub"
+        },
+        "rhs": {
+          "field": "account_id"
+        }
+      }
+    },
+    {
+      "entity": "Project",
+      "role": "anonymous",
+      "index": 0,
+      "action": "read",
+      "text": "(@item.startsOn ne 2000-01-01T00:00:00.000Z) and (@item.budget ne 0.5)",
+      "check": {
+        "op": "and",
+        "args": [
+          {
+            "op": "neq",
+            "lhs": {
+              "field": "startsOn"
+            },
+            "rhs": "2000-01-01T00:00:00.000Z"
+          },
+          {
+            "op": "neq",
+            "lhs": {
+              "field": "budget"
+            },
+            "rhs": 0.5
+          }
+        ]
+      }
+    },
+    {
+      "entity": "Project",
+      "role": "authenticated",
+      "index": 0,
+      "action": "*",
+      "text": "(@item.owner_id eq @claims.sub) or (@item.closedAt eq null)",
+      "check": {
+        "op": "or",
+        "args": [
+          {
+            "op": "eq",
+            "lhs": {
+              "field": "owner_id"
+            },
+            "rhs": {
+              "claim": "sub"
+            }
+          },
+          {
+            "op": "eq",
+            "lhs": {
+              "field": "closedAt"
+            },
+            "rhs": null
+          }
+        ]
+      }
+    },
+    {
+      "entity": "Todo",
+      "role": "anonymous",
+      "index": 0,
+      "action": "read",
+      "text": "@item.isPublic eq true",
+      "check": {
+        "op": "eq",
+        "lhs": {
+          "field": "isPublic"
+        },
+        "rhs": true
+      }
+    },
+    {
+      "entity": "Todo",
+      "role": "authenticated",
+      "index": 0,
+      "action": "update",
+      "text": "(@item.user_id eq @claims.sub) and (((@item.status ne 'it''s archived') or (@item.estimate eq null)) or (@item.estimate ne 0))",
+      "check": {
+        "op": "and",
+        "args": [
+          {
+            "op": "eq",
+            "lhs": {
+              "field": "user_id"
+            },
+            "rhs": {
+              "claim": "sub"
+            }
+          },
+          {
+            "op": "or",
+            "args": [
+              {
+                "op": "or",
+                "args": [
+                  {
+                    "op": "neq",
+                    "lhs": {
+                      "field": "status"
+                    },
+                    "rhs": "it's archived"
+                  },
+                  {
+                    "op": "eq",
+                    "lhs": {
+                      "field": "estimate"
+                    },
+                    "rhs": null
+                  }
+                ]
+              },
+              {
+                "op": "neq",
+                "lhs": {
+                  "field": "estimate"
+                },
+                "rhs": 0
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "entity": "Todo",
+      "role": "authenticated",
+      "index": 1,
+      "action": "delete",
+      "text": "(@item.user_id eq @claims.sub) and (((@item.status ne 'it''s archived') or (@item.estimate eq null)) or (@item.estimate ne 0))",
+      "check": {
+        "op": "and",
+        "args": [
+          {
+            "op": "eq",
+            "lhs": {
+              "field": "user_id"
+            },
+            "rhs": {
+              "claim": "sub"
+            }
+          },
+          {
+            "op": "or",
+            "args": [
+              {
+                "op": "or",
+                "args": [
+                  {
+                    "op": "neq",
+                    "lhs": {
+                      "field": "status"
+                    },
+                    "rhs": "it's archived"
+                  },
+                  {
+                    "op": "eq",
+                    "lhs": {
+                      "field": "estimate"
+                    },
+                    "rhs": null
+                  }
+                ]
+              },
+              {
+                "op": "neq",
+                "lhs": {
+                  "field": "estimate"
+                },
+                "rhs": 0
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "entity": "Todo",
+      "role": "authenticated",
+      "index": 2,
+      "action": "read",
+      "text": "(@claims.sub eq @item.user_id) or (@item.isPublic eq true)",
+      "check": {
+        "op": "or",
+        "args": [
+          {
+            "op": "eq",
+            "lhs": {
+              "claim": "sub"
+            },
+            "rhs": {
+              "field": "user_id"
+            }
+          },
+          {
+            "op": "eq",
+            "lhs": {
+              "field": "isPublic"
+            },
+            "rhs": true
+          }
+        ]
+      }
+    },
+    {
+      "entity": "Todo",
+      "role": "authenticated",
+      "index": 3,
+      "action": "create",
+      "text": "@claims.sub eq @item.user_id",
+      "check": {
+        "op": "eq",
+        "lhs": {
+          "claim": "sub"
+        },
+        "rhs": {
+          "field": "user_id"
+        }
+      }
+    }
+  ],
+  "storage": {
+    "folders": [
+      {
+        "name": "Attachments",
+        "folderName": "todo-attachments",
+        "permissions": {
+          "authenticated": [
+            {
+              "action": "delete",
+              "policy": {
+                "storage": "(@claims.sub eq @item.owner_id) and (@item.team_id ne null)",
+                "check": {
+                  "op": "and",
+                  "args": [
+                    {
+                      "op": "eq",
+                      "lhs": {
+                        "claim": "sub"
+                      },
+                      "rhs": {
+                        "field": "owner_id"
+                      }
+                    },
+                    {
+                      "op": "neq",
+                      "lhs": {
+                        "field": "team_id"
+                      },
+                      "rhs": null
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "action": "create",
+              "policy": {
+                "storage": "@claims.sub eq @item.owner_id",
+                "check": {
+                  "op": "eq",
+                  "lhs": {
+                    "claim": "sub"
+                  },
+                  "rhs": {
+                    "field": "owner_id"
+                  }
+                }
+              }
+            },
+            {
+              "action": "read",
+              "policy": {
+                "storage": "@claims.sub eq @item.owner_id",
+                "check": {
+                  "op": "eq",
+                  "lhs": {
+                    "claim": "sub"
+                  },
+                  "rhs": {
+                    "field": "owner_id"
+                  }
+                }
+              }
+            },
+            {
+              "action": "update",
+              "policy": {
+                "storage": "@claims.sub eq @item.owner_id",
+                "check": {
+                  "op": "eq",
+                  "lhs": {
+                    "claim": "sub"
+                  },
+                  "rhs": {
+                    "field": "owner_id"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "onConflict": "overwrite",
+        "maxSize": 5242880,
+        "allowedContentTypes": [
+          "image/*",
+          "application/pdf"
+        ],
+        "fields": [
+          {
+            "name": "team_id",
+            "type": "string",
+            "nullable": false
+          },
+          {
+            "name": "pages",
+            "type": "number",
+            "nullable": true
+          }
+        ]
+      },
+      {
+        "name": "Avatars",
+        "folderName": "user-avatars",
+        "permissions": {
+          "authenticated": [
+            {
+              "action": "create",
+              "policy": {
+                "storage": "@claims.sub eq @item.owner_id",
+                "check": {
+                  "op": "eq",
+                  "lhs": {
+                    "claim": "sub"
+                  },
+                  "rhs": {
+                    "field": "owner_id"
+                  }
+                }
+              }
+            },
+            {
+              "action": "delete",
+              "policy": {
+                "storage": "@claims.sub eq @item.owner_id",
+                "check": {
+                  "op": "eq",
+                  "lhs": {
+                    "claim": "sub"
+                  },
+                  "rhs": {
+                    "field": "owner_id"
+                  }
+                }
+              }
+            },
+            "read"
+          ]
+        },
+        "onConflict": "error",
+        "fields": []
+      }
+    ],
+    "config": {
+      "schemaVersion": 1,
+      "folders": [
+        {
+          "name": "todo-attachments",
+          "displayName": "Attachments",
+          "onConflict": "overwrite",
+          "rules": [
+            {
+              "pathPattern": "**",
+              "role": "authenticated",
+              "actions": [
+                "delete"
+              ],
+              "check": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "eq",
+                    "lhs": {
+                      "claim": "sub"
+                    },
+                    "rhs": {
+                      "field": "owner_id"
+                    }
+                  },
+                  {
+                    "op": "neq",
+                    "lhs": {
+                      "field": "team_id"
+                    },
+                    "rhs": null
+                  }
+                ]
+              }
+            },
+            {
+              "pathPattern": "**",
+              "role": "authenticated",
+              "actions": [
+                "create",
+                "read",
+                "update"
+              ],
+              "check": {
+                "op": "eq",
+                "lhs": {
+                  "claim": "sub"
+                },
+                "rhs": {
+                  "field": "owner_id"
+                }
+              }
+            }
+          ],
+          "fields": [
+            {
+              "name": "team_id",
+              "type": "string",
+              "nullable": false,
+              "storage": "user_metadata"
+            },
+            {
+              "name": "pages",
+              "type": "number",
+              "nullable": true,
+              "storage": "user_metadata"
+            }
+          ],
+          "maxSize": 5242880,
+          "allowedContentTypes": [
+            "image/*",
+            "application/pdf"
+          ]
+        },
+        {
+          "name": "user-avatars",
+          "displayName": "Avatars",
+          "onConflict": "error",
+          "rules": [
+            {
+              "pathPattern": "**",
+              "role": "authenticated",
+              "actions": [
+                "read"
+              ]
+            },
+            {
+              "pathPattern": "**",
+              "role": "authenticated",
+              "actions": [
+                "create",
+                "delete"
+              ],
+              "check": {
+                "op": "eq",
+                "lhs": {
+                  "claim": "sub"
+                },
+                "rhs": {
+                  "field": "owner_id"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "sources": {
+    "data": [
+      "rayfin/data/Category.ts",
+      "rayfin/data/Comment.ts",
+      "rayfin/data/Milestone.ts",
+      "rayfin/data/Person.ts",
+      "rayfin/data/Project.ts",
+      "rayfin/data/schema.ts",
+      "rayfin/data/Todo.ts"
+    ],
+    "storage": [
+      "rayfin/storage/Attachments.ts",
+      "rayfin/storage/Avatars.ts"
+    ],
+    "inputs": [
+      "rayfin/data/Category.ts",
+      "rayfin/data/Comment.ts",
+      "rayfin/data/Milestone.ts",
+      "rayfin/data/Person.ts",
+      "rayfin/data/Project.ts",
+      "rayfin/data/schema.ts",
+      "rayfin/data/Todo.ts",
+      "rayfin/storage/Attachments.ts",
+      "rayfin/storage/Avatars.ts"
+    ]
+  },
+  "diagnostics": []
+}

@@ -1,0 +1,15 @@
+id: rayfin-local-fixture-basic
+name: rayfin-local-fixture-basic
+version: 1.0.0
+services:
+  auth:
+    enabled: true
+    password:
+      enabled: true
+    allowedRedirectUris:
+      - http://localhost:5173
+  data:
+    enabled: true
+    dialect: mssql
+  storage:
+    enabled: true

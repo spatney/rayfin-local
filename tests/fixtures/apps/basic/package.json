@@ -1,0 +1,13 @@
+{
+  "name": "rayfin-local-fixture-basic",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "rayfin-local test fixture: a minimal Rayfin 1.36.2 project exercising every data feature.",
+  "dependencies": {
+    "@microsoft/rayfin-core": "1.36.2"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}
