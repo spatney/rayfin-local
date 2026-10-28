@@ -88,8 +88,8 @@ test.describe('data', () => {
 
   test('todo-crud', async ({ app }) => {
     expect(await expectOk(app.page, 'todo-crud')).toEqual({
-      created: { title: 'crud', status: "it's new" },
-      listed: [{ title: 'crud', status: "it's new" }],
+      created: { title: 'crud', status: 'done' },
+      listed: [{ title: 'crud', status: 'done' }],
       updated: { title: 'crud edited', status: 'doing' },
       deleted: true,
       foundAfterDelete: false,

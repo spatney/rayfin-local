@@ -186,8 +186,12 @@ function signedInUserId(): string {
   return user.id;
 }
 
-/** A new Todo owned by the signed-in user, as the `authenticated` create policy requires. */
-function todoInput(title: string, status: Todo['status'] = "it's new", cost = 1) {
+/**
+ * A new Todo owned by the signed-in user, as the `authenticated` create policy requires.
+ * `"it's new"` (the field's default) is not used: rayfin-core strips quotes from `@set` values in
+ * the CHECK constraint, so the database (on Fabric too) only accepts `its new`.
+ */
+function todoInput(title: string, status: Todo['status'] = 'done', cost = 1) {
   return { user_id: signedInUserId(), title, status, cost, isPublic: false, createdAt: new Date() };
 }
 

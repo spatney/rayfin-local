@@ -17,6 +17,7 @@ async-graphql-parser.workspace = true
 axum.workspace = true
 base64.workspace = true
 indexmap.workspace = true
+parking_lot.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -25,5 +26,11 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+rl-auth.workspace = true
+rl-server.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+tempfile.workspace = true
 tower.workspace = true
 http-body-util.workspace = true
+url.workspace = true
