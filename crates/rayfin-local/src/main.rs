@@ -4,6 +4,7 @@ mod analysis;
 mod commands;
 mod integrations;
 mod ports;
+mod reload;
 mod shutdown;
 mod ui;
 
@@ -52,6 +53,12 @@ enum Command {
     Doctor,
     /// Print the app model and the SQLite schema derived from rayfin/data.
     Schema,
+    /// List, add and delete the app's local users, and reset their passwords.
+    #[command(subcommand)]
+    Users(commands::users::UsersCommand),
+    /// Set, list and delete the local values of the secrets declared in rayfin.yml.
+    #[command(subcommand)]
+    Secret(commands::secret::SecretCommand),
 }
 
 #[derive(Args)]
@@ -85,7 +92,8 @@ struct ServeArgs {
     /// Apply destructive schema changes (dropped or retyped fields lose their data).
     #[arg(long)]
     force_schema: bool,
-    /// Start from an empty database.
+    /// Start from an empty database: delete the users, entity data and stored files (keeps the
+    /// ports, publishable key, keys, secrets and caches in .rayfin-local).
     #[arg(long)]
     reset: bool,
     /// Start the function host with the Node inspector (default port 9229).
@@ -182,6 +190,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             Command::Reset { yes } => commands::reset::run(&dir, yes),
             Command::Doctor => commands::doctor::run(&dir).await,
             Command::Schema => commands::schema::run(&dir, cli.verbose).await,
+            Command::Users(command) => commands::users::run(&dir, command).await,
+            Command::Secret(command) => commands::secret::run(&dir, command),
         }
     });
     // Don't let a blocking task that is still running (a database call, a child's output

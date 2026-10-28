@@ -15,10 +15,6 @@ pub struct StopHooks {
 
 impl StopHooks {
     /// Registers `hook` (for example `move || async move { child.kill(grace).await; }`).
-    #[allow(
-        dead_code,
-        reason = "the functions and frontend integrations register their processes here"
-    )]
     pub fn add<F, Fut>(&mut self, label: impl Into<String>, hook: F)
     where
         F: FnOnce() -> Fut + Send + 'static,

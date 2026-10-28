@@ -1,8 +1,9 @@
 //! `rayfin-local serve`: every backend service of the project on this machine, and its frontend.
 
+use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -11,6 +12,7 @@ use anyhow::{Context as _, anyhow, bail};
 use axum::Router;
 use rl_auth::{AuthService, AuthSettings};
 use rl_db::Db;
+use rl_functions::FunctionsService;
 use rl_model::AppModel;
 use rl_project::{LocalState, Project};
 use rl_server::{ServerConfig, StaticSite};
@@ -22,6 +24,7 @@ use tokio::task::JoinHandle;
 use crate::analysis;
 use crate::integrations::{self, ServeContext};
 use crate::ports::{self, DEFAULT_API_PORT, PortRequest};
+use crate::reload;
 use crate::shutdown::{self, StopHooks};
 use crate::ui;
 
@@ -71,6 +74,7 @@ pub async fn run(dir: &Path, options: ServeOptions) -> anyhow::Result<ExitCode> 
     let (auth, auth_settings) = start_auth(&project, &state, &db, &host, &broker).await?;
     let bound = bind_ports(&project, &mut state, &options, &host).await?;
     let api_origin = format!("http://{}:{}", origin_host(&host), bound.api_port);
+    let data_api = integrations::data_api(&project, &db, &model, auth.clone());
 
     let ctx = ServeContext {
         project: &project,
@@ -80,6 +84,7 @@ pub async fn run(dir: &Path, options: ServeOptions) -> anyhow::Result<ExitCode> 
         db: &db,
         auth: &auth,
         broker: &broker,
+        data_api,
         options: &options,
         host: &host,
         api_origin: &api_origin,
@@ -102,15 +107,69 @@ pub async fn run(dir: &Path, options: ServeOptions) -> anyhow::Result<ExitCode> 
     Ok(ExitCode::from(INTERRUPTED))
 }
 
-/// `--reset`, then the project's `.rayfin-local/` (created on first use).
+/// The project's `.rayfin-local/` (created on first use). `--reset` first empties the database
+/// and storage, which hold the users, the entity data and the stored files.
 fn open_state(project: &Project, reset: bool) -> anyhow::Result<LocalState> {
-    if reset && LocalState::reset(project)? {
+    let state = LocalState::load_or_create(project)?;
+    if reset {
+        let cleared = clear_data(&state)?;
+        let what = if cleared.is_empty() {
+            "nothing to delete".to_owned()
+        } else {
+            format!("deleted {}", cleared.join(", "))
+        };
         ui::step(format_args!(
-            "Deleted {} (--reset)",
-            project.state_dir().display()
+            "Started from an empty database (--reset: {what} in {}; kept the ports, keys, \
+             secrets and caches)",
+            state.dir().display()
         ));
     }
-    Ok(LocalState::load_or_create(project)?)
+    Ok(state)
+}
+
+/// Deletes the database (with its SQLite side files) and the stored files; returns the names of
+/// those that existed.
+fn clear_data(state: &LocalState) -> anyhow::Result<Vec<String>> {
+    let in_use = "Stop any other rayfin-local serving this project and close programs that have \
+                  its database or files open, then try again.";
+    let mut cleared = Vec::new();
+    let db = state.db_path();
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut path = db.clone().into_os_string();
+        path.push(suffix);
+        let path = PathBuf::from(path);
+        match fs::remove_file(&path) {
+            Ok(()) => cleared.push(file_name(&path)),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("Could not delete {}. {in_use}", path.display()));
+            }
+        }
+    }
+    let storage = state.storage_dir();
+    let had_files = fs::read_dir(&storage).is_ok_and(|mut entries| entries.next().is_some());
+    match fs::remove_dir_all(&storage) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("Could not delete {}. {in_use}", storage.display()));
+        }
+    }
+    if had_files {
+        cleared.push(format!("{}/", file_name(&storage)));
+    }
+    fs::create_dir_all(&storage)
+        .with_context(|| format!("Could not create {}", storage.display()))?;
+    Ok(cleared)
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
 }
 
 /// The project database, with entity tables matching the model (when `services.data` is on).
@@ -298,10 +357,10 @@ async fn serve_until_signal(
     auth_settings: &AuthSettings,
     running: &mut Running,
 ) -> anyhow::Result<()> {
-    let features = feature_routers(ctx, &mut running.hooks).await?;
     let static_site = integrations::static_site(ctx).await?;
     let serves_static = static_site.is_some();
-    let router = rl_server::build_router(server_config(ctx, static_site), features);
+    let (routers, features) = start_features(ctx, &mut running.hooks).await?;
+    let router = rl_server::build_router(server_config(ctx, static_site), routers);
     let mut stop = running.stop.subscribe();
     let server = running.server.insert(tokio::spawn(rl_server::serve(
         router,
@@ -318,30 +377,30 @@ async fn serve_until_signal(
     ui::step(format_args!("Backend listening on {}", ctx.api_origin));
 
     let frontend_url = integrations::start_frontend(ctx, &mut running.hooks).await?;
-    let frontend = if ctx.options.no_frontend {
-        "not started (--no-frontend)".to_owned()
-    } else if serves_static {
-        format!("{} (static build)", ctx.api_origin)
-    } else if let Some(url) = &frontend_url {
-        url.clone()
-    } else if ctx.options.static_build {
-        "not built (static hosting is not wired yet)".to_owned()
+    if let Err(err) = reload::watch(ctx, &mut running.hooks) {
+        ui::warn(format_args!(
+            "Live reload is off ({err:#}); restart rayfin-local after changing the entities."
+        ));
+    }
+    let app_url = if serves_static {
+        Some(ctx.api_origin.to_owned())
     } else {
-        "not started (the dev server is not wired yet)".to_owned()
+        frontend_url
     };
     ui::banner(&ui::Banner {
         app_name: ctx.project.display_name(),
-        api_url: ctx.api_origin,
-        frontend,
-        data_dir: ctx.state.dir(),
-        sign_in: sign_in_hint(auth_settings),
+        rows: banner_rows(ctx, &features, app_url.as_deref(), auth_settings),
     });
     if ctx.options.open {
-        let url = frontend_url.as_deref().unwrap_or(ctx.api_origin);
-        if let Err(err) = open::that_detached(url) {
-            ui::warn(format_args!(
-                "Could not open a browser ({err}); open {url} yourself."
-            ));
+        match &app_url {
+            Some(url) => {
+                if let Err(err) = open::that_detached(url) {
+                    ui::warn(format_args!(
+                        "Could not open a browser ({err}); open {url} yourself."
+                    ));
+                }
+            }
+            None => ui::warn("--open: there is no app to open with --no-frontend."),
         }
     }
 
@@ -369,19 +428,102 @@ fn server_stopped(result: Result<io::Result<()>, tokio::task::JoinError>) -> any
     }
 }
 
-/// The feature routers: auth and connectors, then the services wired in `integrations`.
-async fn feature_routers(
+/// The feature services that started, for the banner.
+struct Features {
+    functions: Option<Arc<FunctionsService>>,
+    storage: bool,
+}
+
+/// The feature routers (auth and connectors, then the services configured in `integrations`),
+/// and what started.
+async fn start_features(
     ctx: &ServeContext<'_>,
     hooks: &mut StopHooks,
-) -> anyhow::Result<Vec<Router>> {
+) -> anyhow::Result<(Vec<Router>, Features)> {
     let mut routers = vec![
         Arc::clone(ctx.auth).router(),
         integrations::connectors_router(ctx),
     ];
-    routers.extend(integrations::graphql_router(ctx)?);
-    routers.extend(integrations::storage_router(ctx)?);
-    routers.extend(integrations::functions_router(ctx, hooks).await?);
-    Ok(routers)
+    routers.extend(integrations::graphql_router(ctx));
+    let storage = integrations::storage_router(ctx).await?;
+    let has_storage = storage.is_some();
+    routers.extend(storage);
+    let functions = integrations::start_functions(ctx, hooks).await?;
+    routers.extend(functions.as_ref().map(FunctionsService::router));
+    let features = Features {
+        functions,
+        storage: has_storage,
+    };
+    Ok((routers, features))
+}
+
+/// The banner's rows: where the app and the API are, what runs, and how to sign in.
+fn banner_rows(
+    ctx: &ServeContext<'_>,
+    features: &Features,
+    app_url: Option<&str>,
+    auth_settings: &AuthSettings,
+) -> Vec<(&'static str, String)> {
+    let config = ctx.project.config();
+    let app = match app_url {
+        Some(url) if ctx.options.static_build => format!("{url} (static build)"),
+        Some(url) => url.to_owned(),
+        None => "not started (--no-frontend)".to_owned(),
+    };
+    let entities = if config.services.data.enabled {
+        count(ctx.model.entities.len(), "entity", "entities")
+    } else {
+        "off (services.data is disabled in rayfin.yml)".to_owned()
+    };
+    let functions = match &features.functions {
+        Some(service) => match service.functions() {
+            names if names.is_empty() => "none loaded (see the function output above)".to_owned(),
+            names => format!(
+                "{} ({})",
+                count(names.len(), "function", "functions"),
+                names.join(", ")
+            ),
+        },
+        None if ctx.options.no_functions => "off (--no-functions)".to_owned(),
+        None => "off (services.functions is disabled in rayfin.yml)".to_owned(),
+    };
+    let connectors = if config.connectors.is_empty() {
+        "none".to_owned()
+    } else {
+        config
+            .connectors
+            .iter()
+            .map(|connector| connector.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let folders = integrations::storage_folders(ctx.model);
+    let storage = if features.storage {
+        format!(
+            "{} ({})",
+            count(folders.len(), "folder", "folders"),
+            folders.join(", ")
+        )
+    } else if config.services.storage.enabled {
+        "off (no folders in rayfin/storage)".to_owned()
+    } else {
+        "off (services.storage is disabled in rayfin.yml)".to_owned()
+    };
+    vec![
+        ("App", app),
+        ("API", ctx.api_origin.to_owned()),
+        ("Entities", entities),
+        ("Functions", functions),
+        ("Connectors", connectors),
+        ("Storage", storage),
+        ("Data", ctx.state.dir().display().to_string()),
+        ("Sign in", sign_in_hint(auth_settings)),
+    ]
+}
+
+/// `1 entity`, `3 entities`.
+fn count(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 fn server_config(ctx: &ServeContext<'_>, static_site: Option<StaticSite>) -> ServerConfig {
@@ -439,23 +581,47 @@ fn sign_in_hint(settings: &AuthSettings) -> String {
     if !settings.enabled {
         return "auth is off (services.auth.enabled is false in rayfin.yml)".to_owned();
     }
-    let mut ways = Vec::new();
-    if settings.password_enabled && settings.signup_enabled {
-        ways.push("sign up in the app with any email and password (users stay on this machine)");
-    }
     if settings.fabric_enabled {
-        ways.push("\"Sign in with Fabric\" opens the local sign-in page");
+        let mut hint = "Use 'Sign in with Fabric' — create any account in the popup".to_owned();
+        if settings.entra_signin.enabled {
+            hint.push_str(", or continue as your Azure identity");
+        }
+        return hint;
     }
-    if ways.is_empty() {
-        "no sign-in method is enabled in services.auth of rayfin.yml".to_owned()
-    } else {
-        ways.join("; ")
+    if settings.password_enabled && settings.signup_enabled {
+        return "sign up in the app with any email and password (users stay on this machine)"
+            .to_owned();
     }
+    "no sign-in method is enabled in services.auth of rayfin.yml".to_owned()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_clears_the_database_and_files_but_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("rayfin")).unwrap();
+        fs::write(dir.path().join("rayfin").join("rayfin.yml"), "name: app\n").unwrap();
+        let project = Project::load(dir.path()).unwrap();
+        let state = LocalState::load_or_create(&project).unwrap();
+        let db = state.db_path();
+        fs::write(&db, "db").unwrap();
+        fs::write(db.with_extension("sqlite-wal"), "wal").unwrap();
+        fs::create_dir_all(state.storage_dir().join("objects")).unwrap();
+        fs::write(state.storage_dir().join("objects").join("a"), "a").unwrap();
+        fs::write(state.keys_dir().join("key.pem"), "key").unwrap();
+
+        let cleared = clear_data(&state).unwrap();
+        assert_eq!(cleared, ["db.sqlite", "db.sqlite-wal", "storage/"]);
+        assert!(!db.exists());
+        assert!(state.storage_dir().is_dir());
+        assert_eq!(fs::read_dir(state.storage_dir()).unwrap().count(), 0);
+        assert!(state.keys_dir().join("key.pem").is_file());
+        assert!(state.dir().join("state.json").is_file());
+        assert!(clear_data(&state).unwrap().is_empty());
+    }
 
     #[test]
     fn urls_use_localhost_for_loopback_and_wildcard_hosts() {

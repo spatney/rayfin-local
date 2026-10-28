@@ -47,27 +47,32 @@ pub async fn analyze(
         tracing::debug!("services.data and services.storage are disabled; nothing to analyze");
         return Ok(empty_model(model_dialect(services.data.dialect())));
     }
-
-    let input = analyze_input(project, state, verbose);
-    let key = analysis_key(project, &input);
-    let cache_path = state.cache_dir().join(CACHE_FILE);
-    let (mut model, cached) = match read_cache(&cache_path, &key, project.root()) {
-        Some(model) => (model, true),
-        None => (
-            run_analysis(project, state, node, &input, key, &cache_path).await?,
-            false,
-        ),
-    };
-    if !services.data.enabled {
-        model.entities.clear();
+    let hint = "Fix the error below, then run `rayfin-local serve` again.";
+    let (model, cached) = load_model(project, state, node, verbose, hint).await?;
+    let mut line = format!("Analyzed {}", summary(&model));
+    if cached {
+        line.push_str(" (cached)");
     }
+    ui::step(line);
+    Ok(model)
+}
 
-    for diagnostic in &model.diagnostics {
-        ui::warn(&diagnostic.message);
-    }
+/// [`analyze`] again while serving, after a source changed: prints only the diagnostics.
+pub async fn reanalyze(
+    project: &Project,
+    state: &LocalState,
+    node: &NodeRuntime,
+    verbose: bool,
+) -> anyhow::Result<AppModel> {
+    let hint = "Fix the error below and save again; the previous schema stays in use until then.";
+    Ok(load_model(project, state, node, verbose, hint).await?.0)
+}
+
+/// What the model holds, such as `3 entities and 2 storage folders`.
+pub fn summary(model: &AppModel) -> String {
     let entities = model.entities.len();
     let mut summary = format!(
-        "Analyzed {entities} {}",
+        "{entities} {}",
         if entities == 1 { "entity" } else { "entities" }
     );
     if let Some(storage) = &model.storage {
@@ -77,11 +82,35 @@ pub async fn analyze(
             if folders == 1 { "folder" } else { "folders" }
         ));
     }
-    if cached {
-        summary.push_str(" (cached)");
+    summary
+}
+
+/// The model from the cache or a new analysis (`true` when cached), its diagnostics printed.
+/// `hint` says what to do when the analysis fails.
+async fn load_model(
+    project: &Project,
+    state: &LocalState,
+    node: &NodeRuntime,
+    verbose: bool,
+    hint: &str,
+) -> anyhow::Result<(AppModel, bool)> {
+    let input = analyze_input(project, state, verbose);
+    let key = analysis_key(project, &input);
+    let cache_path = state.cache_dir().join(CACHE_FILE);
+    let (mut model, cached) = match read_cache(&cache_path, &key, project.root()) {
+        Some(model) => (model, true),
+        None => (
+            run_analysis(project, state, node, &input, key, &cache_path, hint).await?,
+            false,
+        ),
+    };
+    if !project.config().services.data.enabled {
+        model.entities.clear();
     }
-    ui::step(summary);
-    Ok(model)
+    for diagnostic in &model.diagnostics {
+        ui::warn(&diagnostic.message);
+    }
+    Ok((model, cached))
 }
 
 async fn run_analysis(
@@ -91,6 +120,7 @@ async fn run_analysis(
     input: &AnalyzeInput,
     key: String,
     cache_path: &Path,
+    hint: &str,
 ) -> anyhow::Result<AppModel> {
     let analysis: Value = rl_node::run_helper(
         node,
@@ -103,8 +133,7 @@ async fn run_analysis(
     .await
     .with_context(|| {
         format!(
-            "Could not analyze the app's entities in {}. Fix the error below, then run \
-             `rayfin-local serve` again.",
+            "Could not analyze the app's entities in {}. {hint}",
             input.data_dir.display()
         )
     })?;

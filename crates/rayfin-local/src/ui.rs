@@ -4,7 +4,6 @@
 
 use std::fmt::Display;
 use std::io::{self, IsTerminal, Write};
-use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use rl_node::{LineSink, Stream};
@@ -193,38 +192,36 @@ fn label_color(label: &str) -> Color {
     PALETTE[hash as usize % PALETTE.len()]
 }
 
-/// What the startup banner shows.
+/// What the startup banner shows: the app's name, then labeled rows (URLs in color).
 pub struct Banner<'a> {
     pub app_name: &'a str,
-    pub api_url: &'a str,
-    pub frontend: String,
-    pub data_dir: &'a Path,
-    pub sign_in: String,
+    pub rows: Vec<(&'static str, String)>,
 }
 
 pub fn banner(banner: &Banner<'_>) {
     let painter = Painter::stderr();
-    let label = |text: &str| painter.paint(Color::Bold, format_args!("{text:<10}"));
-    let mut out = String::new();
-    out.push('\n');
-    out.push_str(&format!(
-        "  {} is running locally\n\n",
+    let width = banner
+        .rows
+        .iter()
+        .map(|(label, _)| label.len())
+        .max()
+        .unwrap_or(0)
+        + 2;
+    let mut out = format!(
+        "\n  {} is running locally\n\n",
         painter.paint(Color::Bold, banner.app_name)
-    ));
+    );
+    for (label, value) in &banner.rows {
+        let label = painter.paint(Color::Bold, format_args!("{label:<width$}"));
+        let value = if value.starts_with("http://") || value.starts_with("https://") {
+            painter.paint(Color::Cyan, value)
+        } else {
+            value.clone()
+        };
+        out.push_str(&format!("  {label}{value}\n"));
+    }
     out.push_str(&format!(
-        "  {}{}\n",
-        label("API"),
-        painter.paint(Color::Cyan, banner.api_url)
-    ));
-    out.push_str(&format!("  {}{}\n", label("Frontend"), banner.frontend));
-    out.push_str(&format!(
-        "  {}{}\n",
-        label("Data"),
-        banner.data_dir.display()
-    ));
-    out.push_str(&format!("  {}{}\n\n", label("Sign in"), banner.sign_in));
-    out.push_str(&format!(
-        "  {}\n\n",
+        "\n  {}\n\n",
         painter.paint(Color::Dim, "Press Ctrl+C to stop.")
     ));
     let _ = io::stderr().lock().write_all(out.as_bytes());

@@ -3,7 +3,9 @@
 pub mod doctor;
 pub mod reset;
 pub mod schema;
+pub mod secret;
 pub mod serve;
+pub mod users;
 
 use std::path::Path;
 
