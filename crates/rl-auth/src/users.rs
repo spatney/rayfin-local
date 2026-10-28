@@ -180,10 +180,9 @@ impl AuthService {
     }
 
     /// The user for an Entra identity (`oid`), created on first sign-in. Email and display name
-    /// are refreshed on later sign-ins.
-    ///
-    /// TODO(entra-exchange): the caller validates the Entra token; decide whether an Entra user
-    /// may take over a password account with the same email (today they never merge).
+    /// are refreshed on later sign-ins. The caller has validated the identity. An Entra user
+    /// never takes over a password account with the same email: anyone may sign up with any
+    /// username, so the two stay separate users.
     pub async fn find_or_create_external_user(
         &self,
         oid: &str,

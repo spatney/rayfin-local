@@ -10,6 +10,7 @@ mod error;
 mod handoff;
 mod jwt;
 mod keys;
+mod portal;
 mod resolver;
 mod routes;
 mod schema;
@@ -29,9 +30,10 @@ use std::{
 use rl_db::Db;
 
 pub use error::AuthError;
+pub use portal::PORTAL_PATH;
 pub use routes::{JWKS_PATH, RUNTIME_SETTINGS_PATH};
 pub use sessions::TokenResponse;
-pub use settings::AuthSettings;
+pub use settings::{AuthSettings, EntraSettings};
 pub use users::User;
 
 /// Routes the real service serves without checking `X-Publishable-Key`.
@@ -43,6 +45,8 @@ pub struct AuthService {
     pub(crate) settings: AuthSettings,
     pub(crate) jwt: Arc<jwt::Jwt>,
     pub(crate) revoked: sessions::RevokedSessions,
+    pub(crate) portal: portal::Portal,
+    pub(crate) entra: entra::Entra,
     /// Shifts the service's clock; tests use it to travel in time.
     clock_offset_ms: AtomicI64,
 }
@@ -50,6 +54,9 @@ pub struct AuthService {
 impl AuthService {
     /// Opens the auth service: brings its tables up to date, and loads the signing key from
     /// `keys_dir` (creating it on first run).
+    ///
+    /// The Entra exchange downloads Microsoft's signing keys with `reqwest`: the process must
+    /// install a rustls crypto provider first (the binary installs ring at startup).
     pub async fn new(db: Db, keys_dir: PathBuf, settings: AuthSettings) -> Result<Self, AuthError> {
         let settings = settings.normalized()?;
         if settings.magic_link_enabled {
@@ -74,10 +81,20 @@ impl AuthService {
             settings,
             jwt,
             revoked: sessions::RevokedSessions::default(),
+            portal: portal::Portal::new()?,
+            entra: entra::Entra::new(),
             clock_offset_ms: AtomicI64::new(0),
         };
         service.load_revoked_sessions().await?;
         Ok(service)
+    }
+
+    /// Gives the sign-in page "Continue as <you>": `tokens` mints the developer's Power BI token
+    /// (`rl_tokens::Audience::PowerBi`), whose claims say who they are. Only offered when
+    /// [`EntraSettings::enabled`] is on.
+    pub fn with_entra(mut self, tokens: Arc<dyn rl_tokens::TokenSource>) -> Self {
+        self.entra.tokens = Some(tokens);
+        self
     }
 
     /// The settings in effect (lifetimes clamped).

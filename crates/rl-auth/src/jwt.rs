@@ -193,7 +193,7 @@ impl Jwt {
     }
 }
 
-fn decode_object(part: &str) -> Result<Map<String, Value>, TokenError> {
+pub(crate) fn decode_object(part: &str) -> Result<Map<String, Value>, TokenError> {
     let bytes = b64url_decode(part).ok_or(TokenError::Malformed)?;
     match serde_json::from_slice(&bytes) {
         Ok(Value::Object(object)) => Ok(object),
@@ -201,7 +201,7 @@ fn decode_object(part: &str) -> Result<Map<String, Value>, TokenError> {
     }
 }
 
-fn number_claim(claims: &Map<String, Value>, name: &str) -> Option<i64> {
+pub(crate) fn number_claim(claims: &Map<String, Value>, name: &str) -> Option<i64> {
     let value = claims.get(name)?;
     value.as_i64().or_else(|| value.as_f64().map(|n| n as i64))
 }

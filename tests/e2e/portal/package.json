@@ -1,0 +1,13 @@
+{
+  "name": "rayfin-local-portal-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Drives the rayfin-local sign-in popup with a real browser and the real Rayfin SDK 1.36.2.",
+  "scripts": {
+    "setup": "npx playwright install chromium"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "playwright": "1.64.1"
+  }
+}

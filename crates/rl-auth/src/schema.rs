@@ -1,7 +1,6 @@
 //! The auth tables (`_rl_auth_*`), evolved with `Db::migrate_component`.
 //!
-//! Steps are append-only: never edit or reorder a released step, add a new one (the sign-in
-//! portal adds its handoff-code table as the next step).
+//! Steps are append-only: never edit or reorder a released step, add a new one.
 
 pub(crate) const COMPONENT: &str = "auth";
 
@@ -44,4 +43,18 @@ pub(crate) const STEPS: &[&str] = &[
         rotated_at INTEGER
     ) STRICT;
     CREATE INDEX _rl_auth_refresh_tokens_by_session ON _rl_auth_refresh_tokens (session_id);",
+    // 2: the sign-in portal's handoff codes (`codeType: fabric_handoff`).
+    "CREATE TABLE _rl_auth_handoff_codes (
+        -- Only the code's SHA-256 is stored.
+        code_hash BLOB PRIMARY KEY NOT NULL,
+        user_id TEXT NOT NULL REFERENCES _rl_auth_users (id) ON DELETE CASCADE,
+        -- PKCE S256: base64url(SHA-256(code_verifier)) of the redeemer's verifier.
+        code_challenge TEXT NOT NULL,
+        -- The origin the code was sent to; the redeemer's redirectUri must have it.
+        return_origin TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL,
+        used_at INTEGER
+    ) STRICT;
+    CREATE INDEX _rl_auth_handoff_codes_by_expiry ON _rl_auth_handoff_codes (expires_at);",
 ];

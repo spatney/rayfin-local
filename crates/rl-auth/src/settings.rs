@@ -45,6 +45,66 @@ pub struct AuthSettings {
     pub custom_claims: Vec<(String, String)>,
     /// `scopes`: joined with spaces into the `scope` claim and the token response's `scope`.
     pub scopes: Vec<String>,
+    /// Local only: the app's name on the sign-in page (`rayfin.yml` `name`).
+    pub app_name: Option<String>,
+    /// Local only: signing in with a Microsoft Entra identity.
+    pub entra_signin: EntraSettings,
+}
+
+/// Signing in with a Microsoft Entra identity: "Continue as <you>" on the sign-in page (with
+/// the developer's own token, see [`crate::AuthService::with_entra`]) and the external Entra
+/// exchange (`POST /api/auth/v1/brokered/token`, which the Vite plugin's auto-login calls).
+///
+/// Locally the exchange works whether or not `rayfin.yml` sets
+/// `services.auth.fabric.externalEntraExchange`; Fabric requires that flag.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntraSettings {
+    /// Off by default: anyone holding a Microsoft token for one of [`Self::audiences`] can sign
+    /// in. The binary turns it on only when the backend listens on loopback.
+    pub enabled: bool,
+    /// Entra tenant ids (`tid`) whose tokens are accepted; empty accepts every tenant.
+    pub allowed_tenants: Vec<String>,
+    /// The token audiences (`aud`) accepted; default [`Self::DEFAULT_AUDIENCES`].
+    pub audiences: Vec<String>,
+}
+
+impl EntraSettings {
+    /// Power BI (resource URI and app id) and Fabric: the audiences the real service accepts.
+    pub const DEFAULT_AUDIENCES: [&str; 3] = [
+        "https://analysis.windows.net/powerbi/api",
+        "00000009-0000-0000-c000-000000000000",
+        "https://api.fabric.microsoft.com",
+    ];
+
+    fn normalized(mut self) -> Result<Self, AuthError> {
+        let clean = |values: Vec<String>| -> Vec<String> {
+            values
+                .into_iter()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+                .collect()
+        };
+        self.allowed_tenants = clean(self.allowed_tenants);
+        self.audiences = clean(self.audiences);
+        if self.enabled && self.audiences.is_empty() {
+            return Err(AuthError::Settings(
+                "Entra sign-in is on but accepts no token audience; keep the default audiences or \
+                 list some"
+                    .into(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
+impl Default for EntraSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allowed_tenants: Vec::new(),
+            audiences: Self::DEFAULT_AUDIENCES.map(str::to_owned).to_vec(),
+        }
+    }
 }
 
 impl AuthSettings {
@@ -72,6 +132,8 @@ impl AuthSettings {
             allowed_redirect_uris: Vec::new(),
             custom_claims: Vec::new(),
             scopes: Vec::new(),
+            app_name: None,
+            entra_signin: EntraSettings::default(),
         }
     }
 
@@ -107,6 +169,11 @@ impl AuthSettings {
             }
             !reserved
         });
+        self.app_name = self
+            .app_name
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty());
+        self.entra_signin = self.entra_signin.normalized()?;
         Ok(self)
     }
 

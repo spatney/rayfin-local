@@ -41,12 +41,15 @@ impl AuthService {
     /// - `POST /api/auth/v1/signup`, `POST /api/auth/v1/token` (`password`, `refresh_token`,
     ///   `authorization_code`), `POST /api/auth/v1/signout`, `POST /api/auth/v1/signout-all`
     /// - [`JWKS_PATH`] and [`RUNTIME_SETTINGS_PATH`]
+    /// - `POST /api/auth/v1/brokered/token`: the external Entra exchange, when
+    ///   [`crate::EntraSettings::enabled`]
+    /// - the sign-in portal under [`crate::PORTAL_PATH`] (the app's `fabricPortalUrl`)
     /// - the routes of features rayfin-local lacks (magic links, email verification, password
-    ///   reset email, the external Entra exchange), answering as the real service does when the
-    ///   feature is disabled
+    ///   reset email), answering as the real service does when the feature is disabled
     ///
     /// The publishable key is not checked here (`rl-server` does it; see
-    /// [`crate::PUBLISHABLE_KEY_EXEMPT_PATHS`]).
+    /// [`crate::PUBLISHABLE_KEY_EXEMPT_PATHS`]; the portal is under `/.rayfin-local`, which needs
+    /// no key either).
     pub fn router(self: Arc<Self>) -> Router {
         Router::new()
             .route("/api/auth/v1/signup", post(signup))
@@ -74,6 +77,7 @@ impl AuthService {
             )
             .route(JWKS_PATH, get(jwks))
             .route(RUNTIME_SETTINGS_PATH, get(runtime_settings))
+            .merge(crate::portal::routes())
             .with_state(self)
     }
 }
@@ -190,14 +194,14 @@ impl Fields {
     }
 }
 
-fn respond<T: Serialize>(result: Result<T, ApiError>) -> Response {
+pub(crate) fn respond<T: Serialize>(result: Result<T, ApiError>) -> Response {
     match result {
         Ok(body) => Json(body).into_response(),
         Err(error) => error.into_response(),
     }
 }
 
-fn bearer(headers: &HeaderMap) -> Option<&str> {
+pub(crate) fn bearer(headers: &HeaderMap) -> Option<&str> {
     rl_model::bearer_token(
         headers
             .get(header::AUTHORIZATION)
@@ -270,7 +274,7 @@ async fn runtime_settings(State(auth): AppState) -> Json<Value> {
 
 impl AuthService {
     /// Every auth route answers 404 when `services.auth.enabled` is off.
-    fn require_enabled(&self) -> Result<(), ApiError> {
+    pub(crate) fn require_enabled(&self) -> Result<(), ApiError> {
         if self.settings.enabled {
             Ok(())
         } else {
@@ -483,7 +487,7 @@ fn signup_response(user: &User) -> Value {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use axum::body::Body;
     use http_body_util::BodyExt;
     use rl_model::CallerResolver;
@@ -495,16 +499,16 @@ mod tests {
         tests::{APP_ID, service_with},
     };
 
-    struct Answer {
-        status: StatusCode,
-        headers: HeaderMap,
-        body: Value,
-        raw: Bytes,
+    pub(crate) struct Answer {
+        pub(crate) status: StatusCode,
+        pub(crate) headers: HeaderMap,
+        pub(crate) body: Value,
+        pub(crate) raw: Bytes,
     }
 
-    struct App {
+    pub(crate) struct App {
         _dir: tempfile::TempDir,
-        auth: Arc<AuthService>,
+        pub(crate) auth: Arc<AuthService>,
         router: Router,
     }
 
@@ -514,6 +518,10 @@ mod tests {
 
     async fn app_with(settings: AuthSettings) -> App {
         let (dir, auth) = service_with(settings).await;
+        app_from(dir, auth)
+    }
+
+    pub(crate) fn app_from(dir: tempfile::TempDir, auth: AuthService) -> App {
         let auth = Arc::new(auth);
         App {
             _dir: dir,
@@ -523,7 +531,7 @@ mod tests {
     }
 
     impl App {
-        async fn send(&self, request: axum::http::Request<Body>) -> Answer {
+        pub(crate) async fn send(&self, request: axum::http::Request<Body>) -> Answer {
             let response = self.router.clone().oneshot(request).await.unwrap();
             let status = response.status();
             let headers = response.headers().clone();
@@ -537,7 +545,7 @@ mod tests {
             }
         }
 
-        async fn post(&self, path: &str, body: Value) -> Answer {
+        pub(crate) async fn post(&self, path: &str, body: Value) -> Answer {
             self.post_with(path, body, None).await
         }
 
@@ -551,7 +559,7 @@ mod tests {
                 .await
         }
 
-        async fn get(&self, path: &str) -> Answer {
+        pub(crate) async fn get(&self, path: &str) -> Answer {
             self.send(axum::http::Request::get(path).body(Body::empty()).unwrap())
                 .await
         }
@@ -971,7 +979,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_external_entra_exchange_is_not_available_yet() {
+    async fn the_external_entra_exchange_is_not_available_without_entra_sign_in() {
         let mut settings = AuthSettings::new(APP_ID);
         settings.fabric_enabled = true;
         settings.external_entra_exchange = true;
