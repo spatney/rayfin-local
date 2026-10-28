@@ -1,5 +1,6 @@
 node_modules/
 dist/
+rayfin/functions/dist/
 .rayfin-local/
 rayfin/.temp/
 rayfin/.env*

@@ -3,11 +3,24 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "rayfin-local test fixture: a minimal Rayfin 1.36.2 project exercising every data feature.",
+  "description": "rayfin-local test fixture: a small Rayfin 1.36.2 app exercising data, auth, functions, connectors and storage.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.app.json"
+  },
   "dependencies": {
-    "@microsoft/rayfin-core": "1.36.2"
+    "@microsoft/rayfin-auth-provider-fabric": "1.36.2",
+    "@microsoft/rayfin-client": "1.36.2",
+    "@microsoft/rayfin-connector-fabric-semanticmodel": "1.36.2",
+    "@microsoft/rayfin-connectors": "1.36.2",
+    "@microsoft/rayfin-core": "1.36.2",
+    "@microsoft/rayfin-local-dev": "1.36.2",
+    "@microsoft/rayfin-storage": "1.36.2"
   },
   "devDependencies": {
-    "typescript": "5.9.3"
+    "@microsoft/rayfin-cli": "1.36.2",
+    "typescript": "5.9.3",
+    "vite": "^7.3.2"
   }
 }

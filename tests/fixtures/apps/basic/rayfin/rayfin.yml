@@ -4,12 +4,42 @@ version: 1.0.0
 services:
   auth:
     enabled: true
+    fabric:
+      enabled: true
     password:
       enabled: true
     allowedRedirectUris:
       - http://localhost:5173
+      - http://127.0.0.1:5173
+      - http://localhost:7171
+      - http://127.0.0.1:7171
   data:
     enabled: true
     dialect: mssql
+  functions:
+    enabled: true
+    auth:
+      type: application
+    buildCommand: npm run build
+  staticHosting:
+    enabled: true
+    folder: dist
+    buildCommand: npm run build
+    indexDocument: index.html
+    assetAccess: public
   storage:
     enabled: true
+connectors:
+  - name: salesmodel
+    type: fabric-semanticmodel
+    version: "1"
+    config:
+      workspaceId: 00000000-0000-0000-0000-00000000aaaa
+      itemId: 00000000-0000-0000-0000-00000000bbbb
+    auth:
+      type: delegated
+    operations:
+      - name: executeQuery
+secrets:
+  - name: GREETING_SECRET
+    description: Read by the secretInfo function; the local value is in rayfin/functions/local.settings.json
