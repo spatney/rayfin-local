@@ -1,0 +1,23 @@
+id: ${PROJECT_NAME:-interpolated-app}
+name: Interpolated
+version: 1.0.0
+services:
+  auth:
+    enabled: ${AUTH_ENABLED:-false}
+    expiryInMinutes: ${TOKEN_MINUTES}
+    allowedRedirectUris:
+      - http://localhost:${RAYFIN_PUBLIC_FRONTEND_PORT:-5173}
+  data:
+    enabled: true
+    dialect: ${DIALECT:-mssql}
+connectors:
+  - name: telemetry
+    type: fabric-semanticmodel
+    version: "1"
+    config:
+      workspaceId: ${TELEMETRY_WORKSPACE_ID}
+      itemId: ${TELEMETRY_ITEM_ID}
+    auth:
+      type: delegated
+    operations:
+      - name: executeQuery

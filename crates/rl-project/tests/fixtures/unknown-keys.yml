@@ -1,0 +1,23 @@
+# Keys outside the Rayfin schema are reported, not fatal.
+id: unknown-app
+name: unknown-app
+version: 1.0.0
+publishable_key: pk-legacy
+deployment:
+  rayfinItemId: 8967c45f-f06b-401e-87ff-71f08792a6e3
+services:
+  auth:
+    enabled: true
+    issuer: https://example.test
+    password:
+      enabled: true
+      minLength: 12
+  data:
+    enabled: true
+    connectionString: Server=localhost
+  cache:
+    enabled: true
+connectors:
+  - name: logs
+    type: kusto
+    database: telemetry

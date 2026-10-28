@@ -1,0 +1,19 @@
+# Connectors as a map keyed by name, with the legacy `connector:` field.
+id: legacy-app
+name: legacy-app
+version: 1.0.0
+services:
+  auth:
+    enabled: false
+connectors:
+  inventory:
+    connector: fabric-sqlanalytics
+    config:
+      workspaceId: ws-1
+      itemId: item-1
+    operations:
+      - name: read
+  dataset:
+    type: fabric-semanticmodel
+    connector: ignored-legacy-type
+    version: 2

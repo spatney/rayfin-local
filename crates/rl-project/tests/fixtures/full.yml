@@ -1,0 +1,102 @@
+# Every setting rayfin-local models.
+id: full-app
+name: Full App
+version: 2.3.4
+services:
+  auth:
+    enabled: true
+    expiryInMinutes: 30
+    refreshToken:
+      lifetimeInDays: 14
+      absoluteLifetimeInMinutes: 1440
+    customClaims:
+      tenant: default
+      app_version: 1.0.0
+      tier: 3
+    dynamicClaims:
+      enabled: true
+    scopes:
+      - read:data
+      - write:data
+    allowedRedirectUris:
+      - http://localhost:5173
+      - https://contoso.webapp.fabricapps.net
+    password:
+      enabled: true
+    fabric:
+      enabled: true
+      externalEntraExchange: true
+    passwordless:
+      magicLink:
+        enabled: true
+        expiryMinutes: 10
+      smsOtp:
+        enabled: false
+    email:
+      enabled: true
+      provider: smtp
+      senderName: Rayfin Platform
+      verificationTokenExpirationHours: 24
+      passwordResetTokenExpirationMinutes: 30
+      smtp:
+        host: maildev
+        port: 1025
+        senderEmail: noreply@rayfin.local
+        username: ""
+        password: ""
+        useSsl: false
+        useStartTls: false
+        webPort: 1080
+  data:
+    enabled: true
+    dialect: postgresql
+    allowIntrospection: true
+    buildCommand: npm run build:data
+  storage:
+    enabled: true
+  functions:
+    enabled: true
+    auth:
+      type: application
+    buildCommand: npm run build
+  staticHosting:
+    enabled: true
+    root: .
+    folder: build
+    buildCommand: npm run build:fabric
+    indexDocument: app.html
+    assetAccess: protected
+    embedded:
+      only: true
+  telemetry:
+    enabled: true
+  connectors:
+    enabled: true
+frontend:
+  framework: vite
+  outputDir: .
+connectors:
+  - name: sales
+    type: fabric-semanticmodel
+    version: "1"
+    config:
+      workspaceId: 67e66ea4-5ea2-4f76-98da-6144ba7d52fa
+      itemId: 7ee53e06-5065-4c1b-96bb-b8ef12abaad6
+    auth:
+      type: delegated
+    operations:
+      - name: executeQuery
+  - name: orders
+    type: fabric-sqldatabase
+    config:
+      workspaceId: ws
+      itemId: item
+    auth:
+      type: application
+    operations:
+      - name: read
+      - name: create
+secrets:
+  - name: OPENAI_KEY
+    description: Used by the summarize function
+  - name: NO_DESCRIPTION
