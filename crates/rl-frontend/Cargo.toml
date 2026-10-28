@@ -11,8 +11,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+dunce.workspace = true
 rl-node.workspace = true
-rl-project.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -20,4 +20,8 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+axum.workspace = true
+reqwest.workspace = true
+rl-server.workspace = true
+rustls.workspace = true
 tempfile.workspace = true
