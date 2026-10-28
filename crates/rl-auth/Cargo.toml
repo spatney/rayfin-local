@@ -1,0 +1,33 @@
+[package]
+name = "rl-auth"
+description = "Rayfin auth: users, sessions, JWT/JWKS, the Fabric sign-in popup emulation and the Entra token exchange."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rl-model.workspace = true
+rl-db.workspace = true
+argon2.workspace = true
+axum.workspace = true
+base64.workspace = true
+ring.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
+http-body-util.workspace = true
+tempfile.workspace = true

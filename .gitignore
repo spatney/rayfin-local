@@ -1,0 +1,8 @@
+/target
+node_modules/
+.rayfin-local/
+*.log
+.DS_Store
+tests/**/dist/
+tests/**/test-results/
+tests/**/playwright-report/

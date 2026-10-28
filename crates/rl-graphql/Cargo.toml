@@ -1,0 +1,29 @@
+[package]
+name = "rl-graphql"
+description = "The DAB-compatible GraphQL data API (POST /graphql) on SQLite."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rl-model.workspace = true
+rl-db.workspace = true
+async-graphql-parser.workspace = true
+axum.workspace = true
+base64.workspace = true
+indexmap.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
+http-body-util.workspace = true

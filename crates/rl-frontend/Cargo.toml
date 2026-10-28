@@ -1,0 +1,23 @@
+[package]
+name = "rl-frontend"
+description = "The app's frontend: the Vite dev server and static builds, run with the local Rayfin environment."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rl-node.workspace = true
+rl-project.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,37 @@
+[package]
+name = "rayfin-local"
+description = "Run a Rayfin project's backend locally: `rayfin-local serve`."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "rayfin-local"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+rl-project.workspace = true
+rl-node.workspace = true
+rl-model.workspace = true
+rl-db.workspace = true
+rl-graphql.workspace = true
+rl-auth.workspace = true
+rl-tokens.workspace = true
+rl-functions.workspace = true
+rl-connectors.workspace = true
+rl-storage.workspace = true
+rl-frontend.workspace = true
+rl-server.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+rustls.workspace = true
+open.workspace = true
