@@ -1,0 +1,332 @@
+{
+  "schemaVersion": "2.0",
+  "functions": [
+    {
+      "functionName": "ping",
+      "delegateParameters": [],
+      "contextAudiences": []
+    },
+    {
+      "functionName": "whoAmI",
+      "delegateParameters": [
+        {
+          "name": "ctx",
+          "type": "RayfinContext<AppSchema>",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": []
+    },
+    {
+      "functionName": "addNote",
+      "delegateParameters": [
+        {
+          "name": "text",
+          "type": "string",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": false
+        },
+        {
+          "name": "pinned",
+          "type": "boolean",
+          "optional": false,
+          "hasDefault": false,
+          "position": 1,
+          "isFabricParameter": false
+        },
+        {
+          "name": "ctx",
+          "type": "RayfinContext<AppSchema, AudienceType.Sql>",
+          "optional": false,
+          "hasDefault": false,
+          "position": 2,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": [
+        "Sql"
+      ]
+    },
+    {
+      "functionName": "askAgent",
+      "delegateParameters": [
+        {
+          "name": "question",
+          "type": "string",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": false
+        },
+        {
+          "name": "ctx",
+          "type": "RayfinContext<\n      AppSchema,\n      AudienceType.ADO | AudienceType.AzureAI\n    >",
+          "optional": false,
+          "hasDefault": false,
+          "position": 1,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": [
+        "ADO",
+        "AzureAI"
+      ]
+    },
+    {
+      "functionName": "search",
+      "delegateParameters": [
+        {
+          "name": "query",
+          "type": "string",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": false
+        },
+        {
+          "name": "limit",
+          "type": "number",
+          "optional": true,
+          "hasDefault": false,
+          "position": 1,
+          "isFabricParameter": false
+        },
+        {
+          "name": "offset",
+          "optional": false,
+          "hasDefault": true,
+          "position": 2,
+          "isFabricParameter": false
+        },
+        {
+          "name": "tags",
+          "type": "string[]",
+          "optional": false,
+          "hasDefault": false,
+          "position": 3,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": []
+    },
+    {
+      "functionName": "filterItems",
+      "delegateParameters": [
+        {
+          "name": "filter",
+          "type": "{ status: 'open' | 'closed'; tags?: string[] }",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": false
+        },
+        {
+          "name": "ids",
+          "type": "number[]",
+          "optional": false,
+          "hasDefault": false,
+          "position": 1,
+          "isFabricParameter": false
+        },
+        {
+          "name": "mode",
+          "type": "'fast' | 'full' | null",
+          "optional": false,
+          "hasDefault": false,
+          "position": 2,
+          "isFabricParameter": false
+        },
+        {
+          "name": "rows",
+          "type": "Array<Record<string, unknown>>",
+          "optional": false,
+          "hasDefault": false,
+          "position": 3,
+          "isFabricParameter": false
+        },
+        {
+          "name": "when",
+          "type": "Date | string",
+          "optional": false,
+          "hasDefault": false,
+          "position": 4,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": []
+    },
+    {
+      "functionName": "backlog",
+      "delegateParameters": [
+        {
+          "name": "refresh",
+          "type": "boolean",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": false
+        },
+        {
+          "name": "ctx",
+          "type": "RayfinContext<AppSchema, AudienceType.ADO>",
+          "optional": false,
+          "hasDefault": false,
+          "position": 1,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": [
+        "ADO"
+      ]
+    },
+    {
+      "functionName": "legacyContext",
+      "delegateParameters": [
+        {
+          "name": "context",
+          "type": "RayfinContext<AppSchema, AudienceType.Fabric | AudienceType.Storage>",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": true,
+          "fabricParameterType": "RayfinContext<AppSchema, AudienceType.Fabric | AudienceType.Storage>"
+        }
+      ],
+      "contextAudiences": [
+        "Fabric",
+        "Storage"
+      ]
+    },
+    {
+      "functionName": "lakeFile",
+      "delegateParameters": [
+        {
+          "name": "lakeConnection",
+          "type": "FabricItem",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": true,
+          "fabricParameterType": "FabricItem"
+        },
+        {
+          "name": "path",
+          "optional": false,
+          "hasDefault": false,
+          "position": 1,
+          "isFabricParameter": false
+        },
+        {
+          "name": "verbose",
+          "type": "boolean",
+          "optional": false,
+          "hasDefault": true,
+          "position": 2,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": []
+    },
+    {
+      "functionName": "namespaced",
+      "delegateParameters": [
+        {
+          "name": "ctx",
+          "type": "rayfin.RayfinContext<AppSchema, rayfin.AudienceType.Sql>",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": [
+        "Sql"
+      ]
+    },
+    {
+      "functionName": "nothingDeclared",
+      "delegateParameters": [
+        {
+          "name": "ctx",
+          "type": "RayfinContext<AppSchema, never>",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": []
+    },
+    {
+      "functionName": "destructured",
+      "delegateParameters": [
+        {
+          "name": "{ a, b }",
+          "type": "{ a: string; b: number }",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": []
+    },
+    {
+      "functionName": "legacyStyle",
+      "delegateParameters": [
+        {
+          "name": "id",
+          "type": "number",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": false
+        },
+        {
+          "name": "ctx",
+          "type": "RayfinContext<Record<string, unknown>, AudienceType.Fabric>",
+          "optional": false,
+          "hasDefault": false,
+          "position": 1,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": [
+        "Fabric"
+      ]
+    },
+    {
+      "functionName": "syncHandler",
+      "delegateParameters": [
+        {
+          "name": "flag",
+          "type": "boolean",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": []
+    },
+    {
+      "functionName": "arrowNoAsync",
+      "delegateParameters": [
+        {
+          "name": "x",
+          "type": "string",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": []
+    }
+  ]
+}

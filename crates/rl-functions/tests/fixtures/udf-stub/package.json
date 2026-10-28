@@ -1,0 +1,8 @@
+{
+  "name": "@microsoft/fabric-user-data-functions",
+  "version": "1.36.2",
+  "description": "Type-only stand-in for the UDF package, for metadata generation tests.",
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts"
+}

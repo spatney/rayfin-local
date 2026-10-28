@@ -1,0 +1,14 @@
+{
+  "name": "udf-metadata-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/src/function_app.js",
+  "scripts": {
+    "build": "tsc --build",
+    "build:watch": "tsc --build --watch"
+  },
+  "dependencies": {
+    "@microsoft/fabric-user-data-functions": "1.36.2"
+  }
+}
