@@ -109,6 +109,19 @@ fn non_empty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
+/// Signed storage URLs carry their capability token in the path; logs keep only the route.
+const SIGNED_URL_ROOT: &str = "/.rayfin-local/storage/";
+
+fn loggable_path(path: &str) -> std::borrow::Cow<'_, str> {
+    match path.strip_prefix(SIGNED_URL_ROOT) {
+        Some(rest) => {
+            let kind = rest.split('/').next().unwrap_or_default();
+            format!("{SIGNED_URL_ROOT}{kind}/<redacted>").into()
+        }
+        None => path.into(),
+    }
+}
+
 fn runtime_config_json(config: &ServerConfig) -> Bytes {
     let runtime_config = RuntimeConfig {
         api_url: config.api_origin.trim().trim_end_matches('/'),
@@ -174,7 +187,7 @@ pub fn build_router(config: ServerConfig, features: Vec<Router>) -> Router {
     router.layer(cors::layer(&config.allowed_origins)).layer(
         TraceLayer::new_for_http()
             .make_span_with(|req: &Request| {
-                tracing::debug_span!("http", method = %req.method(), path = req.uri().path())
+                tracing::debug_span!("http", method = %req.method(), path = %loggable_path(req.uri().path()))
             })
             .on_request(())
             .on_response(|res: &Response<Body>, latency: Duration, _: &Span| {
@@ -188,4 +201,18 @@ pub fn build_router(config: ServerConfig, features: Vec<Router>) -> Router {
             .on_eos(())
             .on_failure(()),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::loggable_path;
+
+    #[test]
+    fn signed_storage_urls_are_redacted_in_logs() {
+        assert_eq!(
+            loggable_path("/.rayfin-local/storage/u/abc.123.mac"),
+            "/.rayfin-local/storage/u/<redacted>"
+        );
+        assert_eq!(loggable_path("/graphql"), "/graphql");
+    }
 }
