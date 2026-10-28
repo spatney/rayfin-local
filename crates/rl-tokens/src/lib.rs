@@ -4,7 +4,16 @@
 //! identity behind `ctx.Tokens.<Audience>` in functions, and the signed-in user behind delegated
 //! connectors. Both become the developer, through the Azure CLI (`az account get-access-token`),
 //! the Rayfin CLI's login (`@microsoft/rayfin-cli/auth`) or `RAYFIN_LOCAL_TOKEN_<AUDIENCE>` env
-//! overrides. Consumers depend only on [`TokenSource`], so tests can use a fake.
+//! overrides. Consumers depend only on [`TokenSource`], so tests can use a fake; [`TokenBroker`]
+//! is the real one.
+
+mod az;
+mod broker;
+mod jwt;
+mod rayfin_cli;
+
+pub use broker::{DeveloperIdentity, RayfinCliConfig, TokenBroker, TokenBrokerConfig, TokenMode};
+pub use jwt::jwt_claims;
 
 use std::{fmt, future::Future, pin::Pin, time::SystemTime};
 
@@ -64,6 +73,26 @@ impl Audience {
         Audience::AzureAi,
         Audience::Ado,
     ];
+
+    /// Every audience: the UDF ones and Power BI.
+    pub const ALL: [Audience; 6] = [
+        Audience::Sql,
+        Audience::Storage,
+        Audience::Fabric,
+        Audience::AzureAi,
+        Audience::Ado,
+        Audience::PowerBi,
+    ];
+
+    /// The env variable whose value, when set, is used as this audience's token:
+    /// `RAYFIN_LOCAL_TOKEN_` and the UDF name in upper case (`RAYFIN_LOCAL_TOKEN_ADO`,
+    /// `RAYFIN_LOCAL_TOKEN_POWERBI`, ...).
+    pub fn token_env_var(self) -> String {
+        format!(
+            "RAYFIN_LOCAL_TOKEN_{}",
+            self.udf_name().to_ascii_uppercase()
+        )
+    }
 
     /// The name the UDF package uses (`AudienceType.<name>`, `ctx.Tokens.<name>`, and
     /// `contextAudiences` in `runtimemetadata.json`).
