@@ -24,6 +24,7 @@ fn config() -> ServerConfig {
         allowed_origins: vec!["https://App.Contoso.example/auth/callback".to_owned()],
         allowed_hosts: None,
         static_site: None,
+        publishable_key_exempt: vec!["/api/projectRuntimeSettings".to_owned()],
     }
 }
 
@@ -38,6 +39,12 @@ fn features() -> Vec<Router> {
                 get(|| async { "jwks alias" }),
             ),
         Router::new().route("/.well-known/jwks.json", get(|| async { "jwks" })),
+        Router::new()
+            .route(
+                "/api/projectRuntimeSettings",
+                get(|| async { "runtime settings" }),
+            )
+            .route("/api/projectRuntimeSettings/x", get(|| async { "nested" })),
         Router::new().route("/functions/{name}/invoke", post(|| async { "invoked" })),
         Router::new().route("/connector-invoke/{name}", post(|| async { "connector" })),
         Router::new().route(
@@ -182,6 +189,18 @@ async fn public_routes_need_no_key() {
     }
     let reply = send(&router, Method::GET, "/rayfin.config.json", &[]).await;
     assert_eq!(reply.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn configured_exempt_paths_need_no_key_and_match_exactly() {
+    let router = build_router(config(), features());
+    let reply = send(&router, Method::GET, "/api/projectRuntimeSettings", &[]).await;
+    assert_eq!(
+        (reply.status, reply.text()),
+        (StatusCode::OK, "runtime settings")
+    );
+    let reply = send(&router, Method::GET, "/api/projectRuntimeSettings/x", &[]).await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

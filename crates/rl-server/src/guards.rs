@@ -22,18 +22,37 @@ fn request_path(req: &Request) -> &str {
     }
 }
 
+/// The app's publishable key and the exact paths that need none.
+pub(crate) struct KeyCheck {
+    key: Box<str>,
+    exempt: HashSet<String>,
+}
+
+impl KeyCheck {
+    pub(crate) fn new(key: &str, exempt: &[String]) -> Self {
+        Self {
+            key: key.into(),
+            exempt: exempt.iter().cloned().collect(),
+        }
+    }
+}
+
 /// Rejects SDK API calls without this app's publishable key: 403, never 401, because a 401 makes
 /// the SDK refresh the session and replay, then sign the user out (compat §2.2, §2.5).
 pub(crate) async fn require_publishable_key(
-    State(key): State<Arc<str>>,
+    State(check): State<Arc<KeyCheck>>,
     req: Request,
     next: Next,
 ) -> Response {
-    if req.method() == Method::OPTIONS || !requires_publishable_key(request_path(&req)) {
+    let path = request_path(&req);
+    if req.method() == Method::OPTIONS
+        || !requires_publishable_key(path)
+        || check.exempt.contains(path)
+    {
         return next.run(req).await;
     }
     let message = match req.headers().get(PUBLISHABLE_KEY) {
-        Some(value) if value.as_bytes() == key.as_bytes() => return next.run(req).await,
+        Some(value) if value.as_bytes() == check.key.as_bytes() => return next.run(req).await,
         Some(_) => {
             "The X-Publishable-Key header does not match this local backend's publishable key. \
              Start the app with `rayfin-local serve` (it sets VITE_RAYFIN_PUBLISHABLE_KEY for \

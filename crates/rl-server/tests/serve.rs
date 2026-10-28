@@ -18,6 +18,7 @@ fn config() -> ServerConfig {
         allowed_origins: vec![],
         allowed_hosts: Some(vec![]),
         static_site: None,
+        publishable_key_exempt: vec![],
     }
 }
 

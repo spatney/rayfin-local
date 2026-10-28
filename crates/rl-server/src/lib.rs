@@ -73,6 +73,9 @@ pub struct ServerConfig {
     pub allowed_hosts: Option<Vec<String>>,
     /// The built app to serve (`--static`).
     pub static_site: Option<StaticSite>,
+    /// Exact paths under the keyed roots that need no publishable key, such as the auth routes
+    /// the real service serves without one (`rl_auth::PUBLISHABLE_KEY_EXEMPT_PATHS`).
+    pub publishable_key_exempt: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -159,7 +162,10 @@ pub fn build_router(config: ServerConfig, features: Vec<Router>) -> Router {
 
     // The last layer added runs first: logging, CORS (so rejections carry CORS headers too and the
     // SDK can read them), the Host check, then the publishable key.
-    let key: Arc<str> = Arc::from(config.publishable_key.as_str());
+    let key = Arc::new(guards::KeyCheck::new(
+        &config.publishable_key,
+        &config.publishable_key_exempt,
+    ));
     router = router.layer(from_fn_with_state(key, guards::require_publishable_key));
     if let Some(hosts) = &config.allowed_hosts {
         let allowlist = Arc::new(guards::HostAllowlist::new(hosts, &config.api_origin));
