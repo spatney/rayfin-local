@@ -1,0 +1,11 @@
+{
+  "name": "rl-storage-sdk-test",
+  "private": true,
+  "description": "The real Rayfin 1.36.2 storage client, driven against rl-storage by tests/sdk.rs.",
+  "type": "module",
+  "dependencies": {
+    "@microsoft/rayfin-client": "1.36.2",
+    "@microsoft/rayfin-lib": "1.36.2",
+    "@microsoft/rayfin-storage": "1.36.2"
+  }
+}
