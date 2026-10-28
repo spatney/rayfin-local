@@ -110,7 +110,9 @@ impl HostManager {
     }
 
     /// Replaces the host with a new one on the current config (e.g. after the package was
-    /// rebuilt), and waits until it is loaded. The old host finishes its in-flight invocations.
+    /// rebuilt), and waits until it is loaded. The old host finishes its in-flight invocations;
+    /// with [`HostConfig::inspect_port`] set it does so before the new host starts, which then
+    /// gets the inspector's port.
     pub async fn reload(&self) -> Result<Vec<RegisteredFunction>, HostError> {
         self.shared.clone().reload(None).await
     }
@@ -296,7 +298,14 @@ impl Shared {
         if !reloading {
             return Err(HostError::Stopped);
         }
-        let result = FunctionHost::start(self.config()).await;
+        let config = self.config();
+        // Two hosts can't share the inspector's port: with one, the old host goes first.
+        if config.inspect_port.is_some()
+            && let Some(State::Ready(old)) = previous.take()
+        {
+            old.stop(self.options.stop_grace).await;
+        }
+        let result = FunctionHost::start(config).await;
         let installed = self.install(result).await;
         if let Some(State::Ready(old)) = previous {
             old.stop(self.options.stop_grace).await;

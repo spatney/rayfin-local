@@ -16,6 +16,8 @@ rl-node.workspace = true
 rl-tokens.workspace = true
 axum.workspace = true
 bytes.workspace = true
+futures-util.workspace = true
+http-body-util.workspace = true
 notify.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -27,5 +29,4 @@ uuid.workspace = true
 
 [dev-dependencies]
 tower.workspace = true
-http-body-util.workspace = true
 tempfile.workspace = true
