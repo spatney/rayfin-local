@@ -2,6 +2,7 @@ node_modules/
 dist/
 rayfin/functions/dist/
 .rayfin-local/
+rayfin-local.toml
 rayfin/.temp/
 rayfin/.env*
 *.tsbuildinfo

@@ -1,0 +1,18 @@
+{
+  "name": "rayfin-local-e2e",
+  "private": true,
+  "type": "module",
+  "description": "End-to-end tests: rayfin-local serve with the fixture app (and optionally the reference app) in a real browser.",
+  "scripts": {
+    "test": "playwright test",
+    "test:fixture": "playwright test --project=fixture",
+    "test:explorer": "cross-env RAYFIN_LOCAL_E2E_EXPLORER=1 playwright test --project=explorer",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1",
+    "@types/node": "^24.19.2",
+    "cross-env": "^10.1.0",
+    "typescript": "~5.9.3"
+  }
+}
