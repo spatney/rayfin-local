@@ -495,20 +495,35 @@ impl ManagedChild {
     }
 
     /// Waits for the process to exit (output already streamed is flushed to the sink first).
+    ///
+    /// When the process exits on its own, processes it started and left running (a browser it
+    /// opened, for example) are released rather than killed; [`ManagedChild::kill`] still ends
+    /// them.
     pub async fn wait(&mut self) -> Result<ExitStatus, NodeError> {
         if let Some(status) = self.status {
             return Ok(status);
         }
         let status = self.child.wait().await?;
-        self.status = Some(status);
+        self.exited(status);
         self.drain_readers(DRAIN_TIMEOUT).await;
         Ok(status)
     }
 
+    /// Records a natural exit and releases what the process left running.
+    fn exited(&mut self, status: ExitStatus) {
+        self.status = Some(status);
+        #[cfg(windows)]
+        if let Some(job) = &self.job {
+            job.release();
+        }
+    }
+
     /// The exit status if the process has exited, without waiting.
     pub fn try_wait(&mut self) -> Result<Option<ExitStatus>, NodeError> {
-        if self.status.is_none() {
-            self.status = self.child.try_wait()?;
+        if self.status.is_none()
+            && let Some(status) = self.child.try_wait()?
+        {
+            self.exited(status);
         }
         Ok(self.status)
     }
@@ -595,7 +610,8 @@ impl Drop for ManagedChild {
             }
         }
         #[cfg(unix)]
-        if let Some(pid) = self.pid {
+        if let (Some(pid), None) = (self.pid, self.status) {
+            // Only while the leader is unreaped: its pid (the group id) can't be reused yet.
             unix::signal_group(pid, libc::SIGKILL);
         }
         for reader in &self.readers {
@@ -673,7 +689,7 @@ pub async fn run_helper<T: serde::de::DeserializeOwned>(
 ) -> Result<T, NodeError> {
     let script = helper.materialize(cache_dir)?;
     let temp_dir = cache_dir.join("tmp");
-    std::fs::create_dir_all(&temp_dir)?;
+    create_private_dir(&temp_dir)?;
     let suffix = unique_suffix();
     let input_path = temp_dir.join(format!("{}-{suffix}.in.json", helper.name));
     let output_path = temp_dir.join(format!("{}-{suffix}.out.json", helper.name));
@@ -757,6 +773,18 @@ struct EnvelopeError {
 }
 
 struct RemoveOnDrop(Vec<PathBuf>);
+
+/// Creates `dir` readable only by the current user where the platform has such permissions:
+/// helper results can carry access tokens.
+fn create_private_dir(dir: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
 
 impl Drop for RemoveOnDrop {
     fn drop(&mut self) {

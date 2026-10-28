@@ -227,7 +227,9 @@ async function main() {
     server = await createServer({
       mode: 'development',
       clearScreen: false,
-      server: { host: options.host, port: options.port, strictPort: true },
+      // rayfin-local opens the browser itself (`--open`); a browser Vite started would also be
+      // stopped together with Vite's process tree.
+      server: { host: options.host, port: options.port, strictPort: true, open: false },
       plugins: [rayfinLocalShim(options, state)],
     });
     await server.listen();

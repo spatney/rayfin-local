@@ -1,0 +1,119 @@
+# Differences from Fabric
+
+rayfin-local runs an unmodified Rayfin app (SDK 1.36.x) against local stand-ins for the Rayfin services.
+It answers the SDK with the same routes, bodies, statuses and errors as Fabric wherever it can.
+This page lists where it can't, per SDK surface.
+
+Each row has one of three statuses:
+
+- **Supported:** works as on Fabric.
+- **Differs:** works, with the differences in the notes.
+- **Not supported:** not available locally.
+
+## Who acts
+
+The biggest difference is identity: everything that reaches Fabric or Azure runs as you, the developer.
+
+| Caller | On Fabric | Locally |
+| --- | --- | --- |
+| Data API and storage | The signed-in app user. | The signed-in local user. |
+| Functions' `ctx.Tokens.<Audience>` | The app's identity (for Fabric apps, the owner of the app item). | You: your Azure CLI or Rayfin CLI login, or `RAYFIN_LOCAL_TOKEN_<AUDIENCE>`. |
+| Delegated connectors (`fabric-semanticmodel`) | The signed-in user, on behalf of. | You, with your Power BI token. |
+| "Sign in with Fabric" | The user's Fabric account. | A local user, or you with "Continue as". |
+
+So locally a function or a query can reach what your account can reach, which may be more or less than the app's identity or its users.
+Keep the backend on loopback (the default `--host 127.0.0.1`): any other address lets other machines act as you.
+
+## Auth (`client.auth`)
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| Username/password sign-up and sign-in | Supported | Users live in `.rayfin-local/db.sqlite`, with argon2id password hashes. |
+| Sessions: access tokens, refresh-token rotation, sign-out, sign-out everywhere | Supported | ES256 access tokens shaped like the service's, with the lifetimes of `services.auth` in `rayfin.yml`. |
+| JWKS and runtime settings (`/.well-known/jwks.json`, `/api/projectRuntimeSettings`) | Supported | The settings mirror `services.auth` in `rayfin.yml`. |
+| "Sign in with Fabric" (`ensureSignedInWithFabric`) | Differs | The popup opens rayfin-local's sign-in page (`/.rayfin-local/portal`) instead of the Fabric portal. It offers local sign-in, sign-up and "Continue as &lt;you&gt;". The handshake with the app is the SDK's own (`brokeredAuth.*` messages, then a one-time handoff code). |
+| Entra users | Differs | Local users are not Entra users. "Continue as" signs you in with your own Entra account (the one your tokens come from), and is offered only when the backend listens on loopback. |
+| The `email` claim | Differs | Set only when the username is an email address; "Continue as" sets it to your user principal name. Policies on `claims.email` need such a user. |
+| Entra token exchange (`POST /api/auth/v1/brokered/token`: `signInWithEntraToken`, the Vite plugin's auto-login) | Differs | Accepted on loopback even when `services.auth.fabric.externalEntraExchange` is off, with a warning; Fabric needs `services.auth.fabric.enabled` and `externalEntraExchange`. Tokens are checked against Microsoft's signing keys. |
+| Passwordless sign-in (magic links) | Not supported | The routes answer as the service does when the feature is disabled. |
+| Email verification and password-reset emails | Not supported | No email is sent. Reset a local password with `rayfin-local users reset-password`. |
+
+## Data (`client.data`, `/graphql`)
+
+The data API is a DAB-compatible GraphQL API compiled to SQL over SQLite.
+It generates the schema DAB generates for your entities and answers with DAB's data, errors and HTTP statuses.
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| Queries: lists, by key, filters, `orderBy`, cursor pagination | Supported | |
+| Relationships (`@one`, `@many`) | Supported | Nested selections and relationship filters. |
+| Mutations: create, update, delete | Supported | |
+| Aggregations (`groupBy`, `aggregate`) | Supported | |
+| `@role` policies and field permissions | Supported | The `anonymous` and `authenticated` roles, with DAB's per-action inheritance. A policy that reads a claim the caller doesn't have fails the request, as on Fabric. |
+| Constraints | Supported | The database enforces required fields, lengths, `@set` values, the email shape, minimum lengths, uniqueness and foreign keys, as on Fabric. Patterns and other `min`/`max` options are checked only by the SDK's form validation, on both. |
+| Text comparisons | Differs | Case-insensitive like Fabric SQL's default collation, but SQLite's `NOCASE` folds ASCII letters only: `'É' = 'é'` is false locally and true on Fabric. On the `postgresql` dialect, text compares case-sensitively. |
+| Decimals | Differs | Stored as doubles (`REAL`), with output rounded to the column's scale. About 15 significant digits are exact, so a `DECIMAL(18,2)` above about 10^13 loses cents; Fabric is exact to the declared precision. |
+| Dates | Differs | Stored as UTC ISO-8601 text with 100 ns precision. Responses use Fabric's format (`YYYY-MM-DDTHH:MM:SS.fffZ`), so the difference shows only in the SQLite file. |
+| Schema changes | Differs | `serve` applies them from `rayfin/data` when it starts, not a deployment. Changes that would lose data are refused until you pass `--force-schema`. |
+| Introspection (`__schema`, `__type`) | Differs | Refused unless `services.data.allowIntrospection` is true, as on Fabric; local answers may be incomplete. `__typename` always works. |
+| Data from a deployed app | Not supported | The local database starts empty; nothing is copied from Fabric. |
+
+## Functions (`/functions/<name>/invoke`)
+
+rayfin-local builds your functions package and runs it on your Node.js, with the package's own `@azure/functions` and `@microsoft/fabric-user-data-functions`, without Azure Functions Core Tools.
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| Invocation and the response envelope | Supported | HTTP 200 with `x-fabric-udf-status`, so failed functions surface as `FunctionsError`, as deployed. This holds even when `local.settings.json` sets `IsLocal` to true. Anonymous calls are allowed, as deployed. |
+| Arguments and return values | Supported | Parsed and serialized by the UDF package itself. |
+| `ctx.getDataClient()` | Supported | Calls the local data API as the caller. |
+| `ctx.Tokens.<Audience>` (`Sql`, `Storage`, `Fabric`, `AzureAI`, `ADO`) | Differs | Tokens for you, not the app's identity. A token that can't be minted is left out: the function still runs, reading it throws "No token available for audience…", and `serve` logs why. |
+| `ctx.Secrets.<NAME>` | Differs | Local values, from `local.settings.json` `Values`, the environment, or `.rayfin-local/secrets.json` (`rayfin-local secret set`). |
+| Error messages | Differs | Deployed, 5xx bodies hide their cause behind `internal_server_error`; locally the message says what failed. |
+| Limits | Differs | The 250-second timeout (408) is the UDF ceiling, and results over 30 MiB fail with `ResponseTooLarge`, as deployed. Request bodies over 30 MiB get 413, a limit of rayfin-local's own. |
+| Logs | Differs | `console.*` output goes to `serve`'s output, prefixed `[fn]`, not to Fabric's monitoring. |
+
+## Connectors (`client.connectors`, `/connector-invoke/<name>`)
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| `fabric-semanticmodel` queries | Differs | Sent to the real semantic model through Power BI, as you rather than the signed-in user. The app user must still be signed in, as deployed. Results, DAX errors and Power BI failures reach the SDK in the shapes it normalizes on Fabric. |
+| `fabric-semanticmodel` with an Azure CLI token | Differs | Power BI refuses `executeDaxQueries` (Arrow) to tokens without a dataset scope, which includes every Azure CLI token, so these queries run through `executeQueries` (JSON). Columns then have no `dataType` (the SDK reports `'unknown'`), DateTimes lose their milliseconds, and empty results have no columns. Results are capped at 100,000 rows (an `overflow` error beyond that), and `culture`, `schemaOnly` and `queryTimeout` are ignored. |
+| Category A SQL connectors (`fabric-sqldatabase`, `fabric-warehouse`, `fabric-sqlanalytics`: `/connectors/<name>/graphql`) | Not supported | Answer 501 `not_supported`. |
+| `kusto` and other connector types | Not supported | Answer 501 `not_supported`. |
+
+## Storage (`/api/storage/*`)
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| Upload, download, list and delete (`StorageFolderClient`) | Supported | The 1.36.2 routes and answers, on files under `.rayfin-local/storage`. |
+| `@blob` folder rules and checks | Supported | `anonymous` and `authenticated` rules; checks compare strings case-insensitively, as Fabric's collation does. |
+| Signed URLs | Differs | They point at the backend (`/.rayfin-local/storage/…`), not Azure Blob Storage; the HMAC token in the URL is the credential. The default lifetime is 15 minutes. |
+| Long-running operations | Differs | Every step completes at once, so the first status poll already sees the result. |
+| Size limits | Differs | 25 MiB per file, the service's limit (a folder's `maxSize` can lower it), and 1 GiB for all files together. |
+
+## Frontend and hosting
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| The app's Vite dev server | Supported | Your `vite.config` and plugins. rayfin-local starts Vite itself with the local environment, never `npm run dev`. |
+| `rayfinLocalDev()` (`@microsoft/rayfin-local-dev/vite`) | Supported | Used when your Vite config has it; otherwise rayfin-local adds a plugin that serves `/rayfin.config.json` and proxies the SDK's routes. |
+| Static hosting | Differs | `--static` builds once with `services.staticHosting.buildCommand` and serves the output from the backend origin, with the SPA fallback to `indexDocument`; it doesn't rebuild on changes. |
+
+## Platform
+
+| Feature | Status | Notes |
+| --- | --- | --- |
+| Deployment (`rayfin up`), Fabric items, workspaces and their permissions | Not supported | Nothing is deployed, and no Fabric item is created or changed. |
+| Workspace, item and tenant ids | Differs | Taken from `rayfin/.env` when the app was deployed, else generated. The app id and the publishable key (`pk-local-…`) are local. |
+| SDK versions | Differs | rayfin-local implements 1.36.x; with another version, `serve` warns that behavior may differ. |
+
+## Local only
+
+These exist only in rayfin-local:
+
+- Hot reload of functions: `build:watch` rebuilds them, and the host restarts when the compiled output changes.
+- `serve --inspect[=PORT]`: the Node.js inspector on the function host.
+- `RAYFIN_LOCAL_TOKEN_<AUDIENCE>`: fixed tokens for tests and CI.
+- `[connectors] powerbi_base_url` in `rayfin-local.toml`: a mock or sovereign-cloud Power BI.
+- The `users`, `secret`, `sign-in-link`, `reset`, `doctor` and `schema` commands.

@@ -1,0 +1,121 @@
+name: release
+
+# Pushing a version tag (`v0.2.0`) builds rayfin-local for each platform and publishes the archives
+# and their SHA-256 checksums as a GitHub Release. The tag must match the version in Cargo.toml.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version:
+    name: check the version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+      - id: version
+        name: Compare the tag with the crate version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "rayfin-local") | .version')"
+          if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match rayfin-local $version ([workspace.package] version in Cargo.toml). Tag v$version, or bump the version first."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+          # The oldest supported Ubuntu keeps the binary's glibc requirement low.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          # Cross-compiled on Apple silicon (Apple's toolchain targets both architectures), so the
+          # binary can't be run here.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: true
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+      CROSS: ${{ matrix.cross || false }}
+      ARCHIVE: rayfin-local-${{ needs.version.outputs.version }}-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked -p rayfin-local --target ${{ matrix.target }}
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          exe=rayfin-local
+          if [[ "$TARGET" == *-windows-* ]]; then exe=rayfin-local.exe; fi
+          bin="target/$TARGET/release/$exe"
+          if [[ "$CROSS" != "true" ]]; then "$bin" --version; fi
+          mkdir -p "dist/$ARCHIVE"
+          cp "$bin" README.md LICENSE "dist/$ARCHIVE/"
+          cd dist
+          if [[ "$TARGET" == *-windows-* ]]; then
+            7z a -tzip "$ARCHIVE.zip" "$ARCHIVE" > /dev/null
+          else
+            tar -czf "$ARCHIVE.tar.gz" "$ARCHIVE"
+          fi
+          rm -rf "$ARCHIVE"
+          ls -l
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    name: publish the release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum rayfin-local-* > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/rayfin-local-*
+            dist/SHA256SUMS.txt
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}

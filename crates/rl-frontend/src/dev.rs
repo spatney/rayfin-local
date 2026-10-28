@@ -132,7 +132,11 @@ enum Waited {
 
 impl DevServer {
     /// Starts the app's Vite dev server and waits until it listens (up to 60 seconds).
-    pub async fn start(config: DevServerConfig) -> Result<Self, FrontendError> {
+    pub async fn start(mut config: DevServerConfig) -> Result<Self, FrontendError> {
+        // Vite treats port 0 as "the default" (5173), not "any free port".
+        if config.port == 0 {
+            config.port = free_port(&config.host)?;
+        }
         let frontend_dir = dunce::simplified(&config.frontend_dir).to_path_buf();
         if !frontend_dir.is_dir() {
             return Err(FrontendError::MissingFrontendDir(frontend_dir));
@@ -391,6 +395,20 @@ fn install_hint(frontend_dir: &Path) -> String {
          `rayfin-local serve --static`."
             .to_owned()
     }
+}
+
+/// A port that is free on every address Vite may use for `host`.
+fn free_port(host: &str) -> Result<u16, FrontendError> {
+    for _ in 0..20 {
+        let port = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .and_then(|listener| listener.local_addr())
+            .map_err(|_| FrontendError::PortInUse { port: 0 })?
+            .port();
+        if port_is_free(host, port) {
+            return Ok(port);
+        }
+    }
+    Err(FrontendError::PortInUse { port: 0 })
 }
 
 /// Whether Vite can listen on `port`. For `localhost` both loopback addresses must be free:

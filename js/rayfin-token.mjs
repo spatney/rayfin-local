@@ -117,6 +117,7 @@ try {
 } catch (error) {
   response = { ok: false, error: { message: error?.message ?? String(error), stack: error?.stack } };
 }
-fs.writeFileSync(args.output, JSON.stringify(response));
+// The answer carries an access token: readable by the current user only (where modes apply).
+fs.writeFileSync(args.output, JSON.stringify(response), { mode: 0o600 });
 // MSAL may leave handles open (its sign-in redirect server, cache locks); the answer is written.
 setTimeout(() => process.exit(0), 200).unref();

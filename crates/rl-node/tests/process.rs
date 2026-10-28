@@ -290,6 +290,52 @@ async fn dropping_the_handle_ends_the_whole_tree() {
     assert_gone(grandchild).await;
 }
 
+#[tokio::test]
+async fn processes_left_after_a_natural_exit_are_released() {
+    let node = node().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
+    let sink: LineSink = Arc::new(move |_, _, line| {
+        if let Some(pid) = line.strip_prefix("grandchild ") {
+            let _ = tx.send(pid.trim().parse().unwrap());
+        }
+    });
+    // Like a browser opened by the Rayfin CLI's sign-in: started, then left running on exit.
+    let script = "const { spawn } = require('node:child_process');\
+        const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore', detached: true });\
+        c.unref();\
+        console.log('grandchild ' + c.pid);";
+    let mut child = ManagedChild::spawn(
+        ProcessSpec::new("leave", &node.path, dir.path())
+            .args(["-e", script])
+            .sink(sink),
+    )
+    .unwrap();
+    assert!(child.wait().await.unwrap().success());
+    let grandchild = rx.recv().await.unwrap();
+    drop(child);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let survived = is_alive(grandchild);
+    kill_pid(grandchild);
+    assert!(
+        survived,
+        "a natural exit must not kill what the process left running"
+    );
+}
+
+#[cfg(windows)]
+fn kill_pid(pid: u32) {
+    let _ = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .output();
+}
+
+#[cfg(unix)]
+fn kill_pid(pid: u32) {
+    // SAFETY: plain syscall.
+    unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
+}
+
 #[cfg(windows)]
 fn is_alive(pid: u32) -> bool {
     use windows_sys::Win32::{

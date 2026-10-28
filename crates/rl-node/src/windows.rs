@@ -69,6 +69,22 @@ impl Job {
         // SAFETY: the handle is valid until drop.
         unsafe { TerminateJobObject(self.0, 1) };
     }
+
+    /// Clears kill-on-close, so closing the handle leaves the job's remaining processes running
+    /// (a browser a child opened, for example).
+    pub(crate) fn release(&self) {
+        // SAFETY: all-zero is a valid value of this plain C struct.
+        let info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { mem::zeroed() };
+        // SAFETY: `info` is a valid struct of the size passed, for this information class.
+        unsafe {
+            SetInformationJobObject(
+                self.0,
+                JobObjectExtendedLimitInformation,
+                (&raw const info).cast::<c_void>(),
+                mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+    }
 }
 
 impl Drop for Job {
