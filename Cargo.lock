@@ -1086,6 +1086,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
 
 [[package]]
+name = "num_threads"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c7398b9c8b70908f6371f47ed36737907c87c52af34c268fed0bf0ceb92ead9"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "objc2-core-foundation"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1268,8 +1277,13 @@ name = "rayfin-local"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
  "clap",
+ "hex",
+ "notify",
  "open",
+ "reqwest",
+ "ring",
  "rl-auth",
  "rl-connectors",
  "rl-db",
@@ -1283,10 +1297,15 @@ dependencies = [
  "rl-storage",
  "rl-tokens",
  "rustls",
+ "serde",
  "serde_json",
+ "tempfile",
+ "thiserror",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "walkdir",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1377,10 +1396,15 @@ dependencies = [
  "axum",
  "base64",
  "http-body-util",
+ "parking_lot",
+ "reqwest",
  "ring",
  "rl-db",
  "rl-model",
+ "rl-server",
+ "rl-tokens",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "tempfile",
@@ -1398,6 +1422,7 @@ name = "rl-connectors"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "bytes",
  "futures-util",
  "http-body-util",
@@ -1425,16 +1450,22 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror",
+ "time",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
 name = "rl-frontend"
 version = "0.1.0"
 dependencies = [
+ "axum",
+ "dunce",
+ "reqwest",
  "rl-node",
- "rl-project",
+ "rl-server",
+ "rustls",
  "serde",
  "serde_json",
  "tempfile",
@@ -1449,6 +1480,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "bytes",
+ "futures-util",
  "http-body-util",
  "notify",
  "reqwest",
@@ -1474,15 +1506,22 @@ dependencies = [
  "base64",
  "http-body-util",
  "indexmap",
+ "parking_lot",
+ "reqwest",
+ "rl-auth",
  "rl-db",
  "rl-model",
+ "rl-server",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tower",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -1517,6 +1556,7 @@ name = "rl-project"
 version = "0.1.0"
 dependencies = [
  "dunce",
+ "ring",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -1532,13 +1572,10 @@ name = "rl-server"
 version = "0.1.0"
 dependencies = [
  "axum",
- "http",
  "http-body-util",
- "mime_guess",
  "serde",
  "serde_json",
  "tempfile",
- "thiserror",
  "tokio",
  "tower",
  "tower-http",
@@ -1554,10 +1591,12 @@ dependencies = [
  "base64",
  "bytes",
  "futures-util",
+ "hex",
  "http-body-util",
  "ring",
  "rl-db",
  "rl-model",
+ "rl-server",
  "rusqlite",
  "serde",
  "serde_json",
@@ -1575,9 +1614,11 @@ dependencies = [
 name = "rl-tokens"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "rl-node",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "time",
  "tokio",
@@ -2059,7 +2100,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdb87b95ec50ddfa440816d227a17b2ccbdda963a316a727fda0fc4334f7d134"
 dependencies = [
  "deranged",
+ "libc",
  "num-conv",
+ "num_threads",
  "powerfmt",
  "serde_core",
  "time-core",

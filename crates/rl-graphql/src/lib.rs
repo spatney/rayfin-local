@@ -19,25 +19,18 @@
 //! | `cursor` | DAB's pagination cursors (base64 JSON of the order-by values and directions). |
 //! | `exec` | One statement per root field, run in one database call, and the response shaping (errors, `null` propagation, `hasNextPage`, `endCursor`). |
 //! | `aggregate` | `{E}Connection.groupBy` (DAB's aggregations): its types, plan, SQL (`GROUP BY`/`HAVING` over the connection's rows) and response. |
+//! | `mutation` | `create{E}`/`update{E}`/`delete{E}`: each root field in its own transaction, per-action grants and policies, then the row read back with the read permission. |
 //! | `http` | The routes and the HTTP status policy. |
 //!
-//! # Extension points (mutations, aggregations)
+//! # Notes
 //!
-//! - **Mutations** (`mutation.rs`): add a `Mutation` object type in [`schema::Schema::build`]
-//!   (set `mutation_type`), with `create{E}(item:)`/`update{E}(id:, item:)`/`delete{E}(id:)`
-//!   fields and the `Create{E}Input`/`Update{E}Input` input types; new [`schema::Resolver`]
-//!   variants for them; a mutation branch in `exec::execute` (it currently answers
-//!   "does not support `Mutation` operations"), running each root field in its own transaction.
-//!   Reuse [`access::grant`] (create/update/delete), [`policy::action_filter`] for update/delete
-//!   `WHERE`s, [`policy::compile`] with a row source of candidate values for create checks, and
-//!   [`plan::object_plan`] plus `exec`'s object JSON to read the row back with the read
-//!   permission. Extend `exec`'s `requires_authentication` to the write actions.
-//! - **Aggregations** (`aggregate.rs`, done): `groupBy` on `{E}Connection` and the `{E}GroupBy`,
-//!   `{E}Aggregations`, `{E}ScalarFields`, `{E}NumericAggregateFields` types, added in
-//!   [`schema::Schema::build`] with [`schema::Resolver::Extension`]; a
-//!   [`plan::ConnectionField::GroupBy`] in [`plan::connection_plan`], whose groups reuse the
-//!   connection's `predicate` (filter and read policy); `exec` hands a connection with `groupBy`
-//!   to `aggregate` for its SQL and shaping.
+//! - **Mutations** reuse [`access::grant`], [`policy::action_filter`] for update/delete
+//!   `WHERE`s, [`policy::compile`] over the candidate row for create checks, and
+//!   [`plan::object_plan`] to read the row back.
+//! - **Aggregations** add `groupBy` on `{E}Connection` and the `{E}GroupBy`, `{E}Aggregations`,
+//!   `{E}ScalarFields`, `{E}NumericAggregateFields` types in [`schema::Schema::build`]; a
+//!   [`plan::ConnectionField::GroupBy`] reuses the connection's `predicate` (filter and read
+//!   policy).
 //! - **Introspection**: `__schema`/`__type` are refused with Hot Chocolate's `HC0046` error
 //!   unless [`DataApiSettings::allow_introspection`]; when allowed they answer an error until a
 //!   resolver over [`schema::Schema`] is added (`exec::plan_root`). `__typename` always works.
