@@ -1,7 +1,13 @@
 //! SQLite storage for rayfin-local: one database file per project (`.rayfin-local/db.sqlite`).
 //!
 //! [`Db`] is the shared handle. Components keep their own tables (named `_rl_<component>_*`) and
-//! evolve them with [`Db::migrate_component`]; the entity tables are derived from the app model.
+//! evolve them with [`Db::migrate_component`]; the entity tables are derived from the app model:
+//! [`codec`] (value storage and conversions), [`schema`] (DDL) and [`migrate`] (migrations).
+
+pub mod codec;
+mod error;
+pub mod migrate;
+pub mod schema;
 
 use std::{
     path::{Path, PathBuf},
@@ -11,6 +17,10 @@ use std::{
 
 use parking_lot::Mutex;
 use rusqlite::{Connection, OptionalExtension, params};
+
+pub use error::{DataLoss, LossReason, SchemaError};
+pub use migrate::{MigrationPlan, MigrationReport, MigrationStep, StepClass, apply, plan};
+pub use schema::{StoredSchema, create_table_sql, schema_sql};
 
 /// A database failure.
 #[derive(Debug, thiserror::Error)]

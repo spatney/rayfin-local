@@ -28,10 +28,23 @@ rl-storage.workspace = true
 rl-frontend.workspace = true
 rl-server.workspace = true
 anyhow.workspace = true
+axum.workspace = true
 clap.workspace = true
+hex.workspace = true
+open.workspace = true
+reqwest.workspace = true
+ring.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-serde_json.workspace = true
-rustls.workspace = true
-open.workspace = true
+walkdir.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,8 +1,21 @@
 //! `rayfin-local`: run a Rayfin app and its whole backend on this machine.
 
-use std::path::PathBuf;
+mod analysis;
+mod commands;
+mod integrations;
+mod ports;
+mod shutdown;
+mod ui;
+
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use rl_tokens::TokenMode;
+use tracing_subscriber::EnvFilter;
+
+use crate::commands::serve::ServeOptions;
 
 #[derive(Parser)]
 #[command(
@@ -58,12 +71,14 @@ struct ServeArgs {
     /// Do not build or run the app's functions.
     #[arg(long)]
     no_functions: bool,
-    /// Interface to listen on. Anything but loopback exposes your Azure identity to the network.
-    #[arg(long, default_value = "127.0.0.1")]
-    host: String,
-    /// Where tokens for Fabric and Azure resources come from.
-    #[arg(long, value_enum, default_value_t = TokenSourceArg::Auto)]
-    token_source: TokenSourceArg,
+    /// Interface to listen on (default: `[server] host` in rayfin-local.toml, else 127.0.0.1).
+    /// Anything but loopback exposes your Azure identity to the network.
+    #[arg(long, value_name = "HOST")]
+    host: Option<String>,
+    /// Where tokens for Fabric and Azure resources come from (default: `[tokens] source` in
+    /// rayfin-local.toml, else auto).
+    #[arg(long, value_enum)]
+    token_source: Option<TokenSourceArg>,
     /// Entra tenant for tokens (default: your az/Rayfin login's tenant).
     #[arg(long)]
     tenant: Option<String>,
@@ -91,32 +106,125 @@ enum TokenSourceArg {
     Rayfin,
 }
 
-fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-    let _ = (&cli.project, cli.verbose);
-    match cli.command {
-        Command::Serve(args) => {
-            let _ = (
-                args.port,
-                args.frontend_port,
-                args.static_build,
-                args.no_frontend,
-                args.no_functions,
-                args.host,
-                args.token_source,
-                args.tenant,
-                args.force_schema,
-                args.reset,
-                args.inspect,
-                args.open,
-            );
-            anyhow::bail!("`serve` is not implemented yet")
+impl From<TokenSourceArg> for TokenMode {
+    fn from(arg: TokenSourceArg) -> Self {
+        match arg {
+            TokenSourceArg::Auto => TokenMode::Auto,
+            TokenSourceArg::Az => TokenMode::Az,
+            TokenSourceArg::Rayfin => TokenMode::Rayfin,
         }
-        Command::Reset { yes } => {
-            let _ = yes;
-            anyhow::bail!("`reset` is not implemented yet")
-        }
-        Command::Doctor => anyhow::bail!("`doctor` is not implemented yet"),
-        Command::Schema => anyhow::bail!("`schema` is not implemented yet"),
     }
+}
+
+impl ServeArgs {
+    fn into_options(self, verbose: bool) -> ServeOptions {
+        ServeOptions {
+            port: self.port,
+            frontend_port: self.frontend_port,
+            static_build: self.static_build,
+            no_frontend: self.no_frontend,
+            no_functions: self.no_functions,
+            host: self.host,
+            token_source: self.token_source.map(TokenMode::from),
+            tenant: self.tenant,
+            force_schema: self.force_schema,
+            reset: self.reset,
+            inspect: self.inspect,
+            open: self.open,
+            verbose,
+        }
+    }
+}
+
+/// The crates whose logs `--verbose` shows at debug level.
+const OWN_CRATES: [&str; 13] = [
+    "rayfin_local",
+    "rl_project",
+    "rl_node",
+    "rl_model",
+    "rl_db",
+    "rl_graphql",
+    "rl_auth",
+    "rl_tokens",
+    "rl_functions",
+    "rl_connectors",
+    "rl_storage",
+    "rl_frontend",
+    "rl_server",
+];
+
+fn main() -> ExitCode {
+    let cli = Cli::parse();
+    ui::init();
+    init_tracing(cli.verbose);
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    match run(cli) {
+        Ok(code) => code,
+        Err(err) => {
+            ui::error(&err);
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(cli: Cli) -> anyhow::Result<ExitCode> {
+    rl_node::init_process_supervision()?;
+    let dir = project_dir(cli.project.as_deref())?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(async move {
+        match cli.command {
+            Command::Serve(args) => {
+                commands::serve::run(&dir, args.into_options(cli.verbose)).await
+            }
+            Command::Reset { yes } => commands::reset::run(&dir, yes),
+            Command::Doctor => commands::doctor::run(&dir).await,
+            Command::Schema => commands::schema::run(&dir, cli.verbose).await,
+        }
+    });
+    // Don't let a blocking task that is still running (a database call, a child's output
+    // reader) hold up the exit.
+    runtime.shutdown_timeout(Duration::from_secs(1));
+    result
+}
+
+/// `-C` (relative to the current directory), else the current directory.
+fn project_dir(project: Option<&Path>) -> anyhow::Result<PathBuf> {
+    let cwd = std::env::current_dir()
+        .map_err(|err| anyhow::anyhow!("Could not read the current directory: {err}"))?;
+    Ok(match project {
+        Some(dir) => cwd.join(dir),
+        None => cwd,
+    })
+}
+
+/// Logs go to stderr without timestamps or targets: `info` for rayfin-local, `warn` for
+/// libraries; `--verbose` shows rayfin-local's debug logs, and `RUST_LOG` replaces the defaults.
+fn init_tracing(verbose: bool) {
+    let rust_log = std::env::var("RUST_LOG")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let mut directives = rust_log.unwrap_or_else(|| {
+        let own = OWN_CRATES.map(|krate| format!("{krate}=info")).join(",");
+        format!("warn,{own}")
+    });
+    if verbose {
+        for krate in OWN_CRATES {
+            directives.push_str(&format!(",{krate}=debug"));
+        }
+    }
+    let filter = EnvFilter::try_new(&directives).unwrap_or_else(|err| {
+        ui::warn(format_args!("ignoring RUST_LOG: {err}"));
+        EnvFilter::new("warn,rayfin_local=info")
+    });
+    tracing_subscriber::fmt()
+        .compact()
+        .without_time()
+        .with_target(false)
+        .with_ansi(ui::stderr_colors())
+        .with_writer(std::io::stderr)
+        .with_env_filter(filter)
+        .init();
 }
