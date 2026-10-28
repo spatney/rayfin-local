@@ -1,0 +1,12 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "node",
+    "AzureWebJobsStorage": "",
+    "AZURE_FUNCTIONS_ENVIRONMENT": "Development",
+    "IsLocal": "true",
+    "RAYFIN_API_URL": "https://deployed.example.invalid/appbackends/fixture/",
+    "RAYFIN_PUBLISHABLE_KEY": "pk_deployed_fixture",
+    "API_KEY": "fixture-api-key"
+  }
+}

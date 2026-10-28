@@ -1,0 +1,18 @@
+{
+  "name": "rayfin-local-fixture-functions-basic",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Rayfin functions fixture for the rayfin-local function host tests.",
+  "type": "module",
+  "main": "dist/src/function_app.js",
+  "scripts": {
+    "build": "tsc --build"
+  },
+  "dependencies": {
+    "@azure/functions": "^4.16.2",
+    "@microsoft/fabric-user-data-functions": "1.36.2"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3"
+  }
+}

@@ -1,0 +1,186 @@
+{
+  "schemaVersion": "2.0",
+  "functions": [
+    {
+      "functionName": "hello",
+      "delegateParameters": [],
+      "contextAudiences": []
+    },
+    {
+      "functionName": "echo",
+      "delegateParameters": [
+        {
+          "name": "text",
+          "type": "string",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": false
+        },
+        {
+          "name": "count",
+          "type": "number",
+          "optional": false,
+          "hasDefault": false,
+          "position": 1,
+          "isFabricParameter": false
+        },
+        {
+          "name": "flag",
+          "type": "boolean",
+          "optional": false,
+          "hasDefault": false,
+          "position": 2,
+          "isFabricParameter": false
+        },
+        {
+          "name": "options",
+          "type": "object",
+          "optional": false,
+          "hasDefault": false,
+          "position": 3,
+          "isFabricParameter": false
+        },
+        {
+          "name": "tags",
+          "type": "string[]",
+          "optional": false,
+          "hasDefault": false,
+          "position": 4,
+          "isFabricParameter": false
+        },
+        {
+          "name": "scores",
+          "type": "Array<number>",
+          "optional": false,
+          "hasDefault": false,
+          "position": 5,
+          "isFabricParameter": false
+        },
+        {
+          "name": "note",
+          "type": "Note | null",
+          "optional": false,
+          "hasDefault": false,
+          "position": 6,
+          "isFabricParameter": false
+        },
+        {
+          "name": "greeting",
+          "optional": false,
+          "hasDefault": true,
+          "position": 7,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": []
+    },
+    {
+      "functionName": "tokens",
+      "delegateParameters": [
+        {
+          "name": "ctx",
+          "type": "RayfinContext<Record<string, unknown>, AudienceType.ADO | AudienceType.Fabric>",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": [
+        "ADO",
+        "Fabric"
+      ]
+    },
+    {
+      "functionName": "whoami",
+      "delegateParameters": [
+        {
+          "name": "ctx",
+          "type": "RayfinContext<Record<string, unknown>>",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": []
+    },
+    {
+      "functionName": "secret",
+      "delegateParameters": [
+        {
+          "name": "ctx",
+          "type": "RayfinContext<Record<string, unknown>>",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": []
+    },
+    {
+      "functionName": "fail",
+      "delegateParameters": [],
+      "contextAudiences": []
+    },
+    {
+      "functionName": "reject",
+      "delegateParameters": [
+        {
+          "name": "reason",
+          "type": "string",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": []
+    },
+    {
+      "functionName": "logs",
+      "delegateParameters": [
+        {
+          "name": "message",
+          "type": "string",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": []
+    },
+    {
+      "functionName": "counter",
+      "delegateParameters": [],
+      "contextAudiences": []
+    },
+    {
+      "functionName": "slow",
+      "delegateParameters": [
+        {
+          "name": "ms",
+          "type": "number",
+          "optional": false,
+          "hasDefault": false,
+          "position": 0,
+          "isFabricParameter": false
+        }
+      ],
+      "contextAudiences": []
+    },
+    {
+      "functionName": "crash",
+      "delegateParameters": [],
+      "contextAudiences": []
+    },
+    {
+      "functionName": "bigint",
+      "delegateParameters": [],
+      "contextAudiences": []
+    }
+  ]
+}
