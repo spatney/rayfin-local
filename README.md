@@ -23,7 +23,8 @@ It then starts your app's own Vite dev server, pointed at all of that.
 Nothing is deployed to Fabric, and your source and `.env` files are not changed.
 
 rayfin-local implements the Rayfin SDK 1.36.x contract.
-It is in development; see [what differs from Fabric](docs/differences.md).
+It runs the reference app (Backlog Explorer) end to end: popup sign-in, its data, its functions against Azure DevOps and its semantic model.
+See [what differs from Fabric](docs/differences.md).
 
 ## Contents
 
@@ -123,7 +124,6 @@ Users are local: they live in `.rayfin-local/db.sqlite`, not in Entra ID.
   Policies that compare `claims.email` need such a user.
 
 `rayfin-local users` lists, adds and deletes local users and resets their passwords.
-`rayfin-local sign-in-link` prints a one-time link that signs a user in.
 Passwordless sign-in, email verification and password-reset emails are not available locally.
 
 ## Identity and Azure tokens
@@ -235,7 +235,6 @@ A port set by a flag or in this file must be free, or `serve` stops with an erro
 | `rayfin-local reset [--yes]` | Delete `.rayfin-local/`: database, users, keys, stored files and secrets. |
 | `rayfin-local users list\|add\|delete\|reset-password` | Manage local users. |
 | `rayfin-local secret set\|list\|delete` | Manage local secret values (`.rayfin-local/secrets.json`). |
-| `rayfin-local sign-in-link` | Print a one-time sign-in link for a local user. |
 
 `rayfin-local <command> --help` shows each command's arguments.
 Every command takes these options:

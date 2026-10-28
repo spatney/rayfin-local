@@ -55,7 +55,7 @@ It generates the schema DAB generates for your entities and answers with DAB's d
 | Decimals | Differs | Stored as doubles (`REAL`), with output rounded to the column's scale. About 15 significant digits are exact, so a `DECIMAL(18,2)` above about 10^13 loses cents; Fabric is exact to the declared precision. |
 | Dates | Differs | Stored as UTC ISO-8601 text with 100 ns precision. Responses use Fabric's format (`YYYY-MM-DDTHH:MM:SS.fffZ`), so the difference shows only in the SQLite file. |
 | Schema changes | Differs | `serve` applies them from `rayfin/data` when it starts, not a deployment. Changes that would lose data are refused until you pass `--force-schema`. |
-| Introspection (`__schema`, `__type`) | Differs | Refused unless `services.data.allowIntrospection` is true, as on Fabric; local answers may be incomplete. `__typename` always works. |
+| Introspection (`__schema`, `__type`) | Not supported | Refused unless `services.data.allowIntrospection` is true, as on Fabric; when allowed, rayfin-local still answers an error (no introspection resolver yet). `__typename` always works. |
 | Data from a deployed app | Not supported | The local database starts empty; nothing is copied from Fabric. |
 
 ## Functions (`/functions/<name>/invoke`)
@@ -116,4 +116,4 @@ These exist only in rayfin-local:
 - `serve --inspect[=PORT]`: the Node.js inspector on the function host.
 - `RAYFIN_LOCAL_TOKEN_<AUDIENCE>`: fixed tokens for tests and CI.
 - `[connectors] powerbi_base_url` in `rayfin-local.toml`: a mock or sovereign-cloud Power BI.
-- The `users`, `secret`, `sign-in-link`, `reset`, `doctor` and `schema` commands.
+- The `users`, `secret`, `reset`, `doctor` and `schema` commands.
