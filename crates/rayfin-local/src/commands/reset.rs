@@ -20,7 +20,7 @@ pub fn run(dir: &Path, yes: bool) -> anyhow::Result<ExitCode> {
     }
     if !yes
         && !confirm(&format!(
-            "Delete {} (the database, users, signing keys and stored files)? [y/N] ",
+            "Delete {} (the database, users, signing keys, stored files and local secrets)? [y/N] ",
             state_dir.display()
         ))?
     {

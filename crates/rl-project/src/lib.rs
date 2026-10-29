@@ -48,4 +48,6 @@ pub use package::{
 };
 pub use paths::resolve_node_package;
 pub use project::{DEFAULT_FRONTEND_PORT, LoadOptions, Project};
-pub use state::{LocalState, PUBLISHABLE_KEY_PREFIX, STATE_DIR, StateData, write_atomic};
+pub use state::{
+    LocalState, PUBLISHABLE_KEY_PREFIX, STATE_DIR, ServeInfo, ServeLock, StateData, write_atomic,
+};

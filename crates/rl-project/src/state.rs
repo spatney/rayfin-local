@@ -9,9 +9,12 @@
 //!   storage/       uploaded files
 //!   cache/         compiled analysis output, extracted helper scripts
 //!   secrets.json   local values of the secrets declared in rayfin.yml
+//!   serve.lock     locked while `rayfin-local serve` runs the project
+//!   serve.json     who holds that lock: process id and URLs
 //! ```
 
 use std::collections::BTreeMap;
+use std::fs::TryLockError;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -26,6 +29,8 @@ pub const STATE_DIR: &str = ".rayfin-local";
 pub const PUBLISHABLE_KEY_PREFIX: &str = "pk-local-";
 
 const STATE_FILE: &str = "state.json";
+const SERVE_LOCK_FILE: &str = "serve.lock";
+const SERVE_INFO_FILE: &str = "serve.json";
 const SUBDIRECTORIES: [&str; 3] = ["keys", "storage", "cache"];
 
 /// The contents of `state.json`.
@@ -162,13 +167,81 @@ impl LocalState {
     }
 
     /// Deletes the project's whole `.rayfin-local/` folder (database, users, keys, files,
-    /// secrets). Returns whether there was one.
+    /// secrets). Returns whether there was one. Refused while `rayfin-local serve` runs the
+    /// project.
     pub fn reset(project: &Project) -> Result<bool, ProjectError> {
         let dir = project.state_dir();
-        match std::fs::remove_dir_all(&dir) {
-            Ok(()) => Ok(true),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(false),
-            Err(source) => Err(ProjectError::Reset { path: dir, source }),
+        ensure_not_serving(&dir)?;
+        if !dir.exists() {
+            return Ok(false);
+        }
+        let failed = |source| ProjectError::Reset {
+            path: dir.clone(),
+            source,
+        };
+        // The database goes first, since another program may hold it open, and `.gitignore`
+        // last: a failure never leaves the keys or secrets in a folder git would pick up.
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            match std::fs::remove_file(dir.join(format!("db.sqlite{suffix}"))) {
+                Err(err) if err.kind() != std::io::ErrorKind::NotFound => return Err(failed(err)),
+                _ => {}
+            }
+        }
+        for entry in std::fs::read_dir(&dir).map_err(failed)? {
+            let entry = entry.map_err(failed)?;
+            if entry.file_name() == ".gitignore" {
+                continue;
+            }
+            let removed = if entry.file_type().map_err(failed)?.is_dir() {
+                std::fs::remove_dir_all(entry.path())
+            } else {
+                std::fs::remove_file(entry.path())
+            };
+            removed.map_err(failed)?;
+        }
+        std::fs::remove_dir_all(&dir).map_err(failed)?;
+        Ok(true)
+    }
+
+    /// Takes the project's `serve` lock, so that a second `rayfin-local serve` (or a `reset`)
+    /// can't run on the project at the same time. Fails with [`ProjectError::AlreadyServing`]
+    /// while another process holds it. The operating system releases the lock when this process
+    /// ends, so a crash leaves no stale lock.
+    pub fn lock_serve(&self) -> Result<ServeLock, ProjectError> {
+        let path = self.dir.join(SERVE_LOCK_FILE);
+        let info_path = self.dir.join(SERVE_INFO_FILE);
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+            .map_err(|source| ProjectError::Write {
+                path: path.clone(),
+                source,
+            })?;
+        match file.try_lock() {
+            Ok(()) => {
+                let lock = ServeLock {
+                    info_path,
+                    file: Some(file),
+                };
+                lock.publish(&ServeInfo {
+                    pid: std::process::id(),
+                    ..ServeInfo::default()
+                })?;
+                Ok(lock)
+            }
+            Err(TryLockError::WouldBlock) => Err(ProjectError::AlreadyServing {
+                info: read_serve_info(&info_path),
+            }),
+            // A file system without locks: serve without the check.
+            Err(TryLockError::Error(err)) => {
+                tracing::debug!("could not lock {}: {err}", path.display());
+                Ok(ServeLock {
+                    info_path,
+                    file: None,
+                })
+            }
         }
     }
 
@@ -250,6 +323,68 @@ fn create_dir(dir: &Path) -> Result<(), ProjectError> {
         path: dir.to_path_buf(),
         source,
     })
+}
+
+/// Who is serving a project (`.rayfin-local/serve.json`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServeInfo {
+    pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_url: Option<String>,
+}
+
+/// The project's `serve` lock, from [`LocalState::lock_serve`]; released on drop.
+#[derive(Debug)]
+pub struct ServeLock {
+    info_path: PathBuf,
+    /// The locked `serve.lock`; `None` where the file system can't lock files.
+    file: Option<std::fs::File>,
+}
+
+impl ServeLock {
+    /// Records who is serving, for the error a second `serve` or a `reset` reports.
+    pub fn publish(&self, info: &ServeInfo) -> Result<(), ProjectError> {
+        let write = |source| ProjectError::Write {
+            path: self.info_path.clone(),
+            source,
+        };
+        let json = serde_json::to_vec_pretty(info).map_err(|err| write(err.into()))?;
+        write_atomic(&self.info_path, &json).map_err(write)
+    }
+}
+
+impl Drop for ServeLock {
+    fn drop(&mut self) {
+        // Runs before `file` closes, so only the lock's holder removes the record.
+        if self.file.is_some() {
+            let _ = std::fs::remove_file(&self.info_path);
+        }
+    }
+}
+
+/// Fails with [`ProjectError::AlreadyServing`] while a `rayfin-local serve` holds the lock of the
+/// state folder `dir`.
+fn ensure_not_serving(dir: &Path) -> Result<(), ProjectError> {
+    let Ok(file) = std::fs::OpenOptions::new()
+        .write(true)
+        .open(dir.join(SERVE_LOCK_FILE))
+    else {
+        return Ok(());
+    };
+    // A lock taken here is released when `file` closes.
+    match file.try_lock() {
+        Err(TryLockError::WouldBlock) => Err(ProjectError::AlreadyServing {
+            info: read_serve_info(&dir.join(SERVE_INFO_FILE)),
+        }),
+        _ => Ok(()),
+    }
+}
+
+fn read_serve_info(path: &Path) -> Option<ServeInfo> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
 /// Replaces `path` with `contents` atomically: the bytes go to a temporary file in the same
@@ -357,6 +492,36 @@ mod tests {
             json["publishableKey"],
             state.data().publishable_key.as_str()
         );
+    }
+
+    #[test]
+    fn one_serve_at_a_time() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join(STATE_DIR);
+        let state = LocalState::load_or_create_in(&dir, &EnvFile::default()).unwrap();
+        assert!(ensure_not_serving(&dir).is_ok());
+
+        let lock = state.lock_serve().unwrap();
+        lock.publish(&ServeInfo {
+            pid: 42,
+            app_url: Some("http://localhost:5173/".into()),
+            api_url: Some("http://localhost:7171".into()),
+        })
+        .unwrap();
+        let message = state.lock_serve().unwrap_err().to_string();
+        assert!(
+            message.contains("(process 42: app http://localhost:5173/, API http://localhost:7171)"),
+            "{message}"
+        );
+        assert!(matches!(
+            ensure_not_serving(&dir),
+            Err(ProjectError::AlreadyServing { .. })
+        ));
+
+        drop(lock);
+        assert!(!dir.join(SERVE_INFO_FILE).exists());
+        assert!(ensure_not_serving(&dir).is_ok());
+        drop(state.lock_serve().unwrap());
     }
 
     #[test]

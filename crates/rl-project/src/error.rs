@@ -108,6 +108,10 @@ pub enum ProjectError {
         source: std::io::Error,
     },
 
+    /// Another `rayfin-local serve` is running the project.
+    #[error("{}", already_serving(.info.as_ref()))]
+    AlreadyServing { info: Option<crate::ServeInfo> },
+
     /// An explicitly requested env file does not exist.
     #[error(
         "Environment file not found: {}. Create it or omit the explicit env file.",
@@ -136,6 +140,24 @@ fn at(line: Option<usize>, column: Option<usize>) -> String {
         (Some(line), None) => format!(" (line {line})"),
         _ => String::new(),
     }
+}
+
+fn already_serving(info: Option<&crate::ServeInfo>) -> String {
+    let who = info.map_or_else(String::new, |info| {
+        let urls: Vec<String> = [("app", &info.app_url), ("API", &info.api_url)]
+            .into_iter()
+            .filter_map(|(label, url)| url.as_ref().map(|url| format!("{label} {url}")))
+            .collect();
+        if urls.is_empty() {
+            format!(" (process {})", info.pid)
+        } else {
+            format!(" (process {}: {})", info.pid, urls.join(", "))
+        }
+    });
+    format!(
+        "rayfin-local serve is already running this project{who}. Stop it first (Ctrl+C in its \
+         terminal)."
+    )
 }
 
 /// The 1-based line and column of byte `offset` in `text`.

@@ -14,7 +14,7 @@ use rl_auth::{AuthService, AuthSettings};
 use rl_db::Db;
 use rl_functions::FunctionsService;
 use rl_model::AppModel;
-use rl_project::{LocalState, Project};
+use rl_project::{LocalState, Project, ServeInfo, ServeLock};
 use rl_server::{ServerConfig, StaticSite};
 use rl_tokens::{TokenBroker, TokenMode, TokenSource};
 use tokio::net::TcpListener;
@@ -59,7 +59,7 @@ pub struct ServeOptions {
 
 pub async fn run(dir: &Path, options: ServeOptions) -> anyhow::Result<ExitCode> {
     let project = super::load_project(dir)?;
-    let mut state = open_state(&project, options.reset)?;
+    let (mut state, serve_lock) = open_state(&project, options.reset)?;
     let node = super::find_node().await?;
     let model = Arc::new(analysis::analyze(&project, &state, &node, options.verbose).await?);
     let db = open_database(&project, &state, &model, options.force_schema).await?;
@@ -91,7 +91,14 @@ pub async fn run(dir: &Path, options: ServeOptions) -> anyhow::Result<ExitCode> 
         frontend_port: bound.frontend_port,
     };
     let mut running = Running::new();
-    let outcome = serve_until_signal(&ctx, bound.listeners, &auth_settings, &mut running).await;
+    let outcome = serve_until_signal(
+        &ctx,
+        bound.listeners,
+        &auth_settings,
+        &serve_lock,
+        &mut running,
+    )
+    .await;
     if outcome.is_ok() {
         ui::status("Stopping…");
         tokio::spawn(async {
@@ -107,10 +114,12 @@ pub async fn run(dir: &Path, options: ServeOptions) -> anyhow::Result<ExitCode> 
     Ok(ExitCode::from(INTERRUPTED))
 }
 
-/// The project's `.rayfin-local/` (created on first use). `--reset` first empties the database
-/// and storage, which hold the users, the entity data and the stored files.
-fn open_state(project: &Project, reset: bool) -> anyhow::Result<LocalState> {
+/// The project's `.rayfin-local/` (created on first use), locked against a second `serve`.
+/// `--reset` then empties the database and storage, which hold the users, the entity data and
+/// the stored files.
+fn open_state(project: &Project, reset: bool) -> anyhow::Result<(LocalState, ServeLock)> {
     let state = LocalState::load_or_create(project)?;
+    let lock = state.lock_serve()?;
     if reset {
         let cleared = clear_data(&state)?;
         let what = if cleared.is_empty() {
@@ -124,7 +133,7 @@ fn open_state(project: &Project, reset: bool) -> anyhow::Result<LocalState> {
             state.dir().display()
         ));
     }
-    Ok(state)
+    Ok((state, lock))
 }
 
 /// Deletes the database (with its SQLite side files) and the stored files; returns the names of
@@ -355,6 +364,7 @@ async fn serve_until_signal(
     ctx: &ServeContext<'_>,
     listeners: Vec<TcpListener>,
     auth_settings: &AuthSettings,
+    serve_lock: &ServeLock,
     running: &mut Running,
 ) -> anyhow::Result<()> {
     let static_site = integrations::static_site(ctx).await?;
@@ -391,6 +401,15 @@ async fn serve_until_signal(
         app_name: ctx.project.display_name(),
         rows: banner_rows(ctx, &features, app_url.as_deref(), auth_settings),
     });
+    // For the error a second `serve` on this project reports.
+    let published = serve_lock.publish(&ServeInfo {
+        pid: std::process::id(),
+        app_url: app_url.clone(),
+        api_url: Some(ctx.api_origin.to_owned()),
+    });
+    if let Err(err) = published {
+        tracing::debug!("{err}");
+    }
     if ctx.options.open {
         match &app_url {
             Some(url) => {

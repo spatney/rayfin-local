@@ -376,4 +376,31 @@ fn state_folder_lives_in_the_project_and_resets() {
     assert!(LocalState::reset(&project).unwrap());
     assert!(!root.join(".rayfin-local").exists());
     assert!(!LocalState::reset(&project).unwrap());
+
+    // A database another program holds open, as SQLite does (without delete sharing), stops the
+    // reset before anything else is deleted.
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let state = LocalState::load_or_create(&project).unwrap();
+        state
+            .save_secrets(&[("KEY".to_owned(), "value".to_owned())].into())
+            .unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .share_mode(0x1 | 0x2)
+            .open(state.db_path())
+            .unwrap();
+        assert!(matches!(
+            LocalState::reset(&project),
+            Err(rl_project::ProjectError::Reset { .. })
+        ));
+        assert!(root.join(".rayfin-local").join(".gitignore").is_file());
+        assert!(state.secrets_path().is_file());
+        drop(held);
+        assert!(LocalState::reset(&project).unwrap());
+    }
 }
