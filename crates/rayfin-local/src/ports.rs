@@ -44,6 +44,19 @@ impl PortRequest {
         };
         Self { port, source, flag }
     }
+
+    /// The port this request leaves to `other`: `other`'s explicit port when this one is only
+    /// preferred, so that `--frontend-port 7171` moves a default or remembered backend port
+    /// instead of failing. Two explicit ports conflict in [`choose_port`].
+    pub fn yields_to(&self, other: Option<&PortRequest>) -> Option<u16> {
+        other
+            .filter(|other| {
+                self.source == PortSource::Preferred
+                    && other.source != PortSource::Preferred
+                    && other.port != 0
+            })
+            .map(|other| other.port)
+    }
 }
 
 /// The port to listen on for `request`. `taken` is another server's port, never chosen.
@@ -139,6 +152,23 @@ mod tests {
             PortRequest::resolve("--frontend-port", Some(7171), "[frontend] port", None, 5173);
         let err = choose_port(frontend, Some(7171), |_| true).unwrap_err();
         assert!(err.to_string().contains("backend's port"), "{err}");
+    }
+
+    #[test]
+    fn an_explicit_frontend_port_moves_a_preferred_backend_port() {
+        let frontend =
+            PortRequest::resolve("--frontend-port", None, "[frontend] port", Some(7171), 5173);
+        let backend = preferred(7171);
+        let api_port = choose_port(backend, backend.yields_to(Some(&frontend)), |_| true).unwrap();
+        assert_eq!(api_port, 7172);
+        assert_eq!(
+            choose_port(frontend, Some(api_port), |_| true).unwrap(),
+            7171
+        );
+
+        let explicit = PortRequest::resolve("--port", Some(7171), "[server] port", None, 7171);
+        assert_eq!(explicit.yields_to(Some(&frontend)), None);
+        assert_eq!(backend.yields_to(Some(&preferred(7171))), None);
     }
 
     #[test]

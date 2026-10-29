@@ -18,7 +18,7 @@ pub async fn run(dir: &Path, verbose: bool) -> anyhow::Result<ExitCode> {
     let project = super::load_project(dir)?;
     let state = LocalState::load_or_create(&project)?;
     let node = super::find_node().await?;
-    let model = analysis::analyze(&project, &state, &node, verbose).await?;
+    let (model, _) = analysis::analyze(&project, &state, &node, verbose).await?;
     print!("{}", render(&model, Painter::stdout()));
     if !model.entities.is_empty() {
         let sql = rl_db::schema_sql(&model)?;

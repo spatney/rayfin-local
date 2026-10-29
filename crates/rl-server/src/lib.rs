@@ -16,9 +16,10 @@
 //!   would make the SDK refresh and then sign the user out (compat §2.2, §2.5, §9.1, §9.3). The
 //!   JWKS (`/.well-known/*`, `/api/auth/v1/.well-known/*`, compat §3.6), `/rayfin.config.json`,
 //!   `/.rayfin-local/*` (portal, signed storage URLs, health), static files and `OPTIONS` are exempt.
-//! - CORS for loopback origins on any port and [`ServerConfig::allowed_origins`]: the usual
-//!   methods, mirrored request headers, the SDK's response headers exposed, no credentials,
-//!   10-minute preflight cache.
+//! - CORS for loopback origins on any port, [`ServerConfig::allowed_origins`] and, with the Host
+//!   check on, origins on the host a request is addressed to (another port of the same machine):
+//!   the usual methods, mirrored request headers, the SDK's response headers exposed, no
+//!   credentials, 10-minute preflight cache.
 //! - The Host check, when [`ServerConfig::allowed_hosts`] is set (DNS-rebinding protection).
 //! - Static hosting with the SPA fallback, when [`ServerConfig::static_site`] is set.
 //! - A JSON 404 (`{"error":"not_found",...}`) for everything else.
@@ -69,7 +70,8 @@ pub struct ServerConfig {
     /// `allowedRedirectUris`; URLs are reduced to their origin).
     pub allowed_origins: Vec<String>,
     /// Host names (ports ignored) requests must be addressed to; loopback names are always
-    /// allowed. `None` turns the check off.
+    /// allowed. CORS then also allows origins on the host a request is addressed to, on any port.
+    /// `None` turns the check off.
     pub allowed_hosts: Option<Vec<String>>,
     /// The built app to serve (`--static`).
     pub static_site: Option<StaticSite>,
@@ -180,11 +182,17 @@ pub fn build_router(config: ServerConfig, features: Vec<Router>) -> Router {
         &config.publishable_key_exempt,
     ));
     router = router.layer(from_fn_with_state(key, guards::require_publishable_key));
-    if let Some(hosts) = &config.allowed_hosts {
-        let allowlist = Arc::new(guards::HostAllowlist::new(hosts, &config.api_origin));
-        router = router.layer(from_fn_with_state(allowlist, guards::check_host));
+    let allowlist = config
+        .allowed_hosts
+        .as_ref()
+        .map(|hosts| Arc::new(guards::HostAllowlist::new(hosts, &config.api_origin)));
+    if let Some(allowlist) = &allowlist {
+        router = router.layer(from_fn_with_state(
+            Arc::clone(allowlist),
+            guards::check_host,
+        ));
     }
-    router.layer(cors::layer(&config.allowed_origins)).layer(
+    router.layer(cors::layer(&config.allowed_origins, allowlist)).layer(
         TraceLayer::new_for_http()
             .make_span_with(|req: &Request| {
                 tracing::debug_span!("http", method = %req.method(), path = %loggable_path(req.uri().path()))

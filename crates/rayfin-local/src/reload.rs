@@ -1,13 +1,15 @@
-//! Live reload while serving: when the entity or storage sources or `rayfin.yml` change, the app
-//! is analyzed again, the database brought up to date and the data API switched to the new model.
-//! A failed analysis or a change that would lose data leaves the previous model in use.
+//! Live reload while serving: when the entity or storage sources, other files they import, their
+//! tsconfig or `rayfin.yml` change, the app is analyzed again, the database brought up to date
+//! and the data API switched to the new model. A failed analysis or a change that would lose data
+//! (without `--force-schema`) leaves the previous model in use.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
 use anyhow::Context as _;
+use notify::event::ModifyKind;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use rl_db::Db;
 use rl_graphql::DataApi;
@@ -29,12 +31,13 @@ pub fn watch(ctx: &ServeContext<'_>, hooks: &mut StopHooks) -> anyhow::Result<()
     let sources = Sources::of(ctx.project);
     let (sender, receiver) = mpsc::unbounded_channel();
     let filter = sources.clone();
-    let mut watcher =
+    let events = sender.clone();
+    let watcher =
         notify::recommended_watcher(move |result: notify::Result<notify::Event>| match result {
             Ok(event) if !matches!(event.kind, EventKind::Access(_)) => {
-                for path in event.paths {
-                    if let Some(change) = filter.classify(&path) {
-                        let _ = sender.send(change);
+                for path in &event.paths {
+                    if let Some(change) = filter.classify(path, &event.kind) {
+                        let _ = events.send(change);
                     }
                 }
             }
@@ -42,29 +45,33 @@ pub fn watch(ctx: &ServeContext<'_>, hooks: &mut StopHooks) -> anyhow::Result<()
             Err(err) => tracing::debug!("watching the project: {err}"),
         })
         .context("Could not watch the project's files")?;
-    let rayfin_dir = ctx.project.rayfin_dir();
-    let mut watched = vec![(rayfin_dir.as_path(), RecursiveMode::NonRecursive)];
-    for dir in [&sources.data_dir, &sources.storage_dir] {
-        if dir.is_dir() {
-            watched.push((dir.as_path(), RecursiveMode::Recursive));
-        }
-    }
-    for (path, mode) in watched {
-        watcher
-            .watch(path, mode)
-            .with_context(|| format!("Could not watch {}", path.display()))?;
-    }
 
-    let reloader = Reloader {
+    let mut reloader = Reloader {
         project: ctx.project.clone(),
         state: ctx.state.clone(),
         node: ctx.node.clone(),
         db: ctx.db.clone(),
         data_api: ctx.data_api.clone(),
         storage: ctx.model.storage.clone(),
+        force: ctx.options.force_schema,
         verbose: ctx.options.verbose,
+        watcher,
+        sources,
+        watched: HashSet::new(),
     };
-    let task = tokio::spawn(reloader.run(watcher, receiver));
+    reloader.watch_dir(&ctx.project.rayfin_dir(), RecursiveMode::NonRecursive)?;
+    reloader.follow_folders(false)?;
+    reloader.follow_files(&ctx.model.sources.inputs);
+    // Changes saved since the analysis, before the watches above, left no event.
+    if !ctx
+        .model_stamp
+        .is_current(ctx.project, ctx.state, ctx.model)
+    {
+        tracing::debug!("the model's sources changed since they were analyzed");
+        let _ = sender.send(Change::Config);
+        let _ = sender.send(Change::Model);
+    }
+    let task = tokio::spawn(reloader.run(receiver));
     hooks.add("live reload", move || async move {
         task.abort();
         let _ = task.await;
@@ -76,8 +83,10 @@ pub fn watch(ctx: &ServeContext<'_>, hooks: &mut StopHooks) -> anyhow::Result<()
 enum Change {
     /// `rayfin.yml`.
     Config,
-    /// An entity or storage source.
+    /// An entity or storage source, or another file the analysis read.
     Model,
+    /// The entity or storage folder itself appeared, went or was renamed.
+    Folder,
 }
 
 /// The files live reload follows.
@@ -86,32 +95,71 @@ struct Sources {
     config: PathBuf,
     data_dir: PathBuf,
     storage_dir: PathBuf,
-    /// The `tsconfig.json` next to the data folder, which the analysis compiles with.
-    tsconfig: Option<PathBuf>,
+    /// The files outside the two folders that the last analysis read ([`Sources::outside_files`]),
+    /// shared with the watcher's callback.
+    files: Arc<RwLock<HashSet<PathBuf>>>,
 }
 
 impl Sources {
     fn of(project: &Project) -> Self {
-        let data_dir = project.data_dir();
         Self {
             config: project.config_path(),
-            tsconfig: data_dir.parent().map(|dir| dir.join("tsconfig.json")),
-            data_dir,
+            data_dir: project.data_dir(),
             storage_dir: project.storage_schema_dir(),
+            files: Arc::default(),
         }
     }
 
-    fn classify(&self, path: &Path) -> Option<Change> {
+    /// Whether `path` is in the entity or storage folder (or is one of them).
+    fn in_folders(&self, path: &Path) -> bool {
+        path.starts_with(&self.data_dir) || path.starts_with(&self.storage_dir)
+    }
+
+    fn classify(&self, path: &Path, kind: &EventKind) -> Option<Change> {
+        let folder_moved = matches!(
+            kind,
+            EventKind::Create(_) | EventKind::Remove(_) | EventKind::Modify(ModifyKind::Name(_))
+        );
         if path == self.config {
             Some(Change::Config)
-        } else if path.starts_with(&self.data_dir)
-            || path.starts_with(&self.storage_dir)
-            || self.tsconfig.as_deref() == Some(path)
+        } else if folder_moved && (path == self.data_dir || path == self.storage_dir) {
+            Some(Change::Folder)
+        } else if self.in_folders(path)
+            || self
+                .files
+                .read()
+                .unwrap_or_else(PoisonError::into_inner)
+                .contains(path)
         {
             Some(Change::Model)
         } else {
             None
         }
+    }
+
+    /// The files outside the two folders that an analysis of `inputs` (`sources.inputs`, relative
+    /// to `root`) depends on: imported modules, such as shared enums, and the tsconfig with the
+    /// configs it extends. Packages are left out.
+    fn outside_files(&self, root: &Path, inputs: &[String]) -> HashSet<PathBuf> {
+        let modules = inputs.iter().map(|input| {
+            input
+                .split('/')
+                .fold(root.to_owned(), |path, part| path.join(part))
+        });
+        let tsconfigs = self
+            .data_dir
+            .parent()
+            .map(|dir| analysis::tsconfig_chain(&dir.join("tsconfig.json")))
+            .unwrap_or_default();
+        modules
+            .chain(tsconfigs)
+            .filter(|path| {
+                !self.in_folders(path)
+                    && !path
+                        .components()
+                        .any(|component| component.as_os_str() == "node_modules")
+            })
+            .collect()
     }
 }
 
@@ -124,21 +172,31 @@ struct Reloader {
     data_api: Option<Arc<DataApi>>,
     /// The storage folders being served, which only a restart changes.
     storage: Option<Storage>,
+    /// `--force-schema`: apply changes that lose data.
+    force: bool,
     verbose: bool,
+    watcher: RecommendedWatcher,
+    sources: Sources,
+    /// The folders watched (recursively for the entity and storage folders).
+    watched: HashSet<PathBuf>,
 }
 
 impl Reloader {
-    async fn run(
-        mut self,
-        _watcher: RecommendedWatcher,
-        mut changes: mpsc::UnboundedReceiver<Change>,
-    ) {
+    async fn run(mut self, mut changes: mpsc::UnboundedReceiver<Change>) {
         while let Some(first) = changes.recv().await {
             let mut batch = vec![first];
             while let Ok(Some(change)) = tokio::time::timeout(DEBOUNCE, changes.recv()).await {
                 batch.push(change);
             }
             let mut analyze = batch.contains(&Change::Model);
+            if batch.contains(&Change::Folder) {
+                if let Err(err) = self.follow_folders(true) {
+                    ui::warn(format_args!(
+                        "{err:#}; restart rayfin-local after changing the entities."
+                    ));
+                }
+                analyze = true;
+            }
             if batch.contains(&Change::Config) {
                 analyze |= self.reload_config();
             }
@@ -146,6 +204,65 @@ impl Reloader {
                 self.reload_model().await;
             }
         }
+    }
+
+    /// Watches `dir` unless it already is.
+    fn watch_dir(&mut self, dir: &Path, mode: RecursiveMode) -> anyhow::Result<()> {
+        if !self.watched.contains(dir) {
+            self.watcher
+                .watch(dir, mode)
+                .with_context(|| format!("Could not watch {}", dir.display()))?;
+            self.watched.insert(dir.to_owned());
+        }
+        Ok(())
+    }
+
+    /// Watches the entity and storage folders that exist (recursively), and the folders they are
+    /// in, to see them appear. `renew` watches the two again: a folder that was removed or
+    /// renamed and then created again needs a new watch.
+    fn follow_folders(&mut self, renew: bool) -> anyhow::Result<()> {
+        for dir in [
+            self.sources.data_dir.clone(),
+            self.sources.storage_dir.clone(),
+        ] {
+            if let Some(parent) = dir.parent()
+                && parent.is_dir()
+            {
+                self.watch_dir(parent, RecursiveMode::NonRecursive)?;
+            }
+            if renew && self.watched.remove(&dir) {
+                let _ = self.watcher.unwatch(&dir);
+            }
+            if dir.is_dir() {
+                self.watch_dir(&dir, RecursiveMode::Recursive)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Follows the files outside the two folders that an analysis of `inputs` read, watching the
+    /// folders they are in (not recursively; other files there are ignored).
+    fn follow_files(&mut self, inputs: &[String]) {
+        let files = self.sources.outside_files(self.project.root(), inputs);
+        let dirs: BTreeSet<PathBuf> = files
+            .iter()
+            .filter_map(|file| file.parent())
+            .filter(|dir| dir.is_dir())
+            .map(Path::to_owned)
+            .collect();
+        for dir in dirs {
+            if let Err(err) = self.watch_dir(&dir, RecursiveMode::NonRecursive) {
+                ui::warn(format_args!(
+                    "{err:#}; restart rayfin-local after changing the files the entities import \
+                     from there."
+                ));
+            }
+        }
+        *self
+            .sources
+            .files
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = files;
     }
 
     /// Reads `rayfin.yml` again; returns whether the model must be analyzed again.
@@ -184,6 +301,7 @@ impl Reloader {
                     return;
                 }
             };
+        self.follow_files(&model.sources.inputs);
         if model.storage != self.storage {
             self.storage = model.storage.clone();
             ui::warn("The storage folders changed — restart rayfin-local to apply them.");
@@ -195,10 +313,13 @@ impl Reloader {
         if served.entities == model.entities && served.dialect == model.dialect {
             return;
         }
-        match rl_db::apply(&self.db, &model, false).await {
+        match rl_db::apply(&self.db, &model, self.force).await {
             Ok(report) => {
                 for warning in &report.warnings {
                     ui::warn(warning);
+                }
+                for loss in &report.forced {
+                    ui::warn(format_args!("--force-schema: {loss}"));
                 }
                 let mut summary = describe_change(&served, &model);
                 let steps = report.steps.len();
@@ -316,5 +437,61 @@ mod tests {
         );
         let auth = parse("services:\n  data:\n    enabled: true\n  auth:\n    enabled: true\n");
         assert!(ConfigChange::between(&served, &auth).other);
+    }
+
+    #[test]
+    fn changes_are_followed_in_the_model_folders_and_the_files_read_outside_them() {
+        use notify::event::{CreateKind, RemoveKind};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let at = |path: &str| {
+            path.split('/')
+                .fold(root.to_owned(), |path, part| path.join(part))
+        };
+        std::fs::create_dir_all(at("rayfin")).unwrap();
+        std::fs::write(
+            at("rayfin/tsconfig.json"),
+            r#"{"extends": "../tsconfig.json"}"#,
+        )
+        .unwrap();
+        let sources = Sources {
+            config: at("rayfin/rayfin.yml"),
+            data_dir: at("rayfin/data"),
+            storage_dir: at("rayfin/storage"),
+            files: Arc::default(),
+        };
+        let inputs = [
+            "rayfin/data/todo.ts",
+            "shared/enums.ts",
+            "node_modules/pkg/index.ts",
+        ]
+        .map(str::to_owned);
+        *sources.files.write().unwrap() = sources.outside_files(root, &inputs);
+
+        let edit = EventKind::Modify(ModifyKind::Any);
+        let cases = [
+            ("rayfin/rayfin.yml", edit, Some(Change::Config)),
+            ("rayfin/data/nested/todo.ts", edit, Some(Change::Model)),
+            ("shared/enums.ts", edit, Some(Change::Model)),
+            ("rayfin/tsconfig.json", edit, Some(Change::Model)),
+            ("tsconfig.json", edit, Some(Change::Model)),
+            (
+                "rayfin/data",
+                EventKind::Create(CreateKind::Folder),
+                Some(Change::Folder),
+            ),
+            (
+                "rayfin/storage",
+                EventKind::Remove(RemoveKind::Folder),
+                Some(Change::Folder),
+            ),
+            ("shared/other.ts", edit, None),
+            ("node_modules/pkg/index.ts", edit, None),
+            ("rayfin/functions/index.ts", edit, None),
+        ];
+        for (path, kind, change) in cases {
+            assert_eq!(sources.classify(&at(path), &kind), change, "{path}");
+        }
     }
 }

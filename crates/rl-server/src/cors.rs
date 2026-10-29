@@ -2,11 +2,15 @@
 //! SDK's `baseUrl`), such as the Vite dev server on another port.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
+use axum::http::request::Parts;
 use axum::http::{HeaderName, Method, header};
 use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
 use url::{Host, Url};
+
+use crate::guards::{self, HostAllowlist};
 
 /// Response headers the SDK and apps read: correlation and request ids (storage, connectors),
 /// the functions status, `Retry-After` on 429/503, and the download metadata (compat §9.2.4).
@@ -22,20 +26,27 @@ fn exposed_headers() -> [HeaderName; 7] {
     ]
 }
 
-/// Allows loopback origins on any port plus `extra_origins` (the app's `allowedRedirectUris`).
-/// Request headers are mirrored, so every SDK header (`X-Publishable-Key`, `Authorization`,
-/// `x-ms-workload-resource-moniker`, `X-Correlation-ID`, ...) passes a preflight. No credentials:
-/// the SDK sends bearer tokens, never cookies.
-pub(crate) fn layer(extra_origins: &[String]) -> CorsLayer {
+/// Allows loopback origins on any port, `extra_origins` (the app's `allowedRedirectUris`) and,
+/// with the Host check on (`hosts`), origins on the host a request is addressed to when that host
+/// passes the check: with `--host 192.168.1.20`, the dev server at `http://192.168.1.20:5173`
+/// calls the backend at `http://192.168.1.20:7171`. Request headers are mirrored, so every SDK
+/// header (`X-Publishable-Key`, `Authorization`, `x-ms-workload-resource-moniker`,
+/// `X-Correlation-ID`, ...) passes a preflight. No credentials: the SDK sends bearer tokens,
+/// never cookies.
+pub(crate) fn layer(extra_origins: &[String], hosts: Option<Arc<HostAllowlist>>) -> CorsLayer {
     let extra: HashSet<String> = extra_origins
         .iter()
         .filter_map(|origin| normalize_origin(origin))
         .collect();
     CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(move |origin, _| {
-            origin
-                .to_str()
-                .is_ok_and(|origin| is_loopback_origin(origin) || extra.contains(origin))
+        .allow_origin(AllowOrigin::predicate(move |origin, parts| {
+            origin.to_str().is_ok_and(|origin| {
+                is_loopback_origin(origin)
+                    || extra.contains(origin)
+                    || hosts
+                        .as_deref()
+                        .is_some_and(|hosts| is_allowed_host_origin(origin, parts, hosts))
+            })
         }))
         .allow_methods([
             Method::GET,
@@ -57,20 +68,33 @@ fn normalize_origin(value: &str) -> Option<String> {
     origin.is_tuple().then(|| origin.ascii_serialization())
 }
 
+/// `origin` parsed, when it is an `http(s)` origin as browsers serialize it.
+fn parse_origin(origin: &str) -> Option<Url> {
+    let url = Url::parse(origin).ok()?;
+    (matches!(url.scheme(), "http" | "https") && url.origin().ascii_serialization() == origin)
+        .then_some(url)
+}
+
 /// `http(s)://` + `localhost`, `*.localhost`, `127.0.0.0/8` or `[::1]`, on any port.
 fn is_loopback_origin(origin: &str) -> bool {
-    let Ok(url) = Url::parse(origin) else {
-        return false;
-    };
-    let loopback = match url.host() {
+    parse_origin(origin).is_some_and(|url| match url.host() {
         Some(Host::Domain(domain)) => domain == "localhost" || domain.ends_with(".localhost"),
         Some(Host::Ipv4(ip)) => ip.is_loopback(),
         Some(Host::Ipv6(ip)) => ip.is_loopback(),
         None => false,
+    })
+}
+
+/// Whether `origin` is on the host the request is addressed to, on any port (another server on
+/// the same machine), and that host passes the Host check.
+fn is_allowed_host_origin(origin: &str, request: &Parts, hosts: &HostAllowlist) -> bool {
+    let Some(host) = guards::request_host(&request.headers, &request.uri) else {
+        return false;
     };
-    loopback
-        && matches!(url.scheme(), "http" | "https")
-        && url.origin().ascii_serialization() == origin
+    hosts.allows(&host)
+        && parse_origin(origin)
+            .and_then(|url| url.host_str().and_then(guards::normalize_host))
+            .is_some_and(|origin_host| origin_host == host)
 }
 
 #[cfg(test)]

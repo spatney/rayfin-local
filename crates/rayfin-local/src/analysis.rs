@@ -3,8 +3,8 @@
 //! inputs are unchanged.
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context as _;
 use ring::digest::{Context, SHA256};
@@ -22,6 +22,30 @@ const HELPER: Helper = Helper::new("analyze", rl_model::ANALYZE_JS);
 const CACHE_FILE: &str = "analysis.json";
 /// Bump when the cache's meaning changes.
 const CACHE_VERSION: u32 = 1;
+/// Leeway for file systems whose modification times lag the clock or are coarse (FAT: 2 s).
+const MTIME_SLACK: Duration = Duration::from_secs(2);
+/// A bound on `extends` chains, which may be cyclic.
+const MAX_TSCONFIGS: usize = 16;
+
+/// What an analysis was computed from: its [`analysis_key`] and the [`inputs_fingerprint`] of
+/// the files it read (`None` when one of them changed while it ran).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourcesStamp(Option<(String, String)>);
+
+impl SourcesStamp {
+    fn now(project: &Project, state: &LocalState, model: &AppModel) -> Self {
+        let key = analysis_key(project, &analyze_input(project, state, false));
+        Self(Some((
+            key,
+            inputs_fingerprint(project.root(), &model.sources.inputs),
+        )))
+    }
+
+    /// Whether the sources are still those `model` was analyzed from (`self` is its stamp).
+    pub fn is_current(&self, project: &Project, state: &LocalState, model: &AppModel) -> bool {
+        self.0.is_some() && *self == Self::now(project, state, model)
+    }
+}
 
 /// `analysis.json`.
 #[derive(Serialize, Deserialize)]
@@ -35,26 +59,28 @@ struct CacheEntry {
 }
 
 /// Analyzes the project (or reuses the cached analysis), prints the analysis' diagnostics and
-/// returns the model.
+/// returns the model and what it was analyzed from.
 pub async fn analyze(
     project: &Project,
     state: &LocalState,
     node: &NodeRuntime,
     verbose: bool,
-) -> anyhow::Result<AppModel> {
+) -> anyhow::Result<(AppModel, SourcesStamp)> {
     let services = &project.config().services;
     if !services.data.enabled && !services.storage.enabled {
         tracing::debug!("services.data and services.storage are disabled; nothing to analyze");
-        return Ok(empty_model(model_dialect(services.data.dialect())));
+        let model = empty_model(model_dialect(services.data.dialect()));
+        let stamp = SourcesStamp::now(project, state, &model);
+        return Ok((model, stamp));
     }
     let hint = "Fix the error below, then run `rayfin-local serve` again.";
-    let (model, cached) = load_model(project, state, node, verbose, hint).await?;
+    let (model, cached, stamp) = load_model(project, state, node, verbose, hint).await?;
     let mut line = format!("Analyzed {}", summary(&model));
     if cached {
         line.push_str(" (cached)");
     }
     ui::step(line);
-    Ok(model)
+    Ok((model, stamp))
 }
 
 /// [`analyze`] again while serving, after a source changed: prints only the diagnostics.
@@ -85,24 +111,25 @@ pub fn summary(model: &AppModel) -> String {
     summary
 }
 
-/// The model from the cache or a new analysis (`true` when cached), its diagnostics printed.
-/// `hint` says what to do when the analysis fails.
+/// The model from the cache or a new analysis (`true` when cached) and what it was analyzed
+/// from, its diagnostics printed. `hint` says what to do when the analysis fails.
 async fn load_model(
     project: &Project,
     state: &LocalState,
     node: &NodeRuntime,
     verbose: bool,
     hint: &str,
-) -> anyhow::Result<(AppModel, bool)> {
+) -> anyhow::Result<(AppModel, bool, SourcesStamp)> {
     let input = analyze_input(project, state, verbose);
     let key = analysis_key(project, &input);
     let cache_path = state.cache_dir().join(CACHE_FILE);
-    let (mut model, cached) = match read_cache(&cache_path, &key, project.root()) {
-        Some(model) => (model, true),
-        None => (
-            run_analysis(project, state, node, &input, key, &cache_path, hint).await?,
-            false,
-        ),
+    let (mut model, cached, inputs) = match read_cache(&cache_path, &key, project.root()) {
+        Some((model, inputs)) => (model, true, Some(inputs)),
+        None => {
+            let (model, inputs) =
+                run_analysis(project, state, node, &input, key.clone(), &cache_path, hint).await?;
+            (model, false, inputs)
+        }
     };
     if !project.config().services.data.enabled {
         model.entities.clear();
@@ -110,9 +137,12 @@ async fn load_model(
     for diagnostic in &model.diagnostics {
         ui::warn(&diagnostic.message);
     }
-    Ok((model, cached))
+    let stamp = SourcesStamp(inputs.map(|inputs| (key, inputs)));
+    Ok((model, cached, stamp))
 }
 
+/// Runs the analysis and caches it, unless a file it read changed while it ran. Returns the
+/// model and the [`inputs_fingerprint`] (`None` when something changed).
 async fn run_analysis(
     project: &Project,
     state: &LocalState,
@@ -121,7 +151,9 @@ async fn run_analysis(
     key: String,
     cache_path: &Path,
     hint: &str,
-) -> anyhow::Result<AppModel> {
+) -> anyhow::Result<(AppModel, Option<String>)> {
+    // The files read are known only afterwards; their stamps must predate this.
+    let started = SystemTime::now();
     let analysis: Value = rl_node::run_helper(
         node,
         &HELPER,
@@ -138,10 +170,15 @@ async fn run_analysis(
         )
     })?;
     let model = AppModel::from_analysis(&analysis)?;
+    let inputs = inputs_fingerprint(project.root(), &model.sources.inputs);
+    if changed_since(project.root(), &model.sources.inputs, started) {
+        tracing::debug!("a file changed while the analysis ran; not caching it");
+        return Ok((model, None));
+    }
     let entry = CacheEntry {
         version: CACHE_VERSION,
         key,
-        inputs: inputs_fingerprint(project.root(), &model.sources.inputs),
+        inputs: inputs.clone(),
         analysis,
     };
     let written = serde_json::to_vec(&entry)
@@ -150,7 +187,7 @@ async fn run_analysis(
     if let Err(err) = written {
         tracing::debug!("could not write {}: {err}", cache_path.display());
     }
-    Ok(model)
+    Ok((model, Some(inputs)))
 }
 
 /// The helper's input: the project's entity and storage folders, compiled into
@@ -203,7 +240,12 @@ fn analysis_key(project: &Project, input: &AnalyzeInput) -> String {
         project.config_path(),
         project.data_service_root().join("package.json"),
     ];
-    files.extend(input.tsconfig_path.clone());
+    files.extend(
+        input
+            .tsconfig_path
+            .iter()
+            .flat_map(|path| tsconfig_chain(path)),
+    );
     let core_version = project
         .rayfin_package(CORE_PACKAGE)
         .and_then(|package| package.version())
@@ -262,7 +304,146 @@ fn inputs_fingerprint(root: &Path, inputs: &[String]) -> String {
     hasher.finish()
 }
 
-fn read_cache(path: &Path, key: &str, root: &Path) -> Option<AppModel> {
+/// Whether a file in `inputs` was modified or removed since `started`, as the analysis that
+/// started then ran: it may have read the previous version. Modification times beyond now, which
+/// no edit made, don't count.
+fn changed_since(root: &Path, inputs: &[String], started: SystemTime) -> bool {
+    let window =
+        started.checked_sub(MTIME_SLACK).unwrap_or(UNIX_EPOCH)..=SystemTime::now() + MTIME_SLACK;
+    inputs.iter().any(|input| {
+        fs::metadata(root.join(input))
+            .and_then(|meta| meta.modified())
+            .map_or(true, |modified| window.contains(&modified))
+    })
+}
+
+/// `tsconfig` and the configs it extends, directly or not, as TypeScript resolves `extends`.
+/// Configs that can't be read end the chain there.
+pub(crate) fn tsconfig_chain(tsconfig: &Path) -> Vec<PathBuf> {
+    let mut chain = vec![tsconfig.to_owned()];
+    let mut next = 0;
+    while let Some(config) = chain.get(next).cloned() {
+        next += 1;
+        let Some(json) = fs::read_to_string(&config)
+            .ok()
+            .and_then(|text| parse_jsonc(&text))
+        else {
+            continue;
+        };
+        let specifiers = match json.get("extends") {
+            Some(Value::String(one)) => vec![one.as_str()],
+            Some(Value::Array(many)) => many.iter().filter_map(Value::as_str).collect(),
+            _ => Vec::new(),
+        };
+        let dir = config.parent().unwrap_or(Path::new(""));
+        for base in specifiers
+            .into_iter()
+            .filter_map(|specifier| resolve_extends(dir, specifier))
+        {
+            if chain.len() < MAX_TSCONFIGS && !chain.contains(&base) {
+                chain.push(base);
+            }
+        }
+    }
+    chain
+}
+
+/// The config an `extends` entry of a config in `dir` names: a path (with `.json` added when the
+/// file without it doesn't exist) or a config file in a package under `node_modules`.
+fn resolve_extends(dir: &Path, specifier: &str) -> Option<PathBuf> {
+    let specifier = specifier.replace('\\', "/");
+    let with_json = |path: &Path| {
+        let mut path = path.as_os_str().to_owned();
+        path.push(".json");
+        PathBuf::from(path)
+    };
+    if specifier.starts_with("./")
+        || specifier.starts_with("../")
+        || specifier.starts_with('/')
+        || Path::new(&specifier).is_absolute()
+    {
+        let config = normalize_path(&dir.join(&specifier));
+        return Some(if config.is_file() || specifier.ends_with(".json") {
+            config
+        } else {
+            with_json(&config)
+        });
+    }
+    dir.ancestors().find_map(|ancestor| {
+        let base = normalize_path(&ancestor.join("node_modules").join(&specifier));
+        [base.clone(), with_json(&base), base.join("tsconfig.json")]
+            .into_iter()
+            .find(|candidate| candidate.is_file())
+    })
+}
+
+/// `path` with `.` and `..` resolved lexically and native separators, as TypeScript does.
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir if normalized.file_name().is_some() => {
+                normalized.pop();
+            }
+            other => normalized.push(other),
+        }
+    }
+    normalized
+}
+
+/// Parses JSON with comments and trailing commas, as TypeScript reads `tsconfig.json`.
+fn parse_jsonc(text: &str) -> Option<Value> {
+    let mut json = String::with_capacity(text.len());
+    let mut chars = text.trim_start_matches('\u{feff}').chars().peekable();
+    // A comma is written once the next token shows it isn't a trailing one.
+    let mut comma = false;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '/' if chars.peek() == Some(&'/') => {
+                while chars.next_if(|&next| next != '\n').is_some() {}
+                continue;
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut previous = '\0';
+                for next in chars.by_ref() {
+                    if previous == '*' && next == '/' {
+                        break;
+                    }
+                    previous = next;
+                }
+                continue;
+            }
+            ',' if !comma => {
+                comma = true;
+                continue;
+            }
+            ch if ch.is_whitespace() => {
+                json.push(ch);
+                continue;
+            }
+            _ => {}
+        }
+        if std::mem::take(&mut comma) && !matches!(ch, '}' | ']') {
+            json.push(',');
+        }
+        json.push(ch);
+        if ch == '"' {
+            while let Some(ch) = chars.next() {
+                json.push(ch);
+                match ch {
+                    '\\' => json.extend(chars.next()),
+                    '"' => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+    serde_json::from_str(&json).ok()
+}
+
+fn read_cache(path: &Path, key: &str, root: &Path) -> Option<(AppModel, String)> {
     let bytes = fs::read(path).ok()?;
     let entry: CacheEntry = serde_json::from_slice(&bytes).ok()?;
     if entry.version != CACHE_VERSION || entry.key != key {
@@ -275,7 +456,7 @@ fn read_cache(path: &Path, key: &str, root: &Path) -> Option<AppModel> {
         return None;
     }
     tracing::debug!("reusing the analysis in {}", path.display());
-    Some(model)
+    Some((model, entry.inputs))
 }
 
 struct Hasher(Context);
@@ -359,5 +540,59 @@ mod tests {
         assert_ne!(edited, original);
         fs::remove_file(root.join("shared.ts")).unwrap();
         assert_ne!(inputs_fingerprint(root, &inputs), edited);
+    }
+
+    #[test]
+    fn inputs_edited_while_the_analysis_ran_are_noticed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("enums.ts");
+        fs::write(&file, "export enum Status { Open }").unwrap();
+        let an_hour_ago = SystemTime::now() - Duration::from_secs(3600);
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(an_hour_ago)
+            .unwrap();
+        let inputs = ["enums.ts".to_owned()];
+        let started = SystemTime::now();
+        assert!(!changed_since(root, &inputs, started));
+        fs::write(&file, "export enum Status { Open, Done }").unwrap();
+        assert!(changed_since(root, &inputs, started));
+        assert!(changed_since(root, &["gone.ts".to_owned()], started));
+    }
+
+    #[test]
+    fn the_tsconfig_chain_follows_extends() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let write = |path: &str, text: &str| {
+            let path = root.join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        };
+        write(
+            "rayfin/tsconfig.json",
+            "{\n  // shared settings\n  \"extends\": [\"../tsconfig.base\", \"@tsconfig/node20\"],\n  \
+             \"compilerOptions\": { \"outDir\": \"//not-a-comment\", },\n}",
+        );
+        write(
+            "tsconfig.base.json",
+            r#"{"extends": "./rayfin/tsconfig.json"}"#,
+        );
+        write("node_modules/@tsconfig/node20/tsconfig.json", "{}");
+        let tsconfig = root.join("rayfin").join("tsconfig.json");
+        assert_eq!(
+            tsconfig_chain(&tsconfig),
+            [
+                tsconfig.clone(),
+                root.join("tsconfig.base.json"),
+                root.join("node_modules")
+                    .join("@tsconfig")
+                    .join("node20")
+                    .join("tsconfig.json"),
+            ]
+        );
     }
 }

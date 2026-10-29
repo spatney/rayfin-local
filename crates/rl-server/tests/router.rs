@@ -311,6 +311,72 @@ async fn cors_allows_loopback_and_redirect_uri_origins_only() {
 }
 
 #[tokio::test]
+async fn cors_allows_other_ports_of_the_allowed_host_a_request_is_addressed_to() {
+    let router = build_router(
+        ServerConfig {
+            allowed_hosts: Some(vec!["192.168.1.20".to_owned()]),
+            ..config()
+        },
+        features(),
+    );
+    // `serve --host 192.168.1.20`: the dev server's page calls the backend on the same address.
+    let lan_app = "http://192.168.1.20:5173";
+    let reply = send(
+        &router,
+        Method::GET,
+        "/rayfin.config.json",
+        &[("Origin", lan_app), ("Host", "192.168.1.20:7171")],
+    )
+    .await;
+    assert_eq!(reply.header("access-control-allow-origin"), Some(lan_app));
+    let preflight = send(
+        &router,
+        Method::OPTIONS,
+        "/graphql",
+        &[
+            ("Origin", lan_app),
+            ("Host", "192.168.1.20:7171"),
+            ("Access-Control-Request-Method", "POST"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        preflight.header("access-control-allow-origin"),
+        Some(lan_app)
+    );
+
+    // Another machine's origin, or a host the Host check refuses, gets no CORS headers.
+    for (origin, host) in [
+        ("http://192.168.1.21:5173", "192.168.1.20:7171"),
+        ("http://evil.example:5173", "evil.example:7171"),
+    ] {
+        let reply = send(
+            &router,
+            Method::GET,
+            "/rayfin.config.json",
+            &[("Origin", origin), ("Host", host)],
+        )
+        .await;
+        assert_eq!(
+            reply.header("access-control-allow-origin"),
+            None,
+            "{origin}"
+        );
+    }
+
+    // Without the Host check (wildcard addresses), the request's host proves nothing.
+    let unchecked = build_router(config(), features());
+    let reply = send(
+        &unchecked,
+        Method::GET,
+        "/rayfin.config.json",
+        &[("Origin", lan_app), ("Host", "192.168.1.20:7171")],
+    )
+    .await;
+    assert_eq!(reply.header("access-control-allow-origin"), None);
+}
+
+#[tokio::test]
 async fn host_check_rejects_foreign_hosts() {
     let router = build_router(
         ServerConfig {

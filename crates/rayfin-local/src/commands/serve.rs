@@ -61,7 +61,8 @@ pub async fn run(dir: &Path, options: ServeOptions) -> anyhow::Result<ExitCode> 
     let project = super::load_project(dir)?;
     let (mut state, serve_lock) = open_state(&project, options.reset)?;
     let node = super::find_node().await?;
-    let model = Arc::new(analysis::analyze(&project, &state, &node, options.verbose).await?);
+    let (model, model_stamp) = analysis::analyze(&project, &state, &node, options.verbose).await?;
+    let model = Arc::new(model);
     let db = open_database(&project, &state, &model, options.force_schema).await?;
     let broker = Arc::new(integrations::token_broker(
         &project,
@@ -81,6 +82,7 @@ pub async fn run(dir: &Path, options: ServeOptions) -> anyhow::Result<ExitCode> 
         state: &state,
         node: &node,
         model: &model,
+        model_stamp: &model_stamp,
         db: &db,
         auth: &auth,
         broker: &broker,
@@ -213,12 +215,27 @@ fn listen_host(project: &Project, options: &ServeOptions) -> String {
         .filter(|host| !host.is_empty())
         .unwrap_or_else(|| DEFAULT_HOST.to_owned());
     if !integrations::is_loopback(&host) {
-        ui::warn(format_args!(
+        let mut message = format!(
             "The backend listens on {host}, so other machines can reach it. It acts with your \
              Azure identity for connectors and functions; use 127.0.0.1 unless you need this."
-        ));
+        );
+        if is_wildcard(&host) {
+            message.push_str(
+                " The app's URLs point at localhost, which other devices can't reach: to use the \
+                 app from another device, use `--host <this machine's LAN address>` instead.",
+            );
+        }
+        ui::warn(message);
     }
     host
+}
+
+/// `0.0.0.0` or `::`: every interface.
+fn is_wildcard(host: &str) -> bool {
+    host.trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+        .is_ok_and(|ip| ip.is_unspecified())
 }
 
 /// The auth service. Signing in as the developer's Entra identity ("Continue as <you>" and the
@@ -265,7 +282,20 @@ async fn bind_ports(
         local.server.port,
         state.data().api_port.unwrap_or(DEFAULT_API_PORT),
     );
-    let port = ports::choose_port(request, None, is_free)?;
+    let frontend_request = (!options.no_frontend && !options.static_build).then(|| {
+        PortRequest::resolve(
+            "--frontend-port",
+            options.frontend_port,
+            "[frontend] port",
+            local.frontend.port,
+            project.preferred_frontend_port(),
+        )
+    });
+    let port = ports::choose_port(
+        request,
+        request.yields_to(frontend_request.as_ref()),
+        is_free,
+    )?;
     let listeners = rl_server::bind(host, port).await?;
     // Port 0 asks the system for one.
     let api_port = listeners
@@ -273,18 +303,9 @@ async fn bind_ports(
         .and_then(|listener| listener.local_addr().ok())
         .map_or(port, |addr| addr.port());
 
-    let frontend_port = if options.no_frontend || options.static_build {
-        None
-    } else {
-        let request = PortRequest::resolve(
-            "--frontend-port",
-            options.frontend_port,
-            "[frontend] port",
-            local.frontend.port,
-            project.preferred_frontend_port(),
-        );
-        Some(ports::choose_port(request, Some(api_port), is_free)?)
-    };
+    let frontend_port = frontend_request
+        .map(|request| ports::choose_port(request, Some(api_port), is_free))
+        .transpose()?;
 
     let data = state.data_mut();
     data.api_port = Some(api_port);
@@ -500,7 +521,7 @@ fn banner_rows(
             names => format!(
                 "{} ({})",
                 count(names.len(), "function", "functions"),
-                names.join(", ")
+                name_list(&names)
             ),
         },
         None if ctx.options.no_functions => "off (--no-functions)".to_owned(),
@@ -543,6 +564,21 @@ fn banner_rows(
 /// `1 entity`, `3 entities`.
 fn count(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// How many names a banner row shows.
+const BANNER_NAMES: usize = 8;
+
+/// `names` joined, cut to the first [`BANNER_NAMES`] and `… and N more`.
+fn name_list(names: &[String]) -> String {
+    match names.get(BANNER_NAMES..) {
+        Some(rest) if !rest.is_empty() => format!(
+            "{} … and {} more",
+            names[..BANNER_NAMES].join(", "),
+            rest.len()
+        ),
+        _ => names.join(", "),
+    }
 }
 
 fn server_config(ctx: &ServeContext<'_>, static_site: Option<StaticSite>) -> ServerConfig {
@@ -651,5 +687,15 @@ mod tests {
         assert_eq!(origin_host("fe80::1"), "[fe80::1]");
         assert_eq!(allowed_hosts("0.0.0.0"), None);
         assert_eq!(allowed_hosts("[::1]"), Some(vec!["::1".to_owned()]));
+    }
+
+    #[test]
+    fn the_banner_lists_at_most_eight_names() {
+        let names: Vec<String> = (1..=10).map(|n| format!("f{n}")).collect();
+        assert_eq!(
+            name_list(&names),
+            "f1, f2, f3, f4, f5, f6, f7, f8 … and 2 more"
+        );
+        assert_eq!(name_list(&names[..8]), "f1, f2, f3, f4, f5, f6, f7, f8");
     }
 }

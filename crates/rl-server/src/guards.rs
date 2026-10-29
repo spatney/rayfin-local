@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use axum::extract::{OriginalUri, Request, State};
 use axum::http::uri::Authority;
-use axum::http::{Method, StatusCode, header};
+use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::middleware::Next;
 use axum::response::Response;
 
@@ -84,8 +84,18 @@ impl HostAllowlist {
         }
     }
 
-    fn allows(&self, host: &str) -> bool {
+    /// Whether `host` (from [`request_host`]) passes the check.
+    pub(crate) fn allows(&self, host: &str) -> bool {
         is_loopback_host(host) || self.hosts.contains(host)
+    }
+}
+
+/// The host a request is addressed to (the Host header, else the URI's authority), normalized by
+/// [`normalize_host`].
+pub(crate) fn request_host(headers: &HeaderMap, uri: &Uri) -> Option<String> {
+    match headers.get(header::HOST) {
+        Some(value) => value.to_str().ok().and_then(normalize_host),
+        None => uri.authority().and_then(|a| normalize_host(a.as_str())),
     }
 }
 
@@ -94,13 +104,7 @@ pub(crate) async fn check_host(
     req: Request,
     next: Next,
 ) -> Response {
-    let host = match req.headers().get(header::HOST) {
-        Some(value) => value.to_str().ok().and_then(normalize_host),
-        None => req
-            .uri()
-            .authority()
-            .and_then(|a| normalize_host(a.as_str())),
-    };
+    let host = request_host(req.headers(), req.uri());
     match host {
         Some(host) if allowlist.allows(&host) => next.run(req).await,
         host => {
@@ -120,7 +124,7 @@ pub(crate) async fn check_host(
 
 /// The host part of a Host header or host name, without port or IPv6 brackets, lowercased, with
 /// IP addresses in canonical form.
-fn normalize_host(raw: &str) -> Option<String> {
+pub(crate) fn normalize_host(raw: &str) -> Option<String> {
     let raw = raw.trim();
     if let Ok(ip) = raw.parse::<IpAddr>() {
         return Some(ip.to_string());

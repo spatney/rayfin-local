@@ -29,6 +29,7 @@ use rl_tokens::{
 };
 use tokio::sync::oneshot;
 
+use crate::analysis::SourcesStamp;
 use crate::commands::serve::ServeOptions;
 use crate::shutdown::StopHooks;
 use crate::ui;
@@ -43,6 +44,8 @@ pub struct ServeContext<'a> {
     pub state: &'a LocalState,
     pub node: &'a NodeRuntime,
     pub model: &'a Arc<AppModel>,
+    /// What `model` was analyzed from, for live reload to catch changes made since.
+    pub model_stamp: &'a SourcesStamp,
     pub db: &'a Db,
     pub auth: &'a Arc<AuthService>,
     pub broker: &'a Arc<TokenBroker>,

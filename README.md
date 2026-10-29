@@ -367,7 +367,7 @@ Every command takes these options:
 | `--static` | Build the app once and serve it from the backend instead of running Vite. |
 | `--no-frontend` | Run only the backend. |
 | `--no-functions` | Don't build or run the functions. |
-| `--host <HOST>` | Interface to listen on. Default: `[server] host`, else `127.0.0.1`. **Anything but loopback exposes your Azure identity** to the network, through functions and connectors. |
+| `--host <HOST>` | Interface to listen on. Default: `[server] host`, else `127.0.0.1`. **Anything but loopback exposes your Azure identity** to the network, through functions and connectors. With `0.0.0.0` or `::` the app's URLs still point at `localhost`, so to use the app from another device pass this machine's LAN address instead. |
 | `--token-source <auto\|az\|rayfin>` | Where Azure tokens come from. Default: `[tokens] source`, else `auto`. |
 | `--tenant <TENANT>` | Entra tenant for tokens. Default: your login's tenant. |
 | `--force-schema` | Apply schema changes that lose data. |
