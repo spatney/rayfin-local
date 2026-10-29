@@ -62,6 +62,7 @@ pub async fn run(dir: &Path, options: ServeOptions) -> anyhow::Result<ExitCode> 
     let (mut state, serve_lock) = open_state(&project, options.reset)?;
     let node = super::find_node().await?;
     let (model, model_stamp) = analysis::analyze(&project, &state, &node, options.verbose).await?;
+    check_anonymous_access(&project, &model)?;
     let model = Arc::new(model);
     let db = open_database(&project, &state, &model, options.force_schema).await?;
     let broker = Arc::new(integrations::token_broker(
@@ -418,6 +419,8 @@ async fn serve_until_signal(
     } else {
         frontend_url
     };
+    // What the local Fabric host frames, for apps that sign in embedded.
+    ctx.auth.set_embed_app_url(app_url.clone());
     ui::banner(&ui::Banner {
         app_name: ctx.project.display_name(),
         rows: banner_rows(ctx, &features, app_url.as_deref(), auth_settings),
@@ -475,21 +478,30 @@ struct Features {
 }
 
 /// The feature routers (auth and connectors, then the services configured in `integrations`),
-/// and what started.
+/// and what started. With `[fabric] anonymous_data_access = false`, the routes Fabric's
+/// authentication middleware guards answer requests without a token with its 401.
 async fn start_features(
     ctx: &ServeContext<'_>,
     hooks: &mut StopHooks,
 ) -> anyhow::Result<(Vec<Router>, Features)> {
+    let reject_anonymous = ctx.project.local_config().fabric.anonymous_data_access == Some(false);
+    let guarded = |router: Router| {
+        if reject_anonymous {
+            router.layer(axum::middleware::from_fn(rl_server::reject_anonymous))
+        } else {
+            router
+        }
+    };
     let mut routers = vec![
         Arc::clone(ctx.auth).router(),
-        integrations::connectors_router(ctx),
+        guarded(integrations::connectors_router(ctx)),
     ];
-    routers.extend(integrations::graphql_router(ctx));
+    routers.extend(integrations::graphql_router(ctx).map(guarded));
     let storage = integrations::storage_router(ctx).await?;
     let has_storage = storage.is_some();
-    routers.extend(storage);
+    routers.extend(storage.map(guarded));
     let functions = integrations::start_functions(ctx, hooks).await?;
-    routers.extend(functions.as_ref().map(FunctionsService::router));
+    routers.extend(functions.as_ref().map(|service| guarded(service.router())));
     let features = Features {
         functions,
         storage: has_storage,
@@ -549,8 +561,18 @@ fn banner_rows(
     } else {
         "off (services.storage is disabled in rayfin.yml)".to_owned()
     };
-    vec![
-        ("App", app),
+    let mut rows = vec![("App", app)];
+    if app_url.is_some() && auth_settings.enabled && auth_settings.fabric_enabled {
+        rows.push((
+            "Embedded",
+            format!(
+                "{}{} (the app inside a local Fabric frame)",
+                ctx.api_origin,
+                rl_auth::EMBED_HOST_PATH
+            ),
+        ));
+    }
+    rows.extend([
         ("API", ctx.api_origin.to_owned()),
         ("Entities", entities),
         ("Functions", functions),
@@ -558,7 +580,55 @@ fn banner_rows(
         ("Storage", storage),
         ("Data", ctx.state.dir().display().to_string()),
         ("Sign in", sign_in_hint(auth_settings)),
-    ]
+    ]);
+    rows
+}
+
+/// The entities that grant the `anonymous` role.
+fn anonymous_entities(model: &AppModel) -> Vec<&str> {
+    model
+        .entities
+        .iter()
+        .filter(|entity| {
+            entity.permissions.iter().any(|permission| {
+                permission.role.eq_ignore_ascii_case("anonymous") && !permission.actions.is_empty()
+            })
+        })
+        .map(|entity| entity.name.as_str())
+        .collect()
+}
+
+/// Fabric accepts the `anonymous` role only when a tenant administrator allows anonymous data
+/// access, which is off by default. `[fabric] anonymous_data_access = false` refuses such
+/// entities, as `rayfin up` does on such a tenant; leaving it unset warns about them.
+fn check_anonymous_access(project: &Project, model: &AppModel) -> anyhow::Result<()> {
+    let entities = anonymous_entities(model);
+    let (subject, verb) = match entities.as_slice() {
+        [] => return Ok(()),
+        [one] => (format!("Entity {one}"), "grants"),
+        many => (format!("Entities {}", many.join(", ")), "grant"),
+    };
+    let setting = "\"Enable anonymous data access for Fabric Apps (Preview)\"";
+    match project.local_config().fabric.anonymous_data_access {
+        Some(true) => Ok(()),
+        Some(false) => bail!(
+            "{subject} {verb} the anonymous role, which a Fabric tenant without {setting} refuses: \
+             `rayfin up` fails with ANONYMOUS_DATA_ACCESS_BLOCKED_BY_TENANT_ADMIN, and \
+             rayfin-local.toml asks rayfin-local to act like such a tenant ([fabric] \
+             anonymous_data_access = false). Grant access with @authenticated instead, or change \
+             the setting."
+        ),
+        None => {
+            ui::warn(format_args!(
+                "{subject} {verb} the anonymous role. Fabric accepts it only when a tenant \
+                 administrator turns on {setting}, which is off by default; otherwise `rayfin up` \
+                 refuses the schema. In rayfin-local.toml, set [fabric] anonymous_data_access to \
+                 true if your tenant allows it (hides this warning), or to false to act like a \
+                 tenant that doesn't."
+            ));
+            Ok(())
+        }
+    }
 }
 
 /// `1 entity`, `3 entities`.
@@ -697,5 +767,51 @@ mod tests {
             "f1, f2, f3, f4, f5, f6, f7, f8 … and 2 more"
         );
         assert_eq!(name_list(&names[..8]), "f1, f2, f3, f4, f5, f6, f7, f8");
+    }
+
+    #[test]
+    fn anonymous_grants_follow_the_tenant_setting() {
+        let model =
+            |json: &str| AppModel::from_analysis(&serde_json::from_str(json).unwrap()).unwrap();
+        let basic = model(include_str!(
+            "../../../rl-model/tests/fixtures/basic.analysis.json"
+        ));
+        let mut names = anonymous_entities(&basic);
+        names.sort_unstable();
+        assert_eq!(names, ["Category", "Comment", "Project", "Todo"]);
+        let explorer = model(include_str!(
+            "../../../rl-model/tests/fixtures/explorer.analysis.json"
+        ));
+        assert!(anonymous_entities(&explorer).is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("rayfin")).unwrap();
+        fs::write(dir.path().join("rayfin").join("rayfin.yml"), "name: app\n").unwrap();
+        let project = |setting: &str| {
+            fs::write(dir.path().join("rayfin-local.toml"), setting).unwrap();
+            Project::load(dir.path()).unwrap()
+        };
+        let refused = check_anonymous_access(
+            &project("[fabric]\nanonymous_data_access = false\n"),
+            &basic,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refused.starts_with("Entities ") && refused.contains("anonymous_data_access = false"),
+            "{refused}"
+        );
+        assert!(
+            check_anonymous_access(
+                &project("[fabric]\nanonymous_data_access = false\n"),
+                &explorer
+            )
+            .is_ok()
+        );
+        assert!(
+            check_anonymous_access(&project("[fabric]\nanonymous_data_access = true\n"), &basic)
+                .is_ok()
+        );
+        assert!(check_anonymous_access(&project(""), &basic).is_ok());
     }
 }
