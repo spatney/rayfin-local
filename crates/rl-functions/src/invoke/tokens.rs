@@ -16,10 +16,6 @@ const MINT_TIMEOUT: Duration = Duration::from_secs(60);
 /// otherwise wait for the same failure (a failing `az` run, an unanswered interactive sign-in).
 const FAILURE_TTL: Duration = Duration::from_secs(30);
 
-/// How long an invocation waits for a token another invocation is getting, before it runs
-/// without it.
-const JOIN_WAIT: Duration = Duration::from_secs(3);
-
 /// A failing audience is reported at most this often.
 const WARN_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -105,15 +101,15 @@ impl Drop for Fetch<'_> {
 
 impl TokenFetches {
     /// A token for `audience`, fetched from `source`. The error of a fetch that failed less than
-    /// [`FAILURE_TTL`] ago is returned again; while another invocation fetches it, this one waits
-    /// up to [`JOIN_WAIT`] for that fetch.
+    /// [`FAILURE_TTL`] ago is returned again; while another invocation fetches it, this one shares
+    /// that fetch (which [`MINT_TIMEOUT`] bounds): the first calls of a page often run together,
+    /// and a token from the Azure CLI takes seconds.
     async fn token(
         &self,
         source: &dyn TokenSource,
         audience: Audience,
     ) -> Result<String, TokenError> {
         let scope = audience.default_scope();
-        let join_deadline = Instant::now() + JOIN_WAIT;
         loop {
             let mut in_flight = match self.next(audience, Instant::now()) {
                 Next::Fail(error) => return Err(error),
@@ -136,19 +132,9 @@ impl TokenFetches {
                     return result;
                 }
             };
-            // Only the end of the fetch (its sender dropped) wakes this.
-            if tokio::time::timeout_at(join_deadline, in_flight.changed())
-                .await
-                .is_err()
-            {
-                return Err(TokenError {
-                    scope: scope.to_owned(),
-                    message: format!(
-                        "another invocation has been getting it for more than {JOIN_WAIT:?}"
-                    ),
-                    hint: None,
-                });
-            }
+            // Only the end of the fetch (its sender dropped) wakes this; then look again: its
+            // failure is remembered, and its token is in the source's cache.
+            let _ = in_flight.changed().await;
         }
     }
 
@@ -261,7 +247,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_fetch_in_flight_is_waited_for_briefly() {
+    async fn invocations_share_a_fetch_in_flight() {
         let source = Failing::new(MINT_TIMEOUT / 2);
         let fetches = TokenFetches::default();
         let audiences = [Audience::Fabric];
@@ -274,8 +260,9 @@ mod tests {
         };
         let (first, (second, waited)) = tokio::join!(first, second);
         assert!(first.is_empty() && second.is_empty());
+        // The second waited for the first's fetch to end, without a fetch of its own.
         assert!(
-            waited >= JOIN_WAIT && waited < MINT_TIMEOUT / 2,
+            waited >= MINT_TIMEOUT / 2 - Duration::from_secs(1),
             "{waited:?}"
         );
         assert_eq!(source.fetches(), 1);
