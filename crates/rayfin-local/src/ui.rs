@@ -116,6 +116,11 @@ impl Painter {
         }
     }
 
+    /// A painter for a stream known to take colors or not.
+    pub fn new(enabled: bool) -> Self {
+        Self { enabled }
+    }
+
     pub fn paint(self, color: Color, text: impl Display) -> String {
         if self.enabled {
             format!("\x1b[{}m{text}\x1b[0m", color.code())

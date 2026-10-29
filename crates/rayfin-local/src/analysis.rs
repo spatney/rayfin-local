@@ -1,17 +1,17 @@
 //! The app model: `@microsoft/rayfin-core`'s analysis of `rayfin/data` (and `rayfin/storage`), run
 //! with the project's own packages and cached in `.rayfin-local/cache/analysis.json` while its
-//! inputs are unchanged.
+//! inputs are unchanged. A data package's `services.data.buildCommand` runs first, as in the CLI.
 
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::Context as _;
+use anyhow::{Context as _, bail};
 use ring::digest::{Context, SHA256};
 use rl_model::{AnalyzeInput, AppModel, Dialect};
-use rl_node::{Helper, NodeRuntime};
+use rl_node::{Helper, NodeError, NodeRuntime, ProcessSpec};
 use rl_project::config::Dialect as ConfigDialect;
-use rl_project::{CORE_PACKAGE, LocalState, Project, write_atomic};
+use rl_project::{CORE_PACKAGE, LocalState, Project, SUPPORTED_SDK_VERSION, write_atomic};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use walkdir::WalkDir;
@@ -21,7 +21,7 @@ use crate::ui;
 const HELPER: Helper = Helper::new("analyze", rl_model::ANALYZE_JS);
 const CACHE_FILE: &str = "analysis.json";
 /// Bump when the cache's meaning changes.
-const CACHE_VERSION: u32 = 1;
+const CACHE_VERSION: u32 = 2;
 /// Leeway for file systems whose modification times lag the clock or are coarse (FAT: 2 s).
 const MTIME_SLACK: Duration = Duration::from_secs(2);
 /// A bound on `extends` chains, which may be cyclic.
@@ -53,13 +53,32 @@ struct CacheEntry {
     version: u32,
     /// [`analysis_key`] of the run that produced `analysis`.
     key: String,
-    /// [`inputs_fingerprint`] of the files the TypeScript program read.
+    /// [`inputs_fingerprint`] of the files the analysis read.
     inputs: String,
     analysis: Value,
 }
 
-/// Analyzes the project (or reuses the cached analysis), prints the analysis' diagnostics and
-/// returns the model and what it was analyzed from.
+/// What to do when the build or the analysis fails.
+struct Advice {
+    /// After an analysis error, which is printed below it.
+    analysis: &'static str,
+    /// How to try again once a failed build is fixed.
+    retry: &'static str,
+}
+
+const AT_STARTUP: Advice = Advice {
+    analysis: "Fix the error below, then run `rayfin-local serve` again.",
+    retry: "then run `rayfin-local serve` again",
+};
+
+const WHILE_SERVING: Advice = Advice {
+    analysis: "Fix the error below and save again; the previous schema stays in use until then.",
+    retry: "then save again; the previous schema stays in use until then",
+};
+
+/// Builds the data package when it has a build command, analyzes the project (or reuses the
+/// cached analysis), prints the analysis' diagnostics and returns the model and what it was
+/// analyzed from.
 pub async fn analyze(
     project: &Project,
     state: &LocalState,
@@ -73,8 +92,9 @@ pub async fn analyze(
         let stamp = SourcesStamp::now(project, state, &model);
         return Ok((model, stamp));
     }
-    let hint = "Fix the error below, then run `rayfin-local serve` again.";
-    let (model, cached, stamp) = load_model(project, state, node, verbose, hint).await?;
+    let (model, cached, stamp) =
+        load_model(project, state, node, verbose, &AT_STARTUP, true).await?;
+    print_diagnostics(&model);
     let mut line = format!("Analyzed {}", summary(&model));
     if cached {
         line.push_str(" (cached)");
@@ -83,15 +103,22 @@ pub async fn analyze(
     Ok((model, stamp))
 }
 
-/// [`analyze`] again while serving, after a source changed: prints only the diagnostics.
+/// [`analyze`] again while serving, after a source changed: prints only the diagnostics of a new
+/// analysis (a cached one was printed before). `build` runs the data package's build command
+/// first.
 pub async fn reanalyze(
     project: &Project,
     state: &LocalState,
     node: &NodeRuntime,
     verbose: bool,
+    build: bool,
 ) -> anyhow::Result<AppModel> {
-    let hint = "Fix the error below and save again; the previous schema stays in use until then.";
-    Ok(load_model(project, state, node, verbose, hint).await?.0)
+    let (model, cached, _) =
+        load_model(project, state, node, verbose, &WHILE_SERVING, build).await?;
+    if !cached {
+        print_diagnostics(&model);
+    }
+    Ok(model)
 }
 
 /// What the model holds, such as `3 entities and 2 storage folders`.
@@ -112,33 +139,58 @@ pub fn summary(model: &AppModel) -> String {
 }
 
 /// The model from the cache or a new analysis (`true` when cached) and what it was analyzed
-/// from, its diagnostics printed. `hint` says what to do when the analysis fails.
+/// from, its diagnostics printed. `build` runs the data package's build command first.
 async fn load_model(
     project: &Project,
     state: &LocalState,
     node: &NodeRuntime,
     verbose: bool,
-    hint: &str,
+    advice: &Advice,
+    build: bool,
 ) -> anyhow::Result<(AppModel, bool, SourcesStamp)> {
+    let built = if build {
+        build_data_package(project, advice).await?
+    } else {
+        None
+    };
     let input = analyze_input(project, state, verbose);
     let key = analysis_key(project, &input);
     let cache_path = state.cache_dir().join(CACHE_FILE);
     let (mut model, cached, inputs) = match read_cache(&cache_path, &key, project.root()) {
         Some((model, inputs)) => (model, true, Some(inputs)),
         None => {
-            let (model, inputs) =
-                run_analysis(project, state, node, &input, key.clone(), &cache_path, hint).await?;
+            let run = Run {
+                input: &input,
+                key: key.clone(),
+                cache_path: &cache_path,
+                advice,
+                built,
+            };
+            let (model, inputs) = run_analysis(project, state, node, run).await?;
             (model, false, inputs)
         }
     };
     if !project.config().services.data.enabled {
         model.entities.clear();
     }
+    let stamp = SourcesStamp(inputs.map(|inputs| (key, inputs)));
+    Ok((model, cached, stamp))
+}
+
+fn print_diagnostics(model: &AppModel) {
     for diagnostic in &model.diagnostics {
         ui::warn(&diagnostic.message);
     }
-    let stamp = SourcesStamp(inputs.map(|inputs| (key, inputs)));
-    Ok((model, cached, stamp))
+}
+
+/// One analysis to run: its input and key, where to cache it, what to do when it fails and when
+/// the data package's build finished (`None` when none ran).
+struct Run<'a> {
+    input: &'a AnalyzeInput,
+    key: String,
+    cache_path: &'a Path,
+    advice: &'a Advice,
+    built: Option<SystemTime>,
 }
 
 /// Runs the analysis and caches it, unless a file it read changed while it ran. Returns the
@@ -147,47 +199,157 @@ async fn run_analysis(
     project: &Project,
     state: &LocalState,
     node: &NodeRuntime,
-    input: &AnalyzeInput,
-    key: String,
-    cache_path: &Path,
-    hint: &str,
+    run: Run<'_>,
 ) -> anyhow::Result<(AppModel, Option<String>)> {
     // The files read are known only afterwards; their stamps must predate this.
-    let started = SystemTime::now();
+    let since = edits_count_from(SystemTime::now(), run.built);
+    let failed = |err: anyhow::Error| {
+        let err = err.context(format!(
+            "Could not analyze {}. {}",
+            analyzed_sources(project),
+            run.advice.analysis
+        ));
+        match sdk_upgrade_note(project) {
+            Some(note) => err.context(note),
+            None => err,
+        }
+    };
     let analysis: Value = rl_node::run_helper(
         node,
         &HELPER,
         &state.cache_dir(),
         project.root(),
-        &input.to_json(),
+        &run.input.to_json(),
         ui::child_sink(),
     )
     .await
-    .with_context(|| {
-        format!(
-            "Could not analyze the app's entities in {}. {hint}",
-            input.data_dir.display()
-        )
-    })?;
-    let model = AppModel::from_analysis(&analysis)?;
+    .map_err(|err| failed(err.into()))?;
+    let model = AppModel::from_analysis(&analysis).map_err(|err| failed(err.into()))?;
     let inputs = inputs_fingerprint(project.root(), &model.sources.inputs);
-    if changed_since(project.root(), &model.sources.inputs, started) {
+    if changed_since(project.root(), &model.sources.inputs, since) {
         tracing::debug!("a file changed while the analysis ran; not caching it");
         return Ok((model, None));
     }
     let entry = CacheEntry {
         version: CACHE_VERSION,
-        key,
+        key: run.key,
         inputs: inputs.clone(),
         analysis,
     };
     let written = serde_json::to_vec(&entry)
         .map_err(std::io::Error::other)
-        .and_then(|bytes| write_atomic(cache_path, &bytes));
+        .and_then(|bytes| write_atomic(run.cache_path, &bytes));
     if let Err(err) = written {
-        tracing::debug!("could not write {}: {err}", cache_path.display());
+        tracing::debug!("could not write {}: {err}", run.cache_path.display());
     }
     Ok((model, Some(inputs)))
+}
+
+/// Runs `services.data.buildCommand` (when data is enabled) with the platform shell in the data
+/// package, as the CLI does before it analyzes the entities, its output labelled `build`. Returns
+/// when it finished, or `None` when there is no build command.
+async fn build_data_package(
+    project: &Project,
+    advice: &Advice,
+) -> anyhow::Result<Option<SystemTime>> {
+    let data = &project.config().services.data;
+    let Some(command) = data
+        .build_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|command| data.enabled && !command.is_empty())
+    else {
+        return Ok(None);
+    };
+    let dir = project.data_service_root();
+    let shown = display_path(project, dir);
+    let retry = advice.retry;
+    tracing::debug!(
+        "building the data package: `{command}` in {}",
+        dir.display()
+    );
+    let spec = ProcessSpec::shell("build", command, dir).sink(ui::child_sink());
+    match rl_node::run_to_completion(spec).await {
+        Ok(()) => {}
+        Err(NodeError::Failed { status, .. }) => {
+            let status = status
+                .code()
+                .map_or_else(|| status.to_string(), |code| format!("exit code {code}"));
+            bail!(
+                "The data build command `{command}` (services.data.buildCommand in \
+                 rayfin/rayfin.yml) failed in {shown} with {status}. Fix the errors above (run \
+                 `{command}` in {shown} to see them again), {retry}."
+            );
+        }
+        Err(err) => {
+            return Err(err).with_context(|| {
+                format!("Could not run the data build command `{command}` in {shown}; {retry}.")
+            });
+        }
+    }
+    ui::step(format_args!(
+        "Built the data package ({shown}: `{command}`)"
+    ));
+    Ok(Some(SystemTime::now()))
+}
+
+/// What the analysis reads, for messages: the data package (when the entities come from its
+/// build output), else the entity folder, else the storage folder.
+fn analyzed_sources(project: &Project) -> String {
+    if !project.config().services.data.enabled {
+        format!(
+            "the storage folders in {}",
+            display_path(project, &project.storage_schema_dir())
+        )
+    } else if data_package_entry(project).is_some() {
+        format!(
+            "the entities of the data package {}",
+            display_path(project, project.data_service_root())
+        )
+    } else {
+        format!(
+            "the entities in {}",
+            display_path(project, &project.data_dir())
+        )
+    }
+}
+
+/// `path` relative to the project root (with `/`), or as is outside it.
+fn display_path(project: &Project, path: &Path) -> String {
+    match path.strip_prefix(project.root()) {
+        Ok(relative) if relative.as_os_str().is_empty() => ".".to_owned(),
+        Ok(relative) => relative.to_string_lossy().replace('\\', "/"),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+/// What to do when the installed `@microsoft/rayfin-core` is not the 1.36 line rayfin-local
+/// implements (`None` when it is, or when its version is unknown).
+fn sdk_upgrade_note(project: &Project) -> Option<String> {
+    let version = project.rayfin_package(CORE_PACKAGE)?.installed.as_deref()?;
+    sdk_note(version)
+}
+
+fn sdk_note(version: &str) -> Option<String> {
+    let installed = major_minor(version)?;
+    if installed == SUPPORTED_SDK_VERSION {
+        return None;
+    }
+    let (major, minor) = SUPPORTED_SDK_VERSION;
+    let advice = if installed < SUPPORTED_SDK_VERSION {
+        format!(" Upgrade the app's @microsoft/rayfin-* packages to {major}.{minor}.")
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "This app uses {CORE_PACKAGE} {version}; rayfin-local implements {major}.{minor}.x.{advice}"
+    ))
+}
+
+/// The major and minor version of a version such as `1.34.0-beta.2`.
+fn major_minor(version: &str) -> Option<(u64, u64)> {
+    let mut parts = version.trim().split(['.', '-', '+']);
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
 }
 
 /// The helper's input: the project's entity and storage folders, compiled into
@@ -201,13 +363,55 @@ pub fn analyze_input(project: &Project, state: &LocalState, verbose: bool) -> An
     );
     input.data_dir = project.data_dir();
     input.storage_dir = Some(project.storage_schema_dir());
-    if let Some(rayfin_dir) = input.data_dir.parent() {
-        let tsconfig = rayfin_dir.join("tsconfig.json");
-        input.tsconfig_path = tsconfig.is_file().then_some(tsconfig);
-    }
+    let tsconfig = rayfin_tsconfig(project);
+    input.tsconfig_path = tsconfig.is_file().then_some(tsconfig);
     input.out_dir = state.cache_dir().join("compiled");
     input.verbose = verbose;
     input
+}
+
+/// The `rayfin/tsconfig.json` (which may not exist) of the package whose `rayfin/` folder the
+/// helper compiles: the storage package's when the entities come from the data package's build
+/// output, else the data package's.
+pub(crate) fn rayfin_tsconfig(project: &Project) -> PathBuf {
+    let storage_only =
+        project.config().services.storage.enabled && data_package_entry(project).is_some();
+    let package = if storage_only {
+        project.storage_service_root()
+    } else {
+        project.data_service_root()
+    };
+    package.join("rayfin").join("tsconfig.json")
+}
+
+/// The module the entities are imported from when the data package is loaded as built: the
+/// `.js` entry of `exports`, else `main`, of its `package.json`, as the CLI's
+/// `resolvePackageExports` picks it. `None` when the entities are compiled from `rayfin/data`.
+pub(crate) fn data_package_entry(project: &Project) -> Option<PathBuf> {
+    package_entry(project.data_service_root())
+}
+
+fn package_entry(dir: &Path) -> Option<PathBuf> {
+    fn from_exports(exports: &Value) -> Option<&str> {
+        let js = |entry: &&str| entry.ends_with(".js");
+        match exports {
+            Value::String(entry) => Some(entry.as_str()).filter(js),
+            Value::Object(map) => match map.get(".") {
+                Some(dot) => from_exports(dot),
+                None => ["import", "require", "default"]
+                    .iter()
+                    .find_map(|key| map.get(*key).and_then(Value::as_str).filter(js)),
+            },
+            _ => None,
+        }
+    }
+    let text = fs::read_to_string(dir.join("package.json")).ok()?;
+    let package: Value = serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
+    let entry = package
+        .get("exports")
+        .and_then(from_exports)
+        .or_else(|| package.get("main").and_then(Value::as_str))?;
+    Some(normalize_path(&dir.join(entry)))
 }
 
 fn model_dialect(dialect: ConfigDialect) -> Dialect {
@@ -293,23 +497,34 @@ fn cache_key(input: &Value, dirs: &[PathBuf], files: &[PathBuf], extra: &[&str])
     hasher.finish()
 }
 
-/// The size and modification time of the project files the analysis read (`sources.inputs`,
-/// relative to `root`), which may live outside `rayfin/data`.
+/// The contents of the project files the analysis read (`sources.inputs`, relative to `root`),
+/// which may live outside `rayfin/data`: contents rather than modification times, so that a
+/// build that writes the same output again leaves the cache valid.
 fn inputs_fingerprint(root: &Path, inputs: &[String]) -> String {
     let mut hasher = Hasher::new();
     for input in inputs {
         hasher.field(input.as_bytes());
-        hasher.file_stamp(&root.join(input));
+        match fs::read(root.join(input)) {
+            Ok(contents) => hasher.field(&contents),
+            Err(_) => hasher.field(b"<missing>"),
+        }
     }
     hasher.finish()
 }
 
-/// Whether a file in `inputs` was modified or removed since `started`, as the analysis that
-/// started then ran: it may have read the previous version. Modification times beyond now, which
-/// no edit made, don't count.
-fn changed_since(root: &Path, inputs: &[String], started: SystemTime) -> bool {
-    let window =
-        started.checked_sub(MTIME_SLACK).unwrap_or(UNIX_EPOCH)..=SystemTime::now() + MTIME_SLACK;
+/// From when modifications of the files an analysis starting at `started` reads may have been
+/// missed by it: [`MTIME_SLACK`] earlier, but not before the build that just ran (`built`)
+/// finished, as its output is complete.
+fn edits_count_from(started: SystemTime, built: Option<SystemTime>) -> SystemTime {
+    let slack = started.checked_sub(MTIME_SLACK).unwrap_or(UNIX_EPOCH);
+    built.map_or(slack, |built| slack.max(built))
+}
+
+/// Whether a file in `inputs` was modified or removed since `since` ([`edits_count_from`]): the
+/// analysis may have read the previous version. Modification times beyond now, which no edit
+/// made, don't count.
+fn changed_since(root: &Path, inputs: &[String], since: SystemTime) -> bool {
+    let window = since..=SystemTime::now() + MTIME_SLACK;
     inputs.iter().any(|input| {
         fs::metadata(root.join(input))
             .and_then(|meta| meta.modified())
@@ -556,11 +771,159 @@ mod tests {
             .set_modified(an_hour_ago)
             .unwrap();
         let inputs = ["enums.ts".to_owned()];
-        let started = SystemTime::now();
-        assert!(!changed_since(root, &inputs, started));
+        // File systems stamp writes with a coarser clock than `SystemTime::now`: the slack covers it.
+        let since = edits_count_from(SystemTime::now(), None);
+        assert!(!changed_since(root, &inputs, since));
         fs::write(&file, "export enum Status { Open, Done }").unwrap();
-        assert!(changed_since(root, &inputs, started));
-        assert!(changed_since(root, &["gone.ts".to_owned()], started));
+        assert!(changed_since(root, &inputs, since));
+        assert!(changed_since(root, &["gone.ts".to_owned()], since));
+    }
+
+    #[test]
+    fn the_inputs_fingerprint_follows_contents_not_rewrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("index.js");
+        fs::write(&file, "export class Deck {}").unwrap();
+        let inputs = ["index.js".to_owned()];
+        let original = inputs_fingerprint(root, &inputs);
+        let later = SystemTime::now() + Duration::from_secs(60);
+        fs::write(&file, "export class Deck {}").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(later)
+            .unwrap();
+        assert_eq!(inputs_fingerprint(root, &inputs), original);
+    }
+
+    #[test]
+    fn output_the_data_build_wrote_before_the_analysis_is_no_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("index.js");
+        fs::write(&file, "export class Deck {}").unwrap();
+        let started = SystemTime::now();
+        fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(started - Duration::from_millis(800))
+            .unwrap();
+        let inputs = ["index.js".to_owned()];
+        assert!(changed_since(
+            root,
+            &inputs,
+            edits_count_from(started, None)
+        ));
+        let built = Some(started - Duration::from_millis(500));
+        assert!(!changed_since(
+            root,
+            &inputs,
+            edits_count_from(started, built)
+        ));
+    }
+
+    #[test]
+    fn the_data_package_entry_follows_the_clis_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let entry_of = |package: &str| {
+            fs::write(root.join("package.json"), package).unwrap();
+            package_entry(root)
+        };
+        let dist = Some(root.join("dist").join("index.js"));
+        assert_eq!(entry_of(r#"{"exports": "./dist/index.js"}"#), dist);
+        assert_eq!(
+            entry_of(r#"{"exports": {".": {"import": "./dist/index.js", "types": "x.d.ts"}}}"#),
+            dist
+        );
+        assert_eq!(
+            entry_of(r#"{"exports": {"default": "./dist/index.js"}}"#),
+            dist
+        );
+        assert_eq!(
+            entry_of(r#"{"exports": "./src/index.ts", "main": "dist/index.js"}"#),
+            dist
+        );
+        assert_eq!(entry_of(r#"{"name": "app"}"#), None);
+        fs::remove_file(root.join("package.json")).unwrap();
+        assert_eq!(package_entry(root), None);
+    }
+
+    #[test]
+    fn older_sdks_are_told_to_upgrade() {
+        assert_eq!(sdk_note("1.36.2"), None);
+        assert_eq!(sdk_note("1.36.0-alpha.1917"), None);
+        assert_eq!(
+            sdk_note("1.34.0").as_deref(),
+            Some(
+                "This app uses @microsoft/rayfin-core 1.34.0; rayfin-local implements 1.36.x. \
+                 Upgrade the app's @microsoft/rayfin-* packages to 1.36."
+            )
+        );
+        assert!(!sdk_note("1.37.1").unwrap().contains("Upgrade"));
+    }
+
+    /// A project with `rayfin.yml` and the files given (path, contents).
+    fn project_with(files: &[(&str, &str)]) -> (tempfile::TempDir, Project) {
+        let dir = tempfile::tempdir().unwrap();
+        for (path, text) in files {
+            let path = dir.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+        let project = Project::load(dir.path()).unwrap();
+        (dir, project)
+    }
+
+    const PACKAGE_LAYOUT: &str = "services:\n  data:\n    enabled: true\n    path: packages/data\n    \
+                                  buildCommand: exit 3\n  storage:\n    enabled: true\n";
+
+    #[test]
+    fn storage_compiles_with_its_packages_tsconfig_when_the_entities_are_built() {
+        let (_dir, project) = project_with(&[
+            ("rayfin/rayfin.yml", PACKAGE_LAYOUT),
+            ("rayfin/tsconfig.json", "{}"),
+            (
+                "packages/data/package.json",
+                r#"{"exports": "./dist/index.js"}"#,
+            ),
+        ]);
+        let rayfin = project.root().join("rayfin");
+        assert_eq!(rayfin_tsconfig(&project), rayfin.join("tsconfig.json"));
+        assert_eq!(
+            analyzed_sources(&project),
+            "the entities of the data package packages/data"
+        );
+
+        fs::write(project.data_service_root().join("package.json"), "{}").unwrap();
+        let data_rayfin = project.data_service_root().join("rayfin");
+        assert_eq!(rayfin_tsconfig(&project), data_rayfin.join("tsconfig.json"));
+        assert_eq!(
+            analyzed_sources(&project),
+            "the entities in packages/data/rayfin/data"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_data_build_names_the_command_and_its_exit_code() {
+        let (_dir, project) = project_with(&[
+            ("rayfin/rayfin.yml", PACKAGE_LAYOUT),
+            ("packages/data/package.json", "{}"),
+        ]);
+        let err = build_data_package(&project, &AT_STARTUP)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with(
+                "The data build command `exit 3` (services.data.buildCommand in \
+                 rayfin/rayfin.yml) failed in packages/data with exit code 3."
+            ),
+            "{err}"
+        );
     }
 
     #[test]

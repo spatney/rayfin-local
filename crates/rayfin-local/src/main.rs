@@ -8,13 +8,18 @@ mod reload;
 mod shutdown;
 mod ui;
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use rl_tokens::TokenMode;
+use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::format::Writer;
+use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, FormattedFields};
+use tracing_subscriber::registry::LookupSpan;
 
 use crate::commands::serve::ServeOptions;
 
@@ -210,8 +215,9 @@ fn project_dir(project: Option<&Path>) -> anyhow::Result<PathBuf> {
     })
 }
 
-/// Logs go to stderr without timestamps or targets: `info` for rayfin-local, `warn` for
-/// libraries; `--verbose` shows rayfin-local's debug logs, and `RUST_LOG` replaces the defaults.
+/// Logs go to stderr in the style of the status lines (see [`LogFormat`]): `info` for
+/// rayfin-local, `warn` for libraries; `--verbose` shows rayfin-local's debug logs, and
+/// `RUST_LOG` replaces the defaults.
 fn init_tracing(verbose: bool) {
     let rust_log = std::env::var("RUST_LOG")
         .ok()
@@ -230,11 +236,100 @@ fn init_tracing(verbose: bool) {
         EnvFilter::new("warn,rayfin_local=info")
     });
     tracing_subscriber::fmt()
-        .compact()
-        .without_time()
-        .with_target(false)
         .with_ansi(ui::stderr_colors())
+        .event_format(LogFormat)
         .with_writer(std::io::stderr)
         .with_env_filter(filter)
         .init();
+}
+
+/// Log lines that look like the status lines around them: info as a plain line, warnings and
+/// errors as [`ui::warn`] and [`ui::error`] print them, and the other levels prefixed with their
+/// level and spans.
+struct LogFormat;
+
+impl<S, N> FormatEvent<S, N> for LogFormat
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &Event<'_>,
+    ) -> fmt::Result {
+        let painter = ui::Painter::new(writer.has_ansi_escapes());
+        match *event.metadata().level() {
+            Level::ERROR => write!(writer, "{} ", painter.paint(ui::Color::Red, "error:"))?,
+            Level::WARN => write!(writer, "{} ", painter.paint(ui::Color::Yellow, "warning:"))?,
+            Level::INFO => {}
+            level => {
+                let label = format!("{}:", level.as_str().to_ascii_lowercase());
+                write!(writer, "{} ", painter.paint(ui::Color::Dim, label))?;
+                for span in ctx
+                    .event_scope()
+                    .into_iter()
+                    .flat_map(|scope| scope.from_root())
+                {
+                    write!(writer, "{}", span.name())?;
+                    let extensions = span.extensions();
+                    if let Some(fields) = extensions.get::<FormattedFields<N>>()
+                        && !fields.is_empty()
+                    {
+                        write!(writer, "{{{fields}}}")?;
+                    }
+                    write!(writer, ": ")?;
+                }
+            }
+        }
+        ctx.field_format().format_fields(writer.by_ref(), event)?;
+        writeln!(writer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct Output(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for Output {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn logs_look_like_the_status_lines() {
+        let output = Output::default();
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .event_format(LogFormat)
+            .with_writer(move || writer.clone())
+            .with_max_level(Level::DEBUG)
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!("building the functions");
+            tracing::warn!(port = 7171, "port in use");
+            let _request = tracing::debug_span!("http", status = 200).entered();
+            tracing::debug!("answered");
+        });
+        let text = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(
+            text,
+            "building the functions\nwarning: port in use port=7171\ndebug: http{status=200}: \
+             answered\n"
+        );
+    }
 }

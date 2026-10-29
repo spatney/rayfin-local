@@ -13,7 +13,8 @@
 //                 (besides the --output file). It is emptied first.
 //   dialect       "mssql" | "postgresql"
 //   storage       whether to analyze the storage folders too
-//   verbose       optional; echo the analyzer's log to stderr
+//   verbose       optional; echo the analyzer's log to stderr. Without it console.log/info/debug
+//                 are silenced (older analyzers log every field there); warnings and errors stay.
 //
 // Result (all JSON-safe; the Rust side is rl_model::AppModel::from_analysis):
 //   coreVersion, typescriptVersion, dialect, featureFlags (RAYFIN_FEATURE_FLAGS, which changes
@@ -22,20 +23,30 @@
 //   verbatim), policies (one record per database policy: entity, role, index into that role's
 //   action list, action, text, and `check` = serializeCheckToAst(expr) or `checkError`), storage
 //   ({folders, config} from analyzeStorageFolders()/StorageConfigGenerator, or null), sources
-//   (project-relative module paths) and diagnostics.
+//   (project-relative module paths; `inputs` holds the project files the TypeScript program read
+//   and the modules imported at run time, such as a data package's build output) and diagnostics.
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { register } from 'node:module';
+import * as nodeModule from 'node:module';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { MessageChannel } from 'node:worker_threads';
 
 // Compiled file → its TypeScript source, for reporting.
 const compiledSources = new Map();
+// The files of the modules imported so far (reported by the resolve hook).
+const importedFiles = new Set();
+let importsPort;
+let flushId = 0;
+let flushed;
 
 const args = parseArgs(process.argv.slice(2));
 let outcome;
 try {
   const input = JSON.parse(readFileSync(args.input, 'utf8'));
+  if (input?.verbose !== true) {
+    console.log = console.info = console.debug = () => {};
+  }
   outcome = { ok: true, result: await analyze(input) };
 } catch (error) {
   outcome = {
@@ -92,6 +103,18 @@ async function analyze(input) {
         `services.data in rayfin/rayfin.yml.`,
     );
   }
+  // Before compiling: storage that imports the data package fails to compile without its build.
+  for (const entry of packageEntries ?? []) {
+    const file = path.resolve(serviceRoot, entry);
+    if (!existsSync(file)) {
+      throw new Error(
+        `The data package ${rel(projectRoot, serviceRoot)} has not been built: its entry ` +
+          `${rel(projectRoot, file)} (exports/main in its package.json) does not exist. Build it ` +
+          `with services.data.buildCommand in rayfin/rayfin.yml (for example npm run build), ` +
+          `which runs before the analysis, and check that the build writes that file.`,
+      );
+    }
+  }
   const storageExists = input.storage === true && existsSync(storageDir);
   if (input.storage === true && !storageExists) {
     diagnostics.push(warning(`Storage is enabled but ${rel(projectRoot, storageDir)} does not exist; no folders.`));
@@ -113,14 +136,6 @@ async function analyze(input) {
   }
   if (packageEntries) {
     entries.data = packageEntries.map((entry) => path.resolve(serviceRoot, entry));
-    for (const entry of entries.data) {
-      if (!existsSync(entry)) {
-        throw new Error(
-          `The data package entry ${rel(projectRoot, entry)} (package.json exports/main) does not ` +
-            `exist. Run the data build command first (e.g. npm run build).`,
-        );
-      }
-    }
     diagnostics.push(warning(`Loaded entities from the data package exports: ${packageEntries.join(', ')}.`));
   } else if (entries.data.length === 0) {
     throw new Error(`No entity modules were compiled from ${rel(projectRoot, dataDir)}.`);
@@ -136,7 +151,8 @@ async function analyze(input) {
   const config = new analysis.ConfigGenerator(dialect).generateConfig(entities);
   // Serialize before anything else touches the analyzer's objects, so `config` stays verbatim.
   const configJson = JSON.parse(JSON.stringify(config));
-  const policies = collectPolicies(core, entityClasses, entities);
+  const coreVersion = packageVersion('@microsoft/rayfin-core', projectRoot);
+  const policies = collectPolicies(core, entityClasses, entities, coreVersion);
 
   let storage = null;
   if (input.storage === true) {
@@ -154,8 +170,21 @@ async function analyze(input) {
     storage = { folders: toJson(folders), config: JSON.parse(JSON.stringify(storageConfig)) };
   }
 
+  // Every module was imported above; the files outside packages and the output are inputs too.
+  const known = new Set(inputs);
+  const imported = (await importedModules())
+    .filter(
+      (file) =>
+        !known.has(file) &&
+        isInside(projectRoot, file) &&
+        !isInside(outDir, file) &&
+        !file.split(path.sep).includes('node_modules'),
+    )
+    .sort((a, b) => a.localeCompare(b));
+  inputs = [...inputs, ...imported];
+
   return {
-    coreVersion: packageVersion('@microsoft/rayfin-core', projectRoot),
+    coreVersion,
     typescriptVersion: ts.version,
     dialect,
     featureFlags: process.env.RAYFIN_FEATURE_FLAGS ?? null,
@@ -204,26 +233,96 @@ function samePath(a, b) {
  * project instead: this helper and the compiled entities may live outside the project (tests,
  * read-only projects), yet must load the project's own `typescript` and `@microsoft/rayfin-core`.
  * Resolution that already works (the normal case under <project>/.rayfin-local) is untouched.
+ * The hook also reports every file it resolves, for importedModules(). It runs in this thread
+ * with module.registerHooks (Node 22.15+), else in the loader thread with module.register.
  */
 function installProjectResolution(projectRoot) {
+  const parents = [pathToFileURL(path.join(projectRoot, 'package.json')).href];
+  if (typeof nodeModule.registerHooks === 'function') {
+    const isBare = (s) => !s.startsWith('.') && !s.startsWith('/') && !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(s);
+    const report = (resolved) => {
+      if (resolved?.url?.startsWith('file:')) recordImport(resolved.url);
+      return resolved;
+    };
+    nodeModule.registerHooks({
+      resolve(specifier, context, nextResolve) {
+        try {
+          return report(nextResolve(specifier, context));
+        } catch (error) {
+          const notFound = error?.code === 'ERR_MODULE_NOT_FOUND' || error?.code === 'MODULE_NOT_FOUND';
+          if (!isBare(specifier) || !notFound) throw error;
+          for (const parentURL of parents) {
+            try {
+              return report(nextResolve(specifier, { ...context, parentURL }));
+            } catch {}
+          }
+          throw error;
+        }
+      },
+    });
+    return;
+  }
   const hooks = `
     let parents = [];
-    export function initialize(data) { parents = data.parents; }
+    let port;
+    export function initialize(data) {
+      parents = data.parents;
+      port = data.port;
+      port.on('message', (message) => port.postMessage(message));
+    }
     const isBare = (s) => !s.startsWith('.') && !s.startsWith('/') && !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(s);
+    const report = (resolved) => {
+      if (resolved?.url?.startsWith('file:')) port.postMessage({ url: resolved.url });
+      return resolved;
+    };
     export async function resolve(specifier, context, nextResolve) {
       try {
-        return await nextResolve(specifier, context);
+        return report(await nextResolve(specifier, context));
       } catch (error) {
         if (!isBare(specifier) || error?.code !== 'ERR_MODULE_NOT_FOUND') throw error;
         for (const parentURL of parents) {
-          try { return await nextResolve(specifier, { ...context, parentURL }); } catch {}
+          try { return report(await nextResolve(specifier, { ...context, parentURL })); } catch {}
         }
         throw error;
       }
     }`;
-  register(`data:text/javascript,${encodeURIComponent(hooks)}`, import.meta.url, {
-    data: { parents: [pathToFileURL(path.join(projectRoot, 'package.json')).href] },
+  const { port1, port2 } = new MessageChannel();
+  port1.on('message', (message) => {
+    if (typeof message?.url === 'string') {
+      recordImport(message.url);
+    } else if (message?.flush !== undefined && message.flush === flushId) {
+      flushed?.();
+    }
   });
+  port1.unref();
+  importsPort = port1;
+  nodeModule.register(`data:text/javascript,${encodeURIComponent(hooks)}`, import.meta.url, {
+    data: { parents, port: port2 },
+    transferList: [port2],
+  });
+}
+
+function recordImport(url) {
+  try {
+    importedFiles.add(path.resolve(fileURLToPath(url)));
+  } catch {}
+}
+
+/** The files of every module resolved so far: a round trip to the hook delivers its reports. */
+async function importedModules() {
+  if (importsPort) {
+    flushId += 1;
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 2000);
+      flushed = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      importsPort.postMessage({ flush: flushId });
+    });
+    flushed = undefined;
+  }
+  return [...importedFiles];
 }
 
 /** The version of the installed package `name`, as the project resolves it. */
@@ -301,7 +400,12 @@ function sourceOf(file) {
  * `.temp/compiled/data/*.js`), sorted.
  */
 function compile(ts, { projectRoot, tsconfigPath, outDir, entryDirs, diagnostics }) {
-  const configDir = tsconfigPath ? path.dirname(tsconfigPath) : path.join(projectRoot, 'rayfin');
+  // Without a tsconfig, the rayfin folder of the first folder compiled.
+  const configDir = tsconfigPath
+    ? path.dirname(tsconfigPath)
+    : entryDirs.length > 0
+      ? path.dirname(entryDirs[0])
+      : path.join(projectRoot, 'rayfin');
   let options;
   let rootNames;
   let projectReferences;
@@ -312,7 +416,7 @@ function compile(ts, { projectRoot, tsconfigPath, outDir, entryDirs, diagnostics
       ...ts.sys,
       onUnRecoverableConfigFileDiagnostic: (diagnostic) => unrecoverable.push(diagnostic),
     });
-    if (!parsed) throw compileError(ts, projectRoot, unrecoverable);
+    if (!parsed) throw compileError(ts, projectRoot, unrecoverable, tsconfigPath);
     options = { ...parsed.options };
     rootNames = [...parsed.fileNames];
     projectReferences = parsed.projectReferences;
@@ -330,7 +434,8 @@ function compile(ts, { projectRoot, tsconfigPath, outDir, entryDirs, diagnostics
       rootDir: configDir,
     };
     rootNames = [];
-    diagnostics.push(warning('No rayfin/tsconfig.json; compiled rayfin with default TypeScript options.'));
+    const folder = rel(projectRoot, configDir);
+    diagnostics.push(warning(`No ${folder}/tsconfig.json; compiled ${folder} with default TypeScript options.`));
   }
   Object.assign(options, {
     outDir,
@@ -383,7 +488,7 @@ function compile(ts, { projectRoot, tsconfigPath, outDir, entryDirs, diagnostics
     configFileParsingDiagnostics: configErrors,
   });
   const errors = ts.getPreEmitDiagnostics(program).filter((d) => d.category === ts.DiagnosticCategory.Error);
-  if (errors.length > 0) throw compileError(ts, projectRoot, errors);
+  if (errors.length > 0) throw compileError(ts, projectRoot, errors, tsconfigPath);
 
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
@@ -410,7 +515,7 @@ function compile(ts, { projectRoot, tsconfigPath, outDir, entryDirs, diagnostics
     }
   });
   const emitErrors = emit.diagnostics.filter((d) => d.category === ts.DiagnosticCategory.Error);
-  if (emitErrors.length > 0) throw compileError(ts, projectRoot, emitErrors);
+  if (emitErrors.length > 0) throw compileError(ts, projectRoot, emitErrors, tsconfigPath);
   // Node picks the module format of a `.js` file from the nearest package.json; outDir is
   // outside the project's package scope, so state the format TypeScript emitted.
   for (const [dir, type] of formats) {
@@ -457,7 +562,7 @@ function isEsm(ts, program, options, sourceFile) {
   return [kind.ES2015, kind.ES2020, kind.ES2022, kind.ESNext, kind.Preserve].includes(format);
 }
 
-function compileError(ts, projectRoot, list) {
+function compileError(ts, projectRoot, list, tsconfigPath) {
   const lines = list.map((diagnostic) => {
     const message = ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n  ');
     if (diagnostic.file && diagnostic.start !== undefined) {
@@ -466,6 +571,21 @@ function compileError(ts, projectRoot, list) {
     }
     return `error TS${diagnostic.code}: ${message}`;
   });
+  // TS2688 "Cannot find type definition file": usually a stray @types folder above the project.
+  if (list.some((diagnostic) => diagnostic.code === 2688)) {
+    const strays = [];
+    for (let dir = path.dirname(projectRoot); ; dir = path.dirname(dir)) {
+      const types = path.join(dir, 'node_modules', '@types');
+      if (existsSync(types)) strays.push(types);
+      if (path.dirname(dir) === dir) break;
+    }
+    const config = tsconfigPath ? rel(projectRoot, tsconfigPath) : 'rayfin/tsconfig.json';
+    lines.push(
+      `hint: TypeScript also loads the @types packages in the node_modules of parent folders` +
+        `${strays.length > 0 ? ` (${strays.join(', ')})` : ''}; set "types" (or "typeRoots") ` +
+        `in ${config}, or remove the stray folder.`,
+    );
+  }
   return new Error(`TypeScript compilation of rayfin failed:\n${lines.join('\n')}`);
 }
 
@@ -476,13 +596,19 @@ function compileError(ts, projectRoot, list) {
  * `index` is the action's position in the role's list, in both `entities[].permissions` and the
  * DAB config.
  */
-function collectPolicies(core, entityClasses, entities) {
+function collectPolicies(core, entityClasses, entities, coreVersion) {
   const order = { create: 1, read: 2, update: 3, delete: 4, execute: 5, '*': 99 };
   const records = [];
   for (const entityClass of entityClasses) {
     const meta = core.getEntityMetadata(entityClass);
     const analyzed = entities.find((entity) => entity.name === meta.name);
     if (!analyzed || !meta.roles || meta.roles.length === 0) continue;
+    if (typeof core.serializeCheckToAst !== 'function' && meta.roles.some((decl) => decl.policy)) {
+      throw new Error(
+        `@microsoft/rayfin-core ${coreVersion ?? '(unknown version)'} has no serializeCheckToAst, ` +
+          `which rayfin-local needs for the database policies of ${meta.name} (it came in 1.36).`,
+      );
+    }
     const byRole = new Map();
     for (const decl of meta.roles) {
       byRole.set(decl.role, [...(byRole.get(decl.role) ?? []), decl]);

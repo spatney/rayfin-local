@@ -1,7 +1,9 @@
 //! Live reload while serving: when the entity or storage sources, other files they import, their
 //! tsconfig or `rayfin.yml` change, the app is analyzed again, the database brought up to date
-//! and the data API switched to the new model. A failed analysis or a change that would lose data
-//! (without `--force-schema`) leaves the previous model in use.
+//! and the data API switched to the new model. Changes to the sources of a data package with a
+//! build command (or of the workspace packages whose build output it imports) run the build
+//! command first. A failed build or analysis, or a change that would lose data (without
+//! `--force-schema`), leaves the previous model in use.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -87,6 +89,8 @@ enum Change {
     Model,
     /// The entity or storage folder itself appeared, went or was renamed.
     Folder,
+    /// A source of a package the data build command compiles.
+    Package,
 }
 
 /// The files live reload follows.
@@ -95,9 +99,13 @@ struct Sources {
     config: PathBuf,
     data_dir: PathBuf,
     storage_dir: PathBuf,
+    /// The `rayfin/tsconfig.json` the analysis compiles with (it may not exist yet).
+    tsconfig: PathBuf,
     /// The files outside the two folders that the last analysis read ([`Sources::outside_files`]),
     /// shared with the watcher's callback.
     files: Arc<RwLock<HashSet<PathBuf>>>,
+    /// The packages the data build command compiles ([`packages`]), shared with the callback.
+    packages: Arc<RwLock<Vec<Package>>>,
 }
 
 impl Sources {
@@ -106,7 +114,9 @@ impl Sources {
             config: project.config_path(),
             data_dir: project.data_dir(),
             storage_dir: project.storage_schema_dir(),
+            tsconfig: analysis::rayfin_tsconfig(project),
             files: Arc::default(),
+            packages: Arc::default(),
         }
     }
 
@@ -132,25 +142,29 @@ impl Sources {
                 .contains(path)
         {
             Some(Change::Model)
+        } else if self
+            .packages
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .any(|package| package.has_source(path))
+        {
+            Some(Change::Package)
         } else {
             None
         }
     }
 
     /// The files outside the two folders that an analysis of `inputs` (`sources.inputs`, relative
-    /// to `root`) depends on: imported modules, such as shared enums, and the tsconfig with the
-    /// configs it extends. Packages are left out.
+    /// to `root`) depends on: imported modules, such as shared enums or a data package's build
+    /// output, and the tsconfig with the configs it extends. Packages are left out.
     fn outside_files(&self, root: &Path, inputs: &[String]) -> HashSet<PathBuf> {
         let modules = inputs.iter().map(|input| {
             input
                 .split('/')
                 .fold(root.to_owned(), |path, part| path.join(part))
         });
-        let tsconfigs = self
-            .data_dir
-            .parent()
-            .map(|dir| analysis::tsconfig_chain(&dir.join("tsconfig.json")))
-            .unwrap_or_default();
+        let tsconfigs = analysis::tsconfig_chain(&self.tsconfig);
         modules
             .chain(tsconfigs)
             .filter(|path| {
@@ -161,6 +175,98 @@ impl Sources {
             })
             .collect()
     }
+}
+
+/// A package the data build command compiles. Its sources are its files outside `node_modules`,
+/// dot-folders and `skipped`: its build output folders (and the functions, when they are in it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Package {
+    root: PathBuf,
+    skipped: BTreeSet<PathBuf>,
+}
+
+impl Package {
+    fn has_source(&self, path: &Path) -> bool {
+        let Ok(relative) = path.strip_prefix(&self.root) else {
+            return false;
+        };
+        relative.components().next().is_some()
+            && !self.skipped.iter().any(|dir| path.starts_with(dir))
+            && !relative.components().any(|part| {
+                let name = part.as_os_str().to_string_lossy();
+                name == "node_modules" || name.starts_with('.')
+            })
+            && path.extension().is_none_or(|ext| ext != "tsbuildinfo")
+    }
+
+    /// The folders to watch for its sources: the package (not recursively), and the folders in it
+    /// that may hold sources (recursively).
+    fn folders(&self) -> Vec<(PathBuf, RecursiveMode)> {
+        let mut folders = vec![(self.root.clone(), RecursiveMode::NonRecursive)];
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            let name = entry.file_name();
+            if dir.is_dir() && self.has_source(&dir) && name != "node_modules" {
+                folders.push((dir, RecursiveMode::Recursive));
+            }
+        }
+        folders
+    }
+}
+
+/// The packages the data build command compiles, when `rayfin.yml` has one: the data package
+/// (unless it is the project itself), and the workspace packages that hold files the analysis
+/// read (`files`, such as their build output) other than the project's root package.
+fn packages(project: &Project, files: &HashSet<PathBuf>) -> Vec<Package> {
+    let data = &project.config().services.data;
+    let has_build = data
+        .build_command
+        .as_deref()
+        .is_some_and(|command| !command.trim().is_empty());
+    if !data.enabled || !has_build {
+        return Vec::new();
+    }
+    let root = project.root();
+    let mut found: BTreeMap<PathBuf, BTreeSet<PathBuf>> = BTreeMap::new();
+    let data_root = project.data_service_root();
+    if data_root != root {
+        let outputs = found.entry(data_root.to_owned()).or_default();
+        if let Some(entry) = analysis::data_package_entry(project) {
+            outputs.extend(top_folder(data_root, &entry));
+        }
+    }
+    for file in files {
+        let package = file
+            .ancestors()
+            .skip(1)
+            .take_while(|dir| *dir != root && dir.starts_with(root))
+            .find(|dir| dir.join("package.json").is_file());
+        if let Some(package) = package {
+            let outputs = found.entry(package.to_owned()).or_default();
+            outputs.extend(top_folder(package, file));
+        }
+    }
+    let functions = project.functions_dir();
+    found
+        .into_iter()
+        .map(|(root, mut skipped)| {
+            if functions.starts_with(&root) {
+                skipped.insert(functions.to_owned());
+            }
+            Package { root, skipped }
+        })
+        .collect()
+}
+
+/// The folder right in `package` that holds `file`, unless `file` is right in `package`.
+fn top_folder(package: &Path, file: &Path) -> Option<PathBuf> {
+    let mut parts = file.strip_prefix(package).ok()?.components();
+    let first = parts.next()?;
+    parts.next()?;
+    Some(package.join(first))
 }
 
 struct Reloader {
@@ -183,12 +289,20 @@ struct Reloader {
 
 impl Reloader {
     async fn run(mut self, mut changes: mpsc::UnboundedReceiver<Change>) {
-        while let Some(first) = changes.recv().await {
-            let mut batch = vec![first];
+        let mut carried = Vec::new();
+        loop {
+            let mut batch = std::mem::take(&mut carried);
+            if batch.is_empty() {
+                let Some(first) = changes.recv().await else {
+                    return;
+                };
+                batch.push(first);
+            }
             while let Ok(Some(change)) = tokio::time::timeout(DEBOUNCE, changes.recv()).await {
                 batch.push(change);
             }
-            let mut analyze = batch.contains(&Change::Model);
+            let build = batch.contains(&Change::Package);
+            let mut analyze = build || batch.contains(&Change::Model);
             if batch.contains(&Change::Folder) {
                 if let Err(err) = self.follow_folders(true) {
                     ui::warn(format_args!(
@@ -201,7 +315,15 @@ impl Reloader {
                 analyze |= self.reload_config();
             }
             if analyze {
-                self.reload_model().await;
+                self.reload_model(build).await;
+            }
+            if build {
+                // What the build wrote in the packages is no edit to build again for.
+                while let Ok(Some(change)) = tokio::time::timeout(DEBOUNCE, changes.recv()).await {
+                    if change != Change::Package {
+                        carried.push(change);
+                    }
+                }
             }
         }
     }
@@ -241,9 +363,11 @@ impl Reloader {
     }
 
     /// Follows the files outside the two folders that an analysis of `inputs` read, watching the
-    /// folders they are in (not recursively; other files there are ignored).
+    /// folders they are in (not recursively; other files there are ignored), and the sources of
+    /// the packages the data build command compiles.
     fn follow_files(&mut self, inputs: &[String]) {
         let files = self.sources.outside_files(self.project.root(), inputs);
+        let packages = packages(&self.project, &files);
         let dirs: BTreeSet<PathBuf> = files
             .iter()
             .filter_map(|file| file.parent())
@@ -258,11 +382,23 @@ impl Reloader {
                 ));
             }
         }
+        for (dir, mode) in packages.iter().flat_map(Package::folders) {
+            if let Err(err) = self.watch_dir(&dir, mode) {
+                ui::warn(format_args!(
+                    "{err:#}; restart rayfin-local after changing the data package's sources."
+                ));
+            }
+        }
         *self
             .sources
             .files
             .write()
             .unwrap_or_else(PoisonError::into_inner) = files;
+        *self
+            .sources
+            .packages
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = packages;
     }
 
     /// Reads `rayfin.yml` again; returns whether the model must be analyzed again.
@@ -288,19 +424,22 @@ impl Reloader {
         change.dialect
     }
 
-    async fn reload_model(&mut self) {
+    /// Analyzes the app again (`build`: after running the data build command) and switches to
+    /// the new model.
+    async fn reload_model(&mut self, build: bool) {
         let services = &self.project.config().services;
         if !services.data.enabled && !services.storage.enabled {
             return;
         }
-        let model =
-            match analysis::reanalyze(&self.project, &self.state, &self.node, self.verbose).await {
-                Ok(model) => model,
-                Err(err) => {
-                    ui::error(&err);
-                    return;
-                }
-            };
+        let reanalyzed =
+            analysis::reanalyze(&self.project, &self.state, &self.node, self.verbose, build).await;
+        let model = match reanalyzed {
+            Ok(model) => model,
+            Err(err) => {
+                ui::error(&err);
+                return;
+            }
+        };
         self.follow_files(&model.sources.inputs);
         if model.storage != self.storage {
             self.storage = model.storage.clone();
@@ -459,12 +598,18 @@ mod tests {
             config: at("rayfin/rayfin.yml"),
             data_dir: at("rayfin/data"),
             storage_dir: at("rayfin/storage"),
+            tsconfig: at("rayfin/tsconfig.json"),
             files: Arc::default(),
+            packages: Arc::new(RwLock::new(vec![Package {
+                root: at("packages/data"),
+                skipped: BTreeSet::from([at("packages/data/dist")]),
+            }])),
         };
         let inputs = [
             "rayfin/data/todo.ts",
             "shared/enums.ts",
             "node_modules/pkg/index.ts",
+            "packages/data/dist/index.js",
         ]
         .map(str::to_owned);
         *sources.files.write().unwrap() = sources.outside_files(root, &inputs);
@@ -476,6 +621,9 @@ mod tests {
             ("shared/enums.ts", edit, Some(Change::Model)),
             ("rayfin/tsconfig.json", edit, Some(Change::Model)),
             ("tsconfig.json", edit, Some(Change::Model)),
+            ("packages/data/dist/index.js", edit, Some(Change::Model)),
+            ("packages/data/src/todo.ts", edit, Some(Change::Package)),
+            ("packages/data/package.json", edit, Some(Change::Package)),
             (
                 "rayfin/data",
                 EventKind::Create(CreateKind::Folder),
@@ -489,9 +637,54 @@ mod tests {
             ("shared/other.ts", edit, None),
             ("node_modules/pkg/index.ts", edit, None),
             ("rayfin/functions/index.ts", edit, None),
+            ("packages/data/dist/todo.js", edit, None),
+            ("packages/data/.tsbuildinfo", edit, None),
+            ("packages/data/tsconfig.tsbuildinfo", edit, None),
+            ("packages/data/node_modules/pkg/index.js", edit, None),
+            ("packages/data", edit, None),
         ];
         for (path, kind, change) in cases {
             assert_eq!(sources.classify(&at(path), &kind), change, "{path}");
         }
+    }
+
+    #[test]
+    fn the_data_build_follows_the_data_package_and_the_workspace_packages_it_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |path: &str, text: &str| {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write(
+            "rayfin/rayfin.yml",
+            "services:\n  data:\n    enabled: true\n    path: packages/data\n    \
+             buildCommand: npm run build\n",
+        );
+        write("package.json", "{}");
+        write(
+            "packages/data/package.json",
+            r#"{"exports": {".": {"import": "./dist/index.js"}}}"#,
+        );
+        write("packages/shared/package.json", "{}");
+        let project = Project::load(dir.path()).unwrap();
+        let at = |path: &str| {
+            path.split('/')
+                .fold(project.root().to_owned(), |path, part| path.join(part))
+        };
+        let files = HashSet::from([at("packages/shared/dist/index.js"), at("shared/enums.ts")]);
+        assert_eq!(
+            packages(&project, &files),
+            [
+                Package {
+                    root: at("packages/data"),
+                    skipped: BTreeSet::from([at("packages/data/dist")]),
+                },
+                Package {
+                    root: at("packages/shared"),
+                    skipped: BTreeSet::from([at("packages/shared/dist")]),
+                },
+            ]
+        );
     }
 }
