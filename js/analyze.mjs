@@ -194,6 +194,11 @@ function isInside(dir, file) {
   return relative.length > 0 && !relative.startsWith('..') && !path.isAbsolute(relative);
 }
 
+/** Whether `a` and `b` are the same folder (on Windows, `path.relative` ignores letter case). */
+function samePath(a, b) {
+  return path.relative(a, b) === '';
+}
+
 /**
  * Makes bare specifiers that cannot be resolved from the importing module resolve from the
  * project instead: this helper and the compiled entities may live outside the project (tests,
@@ -355,8 +360,8 @@ function compile(ts, { projectRoot, tsconfigPath, outDir, entryDirs, diagnostics
 
   // Inside the project, only rayfin-local's own state folder may be written.
   if (
-    outDir === path.parse(outDir).root ||
-    outDir === projectRoot ||
+    samePath(outDir, path.parse(outDir).root) ||
+    samePath(outDir, projectRoot) ||
     isInside(outDir, projectRoot) ||
     (isInside(projectRoot, outDir) && !isInside(path.join(projectRoot, '.rayfin-local'), outDir))
   ) {

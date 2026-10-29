@@ -82,7 +82,7 @@ impl LocalState {
     }
 
     fn load_or_create_in(dir: &Path, env: &EnvFile) -> Result<Self, ProjectError> {
-        create_dir(dir)?;
+        create_state_dir(dir)?;
         let gitignore = dir.join(".gitignore");
         if !gitignore.exists() {
             write_atomic(&gitignore, b"*\n").map_err(|source| ProjectError::Write {
@@ -305,7 +305,7 @@ impl LocalState {
         }
     }
 
-    /// Replaces the local secret values (atomically).
+    /// Replaces the local secret values (atomically). On Unix, only the owner may read the file.
     pub fn save_secrets(&self, secrets: &BTreeMap<String, String>) -> Result<(), ProjectError> {
         let path = self.secrets_path();
         let mut json =
@@ -314,7 +314,12 @@ impl LocalState {
                 message: err.to_string(),
             })?;
         json.push('\n');
-        write_atomic(&path, json.as_bytes()).map_err(|source| ProjectError::Write { path, source })
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        replace_atomically(&path, json.as_bytes(), &options)
+            .map_err(|source| ProjectError::Write { path, source })
     }
 }
 
@@ -323,6 +328,31 @@ fn create_dir(dir: &Path) -> Result<(), ProjectError> {
         path: dir.to_path_buf(),
         source,
     })
+}
+
+/// Creates the state folder `dir`. On Unix, only its owner may open it, which keeps the keys, the
+/// database and the secrets in it private; a folder an earlier version made open to others is
+/// closed.
+fn create_state_dir(dir: &Path) -> Result<(), ProjectError> {
+    let failed = |source| ProjectError::Write {
+        path: dir.to_path_buf(),
+        source,
+    };
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir).map_err(failed)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir).map_err(failed)?.permissions().mode();
+        if mode & 0o077 != 0 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(failed)?;
+        }
+    }
+    Ok(())
 }
 
 /// Who is serving a project (`.rayfin-local/serve.json`).
@@ -390,6 +420,19 @@ fn read_serve_info(path: &Path) -> Option<ServeInfo> {
 /// Replaces `path` with `contents` atomically: the bytes go to a temporary file in the same
 /// folder, which is then renamed over `path`, so readers never see a partial file.
 pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    replace_atomically(
+        path,
+        contents,
+        std::fs::OpenOptions::new().write(true).create_new(true),
+    )
+}
+
+/// [`write_atomic`] with the temporary file opened by `options` (which create it, for writing).
+fn replace_atomically(
+    path: &Path,
+    contents: &[u8],
+    options: &std::fs::OpenOptions,
+) -> std::io::Result<()> {
     let file_name = path.file_name().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -401,10 +444,7 @@ pub fn write_atomic(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     temp_name.push(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
     let temp = path.with_file_name(temp_name);
     let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp)?;
+        let mut file = options.open(&temp)?;
         file.write_all(contents)?;
         file.sync_all()?;
         drop(file);
@@ -587,6 +627,25 @@ mod tests {
         let secrets = BTreeMap::from([("API_KEY".to_string(), "s3cret".to_string())]);
         state.save_secrets(&secrets).unwrap();
         assert_eq!(state.load_secrets().unwrap(), secrets);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_state_folder_and_the_secrets_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join(STATE_DIR);
+        let state = LocalState::load_or_create_in(&dir, &EnvFile::default()).unwrap();
+        state.save_secrets(&BTreeMap::new()).unwrap();
+        fn mode(path: &Path) -> u32 {
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+        }
+        assert_eq!((mode(&dir), mode(&state.secrets_path())), (0o700, 0o600));
+
+        // A folder an earlier version left open to others is closed.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        LocalState::load_or_create_in(&dir, &EnvFile::default()).unwrap();
+        assert_eq!(mode(&dir), 0o700);
     }
 
     #[test]

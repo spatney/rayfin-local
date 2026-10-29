@@ -6,7 +6,8 @@
 //! nullability, defaults, keys, CHECKs, dropped columns) rebuilds the table with SQLite's
 //! documented procedure (<https://sqlite.org/lang_altertable.html#otheralter>): with foreign keys
 //! off, create the new table, copy the rows, drop the old table, rename, re-create the indexes,
-//! then `PRAGMA foreign_key_check`.
+//! then `PRAGMA foreign_key_check`. A column's default fills only a new column and the NULLs a
+//! now-required column no longer allows: other NULLs are copied as they are.
 //!
 //! A step that would lose data (a dropped table or column holding values, values that cannot be
 //! converted to a new type or are rounded to a smaller scale, required columns without a default
@@ -566,25 +567,32 @@ fn rebuild(
             let mut values = Vec::with_capacity(to.columns.len());
             for (position, column) in to.columns.iter().enumerate() {
                 let count = &mut counts[position];
+                let fill = &fills[position];
                 let value = match &sources[position] {
                     Source::Old(index, old) => {
                         match convert(old.kind, column.kind, row.get_ref(*index)?) {
+                            // A NULL the column still allows stays NULL, also when the column
+                            // gains a default (Fabric keeps them too).
+                            Converted::Value(SqlValue::Null) if !column.nullable => {
+                                fill.value(column.kind, &mut count.placeholders)
+                            }
                             Converted::Value(value) => value,
                             Converted::Rounded(value) => {
                                 count.rounded += 1;
                                 value
                             }
+                            // Reported as unconvertible only, not again as a placeholder.
                             Converted::Lost => {
                                 count.unconvertible += 1;
-                                SqlValue::Null
+                                if column.nullable {
+                                    SqlValue::Null
+                                } else {
+                                    fill.value(column.kind, &mut 0)
+                                }
                             }
                         }
                     }
-                    Source::New => SqlValue::Null,
-                };
-                let value = match value {
-                    SqlValue::Null => fills[position].value(column, count),
-                    value => value,
+                    Source::New => fill.value(column.kind, &mut count.placeholders),
                 };
                 values.push(value);
             }
@@ -648,7 +656,8 @@ fn rebuild(
     Ok(())
 }
 
-/// The value of a rebuilt row's column that has none.
+/// The value a rebuilt row gets in a new column, or in place of a NULL its column no longer
+/// allows.
 enum Fill {
     Value(SqlValue),
     Uuid,
@@ -670,14 +679,15 @@ impl Fill {
         })
     }
 
-    fn value(&self, column: &ColumnSchema, counts: &mut Counts) -> SqlValue {
+    /// The value for a column of `kind`, counting the placeholders it hands out.
+    fn value(&self, kind: StoredKind, placeholders: &mut u64) -> SqlValue {
         match self {
             Self::Value(value) => value.clone(),
             Self::Uuid => SqlValue::Text(codec::new_uuid()),
             Self::Null => SqlValue::Null,
             Self::Placeholder => {
-                counts.placeholders += 1;
-                placeholder(column.kind)
+                *placeholders += 1;
+                placeholder(kind)
             }
         }
     }
@@ -714,6 +724,13 @@ fn owned(value: ValueRef<'_>) -> SqlValue {
 fn convert(from: StoredKind, to: StoredKind, value: ValueRef<'_>) -> Converted {
     if matches!(value, ValueRef::Null) || from == to {
         return Converted::Value(owned(value));
+    }
+    if from == StoredKind::Date && to == StoredKind::Text {
+        // The stored 100 ns precision, not the milliseconds the API renders.
+        return match value.as_str().ok().and_then(codec::parse_datetime) {
+            Some(text) => Converted::Value(SqlValue::Text(text)),
+            None => Converted::Lost,
+        };
     }
     let Ok(json) = codec::decode(&from.field_kind(), value) else {
         return Converted::Lost;

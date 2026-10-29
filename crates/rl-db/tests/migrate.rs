@@ -293,6 +293,126 @@ async fn type_changes_convert_what_they_can() {
 }
 
 #[tokio::test]
+async fn unconvertible_values_are_reported_once() {
+    let db = Db::open_in_memory().unwrap();
+    let model = explorer();
+    apply(&db, &model, false).await.unwrap();
+    seed(&db, "a", Some("abc"));
+    seed(&db, "b", None);
+
+    // A required int without a default: "abc" cannot be converted, the NULL gets a placeholder.
+    let mut retyped = model.clone();
+    let response = entity(&mut retyped, "AskThread")
+        .columns
+        .iter_mut()
+        .find(|c| c.name == "responseId")
+        .unwrap();
+    response.kind = FieldKind::Int {
+        min: None,
+        max: None,
+    };
+    response.nullable = false;
+    let error = apply(&db, &retyped, false).await.unwrap_err();
+    let SchemaError::DataLoss { losses } = &error else {
+        panic!("{error}")
+    };
+    let losses: Vec<_> = losses
+        .iter()
+        .map(|loss| (loss.rows, &loss.reason))
+        .collect();
+    assert_eq!(
+        losses,
+        [
+            (
+                1,
+                &LossReason::Unconvertible {
+                    from: "text".into(),
+                    to: "int".into()
+                }
+            ),
+            (1, &LossReason::Placeholder { value: "0".into() })
+        ]
+    );
+}
+
+#[tokio::test]
+async fn rebuilds_keep_the_nulls_a_column_allows() {
+    let db = Db::open_in_memory().unwrap();
+    let mut model = explorer();
+    entity(&mut model, "AskThread").columns.push(column(
+        "archived",
+        FieldKind::Boolean,
+        true,
+        None,
+    ));
+    apply(&db, &model, false).await.unwrap();
+    seed(&db, "a", None);
+    seed(&db, "b", None);
+    db.call_blocking(|conn| {
+        conn.execute("UPDATE AskThreads SET archived = 1 WHERE title = 'b'", [])
+            .unwrap()
+    });
+    let archived = || query::<Option<bool>>(&db, "SELECT archived FROM AskThreads ORDER BY title");
+
+    // The optional field gains a default: the table is rebuilt, without force, and keeps its NULLs.
+    entity(&mut model, "AskThread")
+        .columns
+        .iter_mut()
+        .find(|c| c.name == "archived")
+        .unwrap()
+        .default = Some(json!(false));
+    let report = apply(&db, &model, false).await.unwrap();
+    assert!(
+        matches!(&report.steps[..], [step] if step.class() == StepClass::Rebuild),
+        "{:?}",
+        report.steps
+    );
+    assert_eq!(archived(), [None, Some(true)]);
+
+    // So does a rebuild for another field.
+    for c in &mut entity(&mut model, "AskThread").columns {
+        if let FieldKind::Text { max_length, .. } = &mut c.kind
+            && c.name == "title"
+        {
+            *max_length = Some(400);
+        }
+    }
+    assert!(!apply(&db, &model, false).await.unwrap().steps.is_empty());
+    assert_eq!(archived(), [None, Some(true)]);
+}
+
+#[tokio::test]
+async fn dates_become_text_with_their_full_precision() {
+    let db = Db::open_in_memory().unwrap();
+    let mut model = explorer();
+    entity(&mut model, "AskThread")
+        .columns
+        .push(column("due", FieldKind::Date, true, None));
+    apply(&db, &model, false).await.unwrap();
+    seed(&db, "a", None);
+    db.call_blocking(|conn| {
+        conn.execute(
+            "UPDATE AskThreads SET due = '2024-01-01T10:00:00.1234567Z'",
+            [],
+        )
+        .unwrap()
+    });
+
+    entity(&mut model, "AskThread")
+        .columns
+        .iter_mut()
+        .find(|c| c.name == "due")
+        .unwrap()
+        .kind = text();
+    let report = apply(&db, &model, false).await.unwrap();
+    assert!(report.forced.is_empty());
+    assert_eq!(
+        query::<String>(&db, "SELECT due FROM AskThreads"),
+        ["2024-01-01T10:00:00.1234567Z"]
+    );
+}
+
+#[tokio::test]
 async fn lossless_rebuilds_and_dropped_tables() {
     let db = Db::open_in_memory().unwrap();
     let model = explorer();

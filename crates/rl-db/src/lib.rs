@@ -16,7 +16,7 @@ use std::{
 };
 
 use parking_lot::Mutex;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub use error::{DataLoss, LossReason, SchemaError};
 pub use migrate::{MigrationPlan, MigrationReport, MigrationStep, StepClass, apply, plan};
@@ -118,8 +118,9 @@ impl Db {
     }
 
     /// Brings a component's private tables up to date: runs the SQL batches of `steps` that have
-    /// not run yet, in order, each in its own transaction. Steps are append-only: never edit or
-    /// reorder a released step, add a new one.
+    /// not run yet, in order, each in its own transaction (once, even when several processes
+    /// migrate the database at the same time). Steps are append-only: never edit or reorder a
+    /// released step, add a new one.
     pub async fn migrate_component(
         &self,
         component: &'static str,
@@ -144,7 +145,30 @@ fn migrate(conn: &mut Connection, component: &str, steps: &[&str]) -> Result<(),
             version INTEGER NOT NULL
         )",
     )?;
-    let current: i64 = conn
+    if applied_steps(conn, component, steps)? == steps.len() {
+        return Ok(());
+    }
+    loop {
+        // IMMEDIATE takes the write lock before the version is read again, so two processes
+        // migrating one database (`users add` while `serve` starts) never both run a step.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let applied = applied_steps(&tx, component, steps)?;
+        let Some(step) = steps.get(applied) else {
+            return Ok(());
+        };
+        tx.execute_batch(step)?;
+        tx.execute(
+            "INSERT INTO _rl_migrations (component, version) VALUES (?1, ?2)
+             ON CONFLICT (component) DO UPDATE SET version = excluded.version",
+            params![component, applied as i64 + 1],
+        )?;
+        tx.commit()?;
+    }
+}
+
+/// How many of `steps` the database has run for `component`; refuses a newer database.
+fn applied_steps(conn: &Connection, component: &str, steps: &[&str]) -> Result<usize, DbError> {
+    let version: i64 = conn
         .query_row(
             "SELECT version FROM _rl_migrations WHERE component = ?1",
             [component],
@@ -152,24 +176,14 @@ fn migrate(conn: &mut Connection, component: &str, steps: &[&str]) -> Result<(),
         )
         .optional()?
         .unwrap_or(0);
-    if current > steps.len() as i64 {
+    if version > steps.len() as i64 {
         return Err(DbError::NewerSchema {
             component: component.to_owned(),
-            found: current,
+            found: version,
             known: steps.len(),
         });
     }
-    for (index, step) in steps.iter().enumerate().skip(current as usize) {
-        let tx = conn.transaction()?;
-        tx.execute_batch(step)?;
-        tx.execute(
-            "INSERT INTO _rl_migrations (component, version) VALUES (?1, ?2)
-             ON CONFLICT (component) DO UPDATE SET version = excluded.version",
-            params![component, index as i64 + 1],
-        )?;
-        tx.commit()?;
-    }
-    Ok(())
+    Ok(version as usize)
 }
 
 #[cfg(test)]
@@ -225,5 +239,34 @@ mod tests {
         });
         assert_eq!(mode.to_lowercase(), "wal");
         assert_eq!(fk, 1);
+    }
+
+    #[test]
+    fn concurrent_migrations_run_each_step_once() {
+        // Neither step can run twice: the table exists, or the count is off.
+        const STEPS: &[&str] = &[
+            "CREATE TABLE _rl_test_b (id INTEGER PRIMARY KEY)",
+            "INSERT INTO _rl_test_b DEFAULT VALUES",
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.sqlite");
+        let dbs: Vec<Db> = (0..4).map(|_| Db::open(&path).unwrap()).collect();
+        // With the bookkeeping table in place, all of them read the version at once.
+        dbs[0].call_blocking(|c| migrate(c, "race", &[])).unwrap();
+        let start = std::sync::Barrier::new(dbs.len());
+        std::thread::scope(|scope| {
+            for db in &dbs {
+                let start = &start;
+                scope.spawn(move || {
+                    start.wait();
+                    db.call_blocking(|c| migrate(c, "race", STEPS)).unwrap();
+                });
+            }
+        });
+        let rows: i64 = dbs[0].call_blocking(|c| {
+            c.query_row("SELECT count(*) FROM _rl_test_b", [], |r| r.get(0))
+                .unwrap()
+        });
+        assert_eq!(rows, 1);
     }
 }
