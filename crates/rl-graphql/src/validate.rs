@@ -705,7 +705,7 @@ pub fn coerce_variables(
         };
         match provided.get(&name) {
             Some(value) => {
-                coerce::json(schema, &ty, value).ok_or_else(invalid)?;
+                coerce::json(schema, &ty, value, None).ok_or_else(invalid)?;
                 out.insert(name.clone(), value.clone());
             }
             None => {

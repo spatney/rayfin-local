@@ -783,13 +783,14 @@ pub fn shape(model: &AppModel, plan: &ConnectionPlan, rows: &[Json]) -> Json {
                 out.insert(key.clone(), Json::Bool(more));
             }
             ConnectionField::EndCursor { key } => {
-                let cursor = results
-                    .first()
-                    .filter(|_| more)
-                    .and_then(|(group, groups)| {
-                        let last = groups.get(limit.checked_sub(1)?)?;
-                        Some(group_cursor(model, group, last.get(1)?))
-                    });
+                let cursor =
+                    results
+                        .first()
+                        .filter(|_| more && plan.cursor)
+                        .and_then(|(group, groups)| {
+                            let last = groups.get(limit.checked_sub(1)?)?;
+                            Some(group_cursor(model, group, last.get(1)?))
+                        });
                 out.insert(key.clone(), cursor.map_or(Json::Null, Json::String));
             }
             ConnectionField::Typename { key } => {

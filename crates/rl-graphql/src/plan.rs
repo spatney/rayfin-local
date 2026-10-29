@@ -239,7 +239,8 @@ pub enum FieldPlan {
         non_null: bool,
         pos: Pos,
     },
-    /// A field the role may not read: Hot Chocolate's `AUTH_NOT_AUTHORIZED` on every row.
+    /// A field the role may not read: Hot Chocolate's `AUTH_NOT_AUTHORIZED` on every row. A
+    /// to-many relationship whose target the role may not read is one as a whole.
     Forbidden {
         key: String,
         non_null: bool,
@@ -278,7 +279,8 @@ pub struct ConnectionPlan {
     pub limit: u64,
     /// `hasNextPage` or `endCursor` is selected: one extra row is read.
     pub probe: bool,
-    /// `endCursor` is selected: rows carry their order-key values.
+    /// `endCursor` is selected and the role may read every order key: rows carry their
+    /// order-key values (otherwise `endCursor` is `null`).
     pub cursor: bool,
 }
 
@@ -411,9 +413,24 @@ pub fn object_plan(
                 });
             }
             Resolver::ToMany(_, relationship, target) => {
+                // Forbidden as a whole, as a root list field is: its paging fields would
+                // otherwise page through the keys of rows the role may not read.
+                let target_entity = &ctx.model.entities[target];
+                let Some(target_grant) = access::grant(target_entity, ctx.role(), Action::Read)
+                else {
+                    fields.push(FieldPlan::Forbidden { key, non_null, pos });
+                    continue;
+                };
                 let args = ctx.arguments(def, &collected.fields[0].node)?;
                 let join = Some((entity_index, relationship, alias.as_str()));
-                let connection = connection_plan(ctx, target, &collected.sub_sets(), &args, join)?;
+                let connection = connection_plan(
+                    ctx,
+                    target,
+                    target_grant,
+                    &collected.sub_sets(),
+                    &args,
+                    join,
+                )?;
                 fields.push(FieldPlan::ToMany {
                     key,
                     relationship,
@@ -431,18 +448,19 @@ pub fn object_plan(
     })
 }
 
-/// The plan of a connection over `entity_index`. `join` is the parent row of a nested
-/// connection: (parent entity, relationship, parent alias).
+/// The plan of a connection over `entity_index`, under the role's read grant on it (a role
+/// without one has no connection). `join` is the parent row of a nested connection: (parent
+/// entity, relationship, parent alias).
 pub fn connection_plan(
     ctx: &Ctx<'_>,
     entity_index: usize,
+    grant: &ActionPermission,
     sets: &[&SelectionSet],
     args: &HashMap<String, Input>,
     join: Option<(usize, usize, &str)>,
 ) -> Result<ConnectionPlan, GraphQlError> {
     let entity = &ctx.model.entities[entity_index];
     let alias = ctx.alias();
-    let grant = access::grant(entity, ctx.role(), Action::Read);
     let first = match args.get("first") {
         Some(Input::Scalar(Json::Number(n))) => n.as_i64(),
         _ => None,
@@ -464,7 +482,7 @@ pub fn connection_plan(
                     entity_index,
                     alias.clone(),
                     &collected.sub_sets(),
-                    grant,
+                    Some(grant),
                 )?;
                 fields.push(ConnectionField::Items {
                     key,
@@ -483,7 +501,7 @@ pub fn connection_plan(
             }
             "__typename" => fields.push(ConnectionField::Typename { key }),
             crate::aggregate::GROUP_BY => {
-                let plan = crate::aggregate::plan(ctx, entity_index, grant, &collected)?;
+                let plan = crate::aggregate::plan(ctx, entity_index, Some(grant), &collected)?;
                 fields.push(ConnectionField::GroupBy {
                     key,
                     plan: Box::new(plan),
@@ -505,22 +523,33 @@ pub fn connection_plan(
             &alias,
         ));
     }
-    if grant.is_some()
-        && let Some(policy) = policy::read_filter(entity, ctx.caller, &alias)?
-    {
+    if let Some(policy) = policy::read_filter(entity, ctx.caller, &alias)? {
         preds.push(policy);
     }
     if let Some(filter) = args.get("filter").filter(|f| !f.is_null()) {
-        preds.push(filter_object(ctx, entity_index, &alias, grant, filter, 0)?);
+        preds.push(filter_object(
+            ctx,
+            entity_index,
+            &alias,
+            Some(grant),
+            filter,
+            0,
+        )?);
     }
-    let group_order = crate::aggregate::order(entity, &mut fields, args.get("orderBy"), grant)?;
+    let group_order =
+        crate::aggregate::order(entity, &mut fields, args.get("orderBy"), Some(grant))?;
     let grouped = group_order.is_some();
     let order = match group_order {
         Some(order) => order,
-        None => order_keys(entity, args.get("orderBy"), grant)?,
+        None => order_keys(entity, args.get("orderBy"), Some(grant))?,
     };
+    // A cursor carries every order key's value: none when the role may not read one (the
+    // primary-key tie-breaker under `fields.exclude`), lest it leak or probe those values.
+    let readable = order
+        .iter()
+        .all(|k| access::allows_field(grant, &entity.columns[k.column].field));
     if let Some(Input::Scalar(Json::String(after))) = args.get("after") {
-        preds.push(keyset(entity, &alias, &order, after, !grouped)?);
+        preds.push(keyset(entity, &alias, &order, after, !grouped, readable)?);
     }
     Ok(ConnectionPlan {
         entity: entity_index,
@@ -532,7 +561,7 @@ pub fn connection_plan(
         order,
         limit,
         probe,
-        cursor,
+        cursor: cursor && readable,
     })
 }
 
@@ -834,17 +863,22 @@ pub fn order_keys(
 /// The rows after the cursor `after` under `order` (DAB's checks and messages). Unlike DAB's
 /// `(a > @a) OR (a = @a AND b > @b)`, `NULL`s are placed as the `ORDER BY` places them (first
 /// ascending, last descending), so no row is skipped. Cursors of groups carry no primary key
-/// (`require_pk` false).
+/// (`require_pk` false). No cursor is valid when the role may not read an order key
+/// (`readable` false): it would compare values the role may not see.
 fn keyset(
     entity: &Entity,
     alias: &str,
     order: &[OrderKey],
     after: &str,
     require_pk: bool,
+    readable: bool,
 ) -> Result<Pred, GraphQlError> {
     let bad = |message: String| GraphQlError::dab(message, codes::BAD_REQUEST);
     let (text, fields) = cursor::decode(after).map_err(|e| bad(e.message()))?;
     let invalid = || bad(cursor::InvalidCursor(text.clone()).message());
+    if !readable {
+        return Err(invalid());
+    }
     let mut by_name: HashMap<&str, &cursor::CursorField> = HashMap::new();
     for field in &fields {
         if entity.field(&field.field).is_none() {

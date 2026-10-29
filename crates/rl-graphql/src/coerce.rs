@@ -227,7 +227,7 @@ fn variable(
         None => Ok(Input::Null),
         Some(values) => match values.get(name) {
             None | Some(Json::Null) => Ok(Input::Null),
-            Some(value) => json(schema, ty, value).ok_or(Problem::Variable {
+            Some(value) => json(schema, ty, value, field).ok_or(Problem::Variable {
                 name: name.into(),
                 pos,
             }),
@@ -291,18 +291,26 @@ fn scalar_value(scalar: &str, json: Json) -> Option<Input> {
     }
 }
 
-/// Coerces a JSON variable value to `ty` (`None` when it does not fit).
-pub fn json(schema: &Schema, ty: &TypeRef, value: &Json) -> Option<Input> {
+/// Coerces a JSON variable value to `ty` (`None` when it does not fit); `field` is the input
+/// field holding it, as for [`literal`].
+pub fn json(
+    schema: &Schema,
+    ty: &TypeRef,
+    value: &Json,
+    field: Option<&InputValueDef>,
+) -> Option<Input> {
     match (ty, value) {
         (TypeRef::NonNull(_), Json::Null) => None,
-        (TypeRef::NonNull(inner), value) => json(schema, inner, value),
+        (TypeRef::NonNull(inner), value) => json(schema, inner, value, field),
         (_, Json::Null) => Some(Input::Null),
         (TypeRef::List(inner), Json::Array(items)) => items
             .iter()
-            .map(|item| json(schema, inner, item))
+            .map(|item| json(schema, inner, item, field))
             .collect::<Option<_>>()
             .map(Input::List),
-        (TypeRef::List(inner), value) => Some(Input::List(vec![json(schema, inner, value)?])),
+        (TypeRef::List(inner), value) => {
+            Some(Input::List(vec![json(schema, inner, value, field)?]))
+        }
         (TypeRef::Named(name), value) => match schema.types.get(name)? {
             TypeDef::Scalar(..) => {
                 let ok = match (name.as_str(), value) {
@@ -328,7 +336,10 @@ pub fn json(schema: &Schema, ty: &TypeRef, value: &Json) -> Option<Input> {
                 let mut out = Vec::with_capacity(object.len());
                 for (key, v) in object {
                     let coerced = match def.fields.get(key) {
-                        Some(f) => json(schema, &f.ty, v)?,
+                        Some(f) => json(schema, &f.ty, v, Some(f))?,
+                        None if key == "isNull" && field.is_some_and(|d| d.accepts_is_null) => {
+                            json(schema, &TypeRef::named("Boolean"), v, None)?
+                        }
                         None => return None,
                     };
                     out.push((key.clone(), coerced, Pos::default()));

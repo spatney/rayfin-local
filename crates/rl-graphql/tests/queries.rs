@@ -3,8 +3,10 @@
 
 mod common;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use common::{App, basic_model, explorer_model};
-use rl_model::Caller;
+use rl_model::{AppModel, Caller, FieldAccess};
 use serde_json::{Value, json};
 
 const C1: &str = "00000000-0000-4000-8000-0000000000c1";
@@ -16,7 +18,12 @@ const T4: &str = "00000000-0000-4000-8000-000000000004";
 
 /// The basic fixture with categories, todos (two users) and comments; alice is signed in.
 async fn basic() -> (App, Caller, String) {
-    let app = App::new(basic_model()).await;
+    basic_with(basic_model()).await
+}
+
+/// [`basic`] over a variant of the basic model.
+async fn basic_with(model: AppModel) -> (App, Caller, String) {
+    let app = App::new(model).await;
     let (alice, token) = app.user("alice@example.test").await;
     let bob = "bob-user-id";
     app.seed(&format!(
@@ -398,14 +405,81 @@ async fn anonymous_callers_get_the_anonymous_grant() {
     // Milestones are for signed-in users only: 401, so a restored session refreshes.
     let response = app.run(&anonymous, "{ milestones { items { id } } }").await;
     assert_eq!(response.status, 401);
-    // Nested unreadable entities: every selected field is an error.
-    let response = app
-        .run(
-            &anonymous,
-            "{ projects { items { name milestones { items { title } } } } }",
-        )
-        .await;
-    assert_eq!(response.data(), &json!({"projects": {"items": []}}));
+}
+
+#[tokio::test]
+async fn nested_connections_of_unreadable_entities_are_forbidden() {
+    let (app, alice, alice_id) = basic().await;
+    let project = "00000000-0000-4000-8000-0000000000d1";
+    app.seed(&format!(
+        "INSERT INTO \"Projects\" (id, owner_id, name, budget, startsOn, closedAt) VALUES
+           ('{project}', '{alice_id}', 'Launch', 10, '2026-01-01T00:00:00.0000000Z', NULL);
+         INSERT INTO \"Milestones\" (id, title, due, Project_id) VALUES
+           ('00000000-0000-4000-8000-0000000000e1', 'Alpha', NULL, '{project}'),
+           ('00000000-0000-4000-8000-0000000000e2', 'Beta', NULL, '{project}');"
+    ));
+    let query = "{ projects { items { name milestones(first: 1) { hasNextPage endCursor } } } }";
+    let response = app.run(&alice, query).await;
+    let milestones = &response.items("projects")[0]["milestones"];
+    assert_eq!(milestones["hasNextPage"], json!(true));
+    assert!(milestones["endCursor"].is_string());
+
+    // Anonymous may read projects but not milestones: the whole connection is one error, as a
+    // root field is, so its paging fields reveal nothing of the rows.
+    let response = app.run(&Caller::anonymous(), query).await;
+    assert_eq!(
+        response.body["data"],
+        json!({"projects": {"items": [{"name": "Launch", "milestones": null}]}})
+    );
+    assert_eq!(response.codes(), ["AUTH_NOT_AUTHORIZED"]);
+    let error = &response.errors()[0];
+    assert_eq!(error["path"], json!(["projects", "items", 0, "milestones"]));
+    assert_eq!(error["locations"], json!([{"line": 1, "column": 27}]));
+}
+
+#[tokio::test]
+async fn cursors_need_every_order_key_readable() {
+    // Anonymous reads categories without their primary key, the order's tie-breaker.
+    let mut model = basic_model();
+    let category = model
+        .entities
+        .iter_mut()
+        .find(|e| e.name == "Category")
+        .unwrap();
+    let anonymous = category
+        .permissions
+        .iter_mut()
+        .find(|p| p.role == "anonymous")
+        .unwrap();
+    anonymous.actions[0].fields = Some(FieldAccess {
+        include: vec!["*".into()],
+        exclude: vec!["id".into()],
+    });
+    let (app, alice, _) = basic_with(model).await;
+    let query = "{ categories(first: 1) { items { name } hasNextPage endCursor } }";
+    let cursor = app.run(&alice, query).await.data()["categories"]["endCursor"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    // No cursor carrying the hidden key, and no `after` comparing it: DAB's invalid cursor.
+    let anonymous = Caller::anonymous();
+    assert_eq!(
+        app.run(&anonymous, query).await.data()["categories"],
+        json!({"items": [{"name": "Home"}], "hasNextPage": true, "endCursor": null})
+    );
+    let query = format!("{{ categories(after: \"{cursor}\") {{ items {{ name }} }} }}");
+    let response = app.run(&anonymous, &query).await;
+    let text = String::from_utf8(STANDARD.decode(&cursor).unwrap()).unwrap();
+    assert_eq!(
+        response.messages(),
+        [format!("{text} is not a valid pagination token.")]
+    );
+    assert_eq!(response.codes(), ["BadRequest"]);
+    assert_eq!(
+        app.run(&alice, &query).await.column("categories", "name"),
+        [json!("Work")]
+    );
 }
 
 #[tokio::test]
@@ -499,6 +573,19 @@ async fn variables_fragments_aliases_and_directives() {
         response.messages(),
         ["Variable `skip` got an invalid value."]
     );
+
+    // `isNull` on a to-one relationship's filter, as inline (not on a to-many's).
+    let query = "query($f: TodoFilterInput) { todos(filter: $f) { items { title } } }";
+    let variables = json!({"f": {"category": {"isNull": true}}});
+    let response = app
+        .run_with(&alice, query, variables.as_object().unwrap().clone())
+        .await;
+    assert_eq!(response.column("todos", "title"), [json!("PAY bills")]);
+    let variables = json!({"f": {"comments": {"isNull": true}}});
+    let response = app
+        .run_with(&alice, query, variables.as_object().unwrap().clone())
+        .await;
+    assert_eq!(response.messages(), ["Variable `f` got an invalid value."]);
 }
 
 #[tokio::test]

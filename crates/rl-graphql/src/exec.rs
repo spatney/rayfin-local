@@ -5,9 +5,11 @@
 //! Each root field becomes one parameterized SQLite statement that builds its JSON:
 //! `json_object` per row (column values through `rl_db::codec::json_expr`), a correlated
 //! subquery per to-one relationship, and `json_group_array` over an ordered, limited subquery per
-//! to-many relationship. Connection rows are `json_array(item, ..., cursor)`: one object per
-//! `items` selection and the row's order-key values when `endCursor` is selected; the shaper
-//! trims the probe row and computes `hasNextPage` and `endCursor`.
+//! to-many relationship (none for a role that may not read the target: the field is then one
+//! `AUTH_NOT_AUTHORIZED`, as a root field is). Connection rows are `json_array(item, ...,
+//! cursor)`: one object per `items` selection and the row's order-key values when `endCursor`
+//! is selected and the role may read every order key (else `endCursor` is `null` and no `after`
+//! is valid); the shaper trims the probe row and computes `hasNextPage` and `endCursor`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -390,11 +392,11 @@ fn plan_list(
     index: usize,
 ) -> Result<(ConnectionPlan, Sql), GraphQlError> {
     let entity = &ctx.model.entities[index];
-    if access::grant(entity, ctx.caller.role(), Action::Read).is_none() {
+    let Some(grant) = access::grant(entity, ctx.caller.role(), Action::Read) else {
         return Err(GraphQlError::not_authorized());
-    }
+    };
     let args = ctx.arguments(def, &field.fields[0].node)?;
-    let plan = plan::connection_plan(ctx, index, &field.sub_sets(), &args, None)?;
+    let plan = plan::connection_plan(ctx, index, grant, &field.sub_sets(), &args, None)?;
     let mut sql = Sql::default();
     sql.push("SELECT ");
     if crate::aggregate::is_group_by(&plan) {
@@ -731,7 +733,7 @@ impl Shaper<'_> {
                 ConnectionField::EndCursor { key } => {
                     let cursor = rows
                         .last()
-                        .filter(|_| more)
+                        .filter(|_| more && plan.cursor)
                         .map(|row| self.cursor(plan, row));
                     out.insert(key.clone(), cursor.map_or(Json::Null, Json::String));
                 }
