@@ -49,6 +49,7 @@ use serde::Serialize;
 use tower_http::trace::TraceLayer;
 use tracing::Span;
 
+pub use guards::{ANONYMOUS_ACCESS_DISABLED, reject_anonymous};
 pub use listen::{bind, is_port_free, serve};
 
 /// The readiness endpoint; answers `{"ok":true}`.

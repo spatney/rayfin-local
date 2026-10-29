@@ -173,6 +173,48 @@ async fn sdk_routes_need_this_apps_publishable_key() {
 }
 
 #[tokio::test]
+async fn reject_anonymous_answers_like_a_tenant_without_anonymous_access() {
+    let guarded = Router::new()
+        .route("/graphql", post(|| async { "graphql" }))
+        .layer(axum::middleware::from_fn(rl_server::reject_anonymous));
+    let router = build_router(config(), vec![guarded]);
+    let app = ("Origin", "http://localhost:5173");
+
+    let reply = send(
+        &router,
+        Method::POST,
+        "/graphql",
+        &[("X-Publishable-Key", KEY), app],
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        reply.json(),
+        serde_json::json!({ "error": rl_server::ANONYMOUS_ACCESS_DISABLED })
+    );
+    // The SDK can read the rejection.
+    assert_eq!(
+        reply.header("access-control-allow-origin"),
+        Some("http://localhost:5173")
+    );
+    for authorization in ["Bearer", "Bearer  ", "Basic abc"] {
+        let headers = [("X-Publishable-Key", KEY), ("Authorization", authorization)];
+        let reply = send(&router, Method::POST, "/graphql", &headers).await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{authorization}");
+    }
+
+    let signed_in = [
+        ("X-Publishable-Key", KEY),
+        ("Authorization", "bearer t0k3n"),
+    ];
+    let reply = send(&router, Method::POST, "/graphql", &signed_in).await;
+    assert_eq!((reply.status, reply.text()), (StatusCode::OK, "graphql"));
+    // The publishable key is checked first, as on Fabric.
+    let reply = send(&router, Method::POST, "/graphql", &[]).await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn public_routes_need_no_key() {
     let router = build_router(config(), features());
     for (uri, body) in [

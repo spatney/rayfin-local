@@ -8,7 +8,7 @@ use axum::extract::{OriginalUri, Request, State};
 use axum::http::uri::Authority;
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 
 use crate::routes::{json_error, requires_publishable_key};
 
@@ -120,6 +120,39 @@ pub(crate) async fn check_host(
             json_error(StatusCode::FORBIDDEN, "host_not_allowed", &message)
         }
     }
+}
+
+/// What Fabric answers a request without a token when the tenant setting "Enable anonymous data
+/// access for Fabric Apps" is off (`RayfinAuthenticationMiddleware`, 401).
+pub const ANONYMOUS_ACCESS_DISABLED: &str = "Anonymous access to this app is not enabled. Please contact the app owner to resolve access \
+     concerns.";
+
+/// Middleware for the routes Fabric's authentication middleware guards, emulating a tenant without
+/// anonymous data access: a request without a bearer token gets Fabric's 401
+/// (`{"error": ANONYMOUS_ACCESS_DISABLED}`). Apply it to a feature router (with
+/// `axum::middleware::from_fn`) before [`crate::build_router`], so that CORS, the Host check and
+/// the publishable key run first, as on Fabric.
+pub async fn reject_anonymous(req: Request, next: Next) -> Response {
+    let bearer = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| {
+            value
+                .get(..7)
+                .filter(|scheme| scheme.eq_ignore_ascii_case("bearer "))
+                .map(|_| value[7..].trim())
+        })
+        .is_some_and(|token| !token.is_empty());
+    if bearer || req.method() == Method::OPTIONS {
+        return next.run(req).await;
+    }
+    (
+        StatusCode::UNAUTHORIZED,
+        [(header::CACHE_CONTROL, "no-store")],
+        axum::Json(serde_json::json!({ "error": ANONYMOUS_ACCESS_DISABLED })),
+    )
+        .into_response()
 }
 
 /// The host part of a Host header or host name, without port or IPv6 brackets, lowercased, with

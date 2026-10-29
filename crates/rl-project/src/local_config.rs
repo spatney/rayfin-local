@@ -23,6 +23,9 @@
 //!
 //! [auth]
 //! auto_create_users = true  # a password sign-in to an unknown email creates the account
+//!
+//! [fabric]
+//! anonymous_data_access = false  # act like a tenant without anonymous data access
 //! ```
 //!
 //! Every setting is optional. Unknown keys are errors, since the file is rayfin-local's own.
@@ -50,6 +53,18 @@ pub struct LocalConfig {
     pub functions: LocalFunctionsConfig,
     #[serde(default)]
     pub auth: LocalAuthConfig,
+    #[serde(default)]
+    pub fabric: LocalFabricConfig,
+}
+
+/// `[fabric]`: Fabric tenant settings to act like.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalFabricConfig {
+    /// The tenant setting "Enable anonymous data access for Fabric Apps (Preview)" (default on).
+    /// Off, `serve` refuses `anonymous` grants, as `rayfin up` does, and answers requests without a
+    /// token with Fabric's 401.
+    pub anonymous_data_access: Option<bool>,
 }
 
 /// `[auth]`: local sign-in.
@@ -198,7 +213,8 @@ mod tests {
             "[server]\nport = 7200\nhost = \"0.0.0.0\"\n[frontend]\nport = 5180\n[tokens]\n\
              source = \"az\"\ntenant = \"t\"\n[tokens.scopes]\nAzureAI = \"s/.default\"\n\
              [connectors]\npowerbi_base_url = \"http://127.0.0.1:9000\"\n[functions]\n\
-             inspect_port = 9230\n[auth]\nauto_create_users = false\n",
+             inspect_port = 9230\n[auth]\nauto_create_users = false\n\
+             [fabric]\nanonymous_data_access = false\n",
         )
         .unwrap();
         assert_eq!(config.server.port, Some(7200));
@@ -212,6 +228,7 @@ mod tests {
         );
         assert_eq!(config.functions.inspect_port, Some(9230));
         assert_eq!(config.auth.auto_create_users, Some(false));
+        assert_eq!(config.fabric.anonymous_data_access, Some(false));
         assert_eq!(parse("").unwrap(), LocalConfig::default());
     }
 

@@ -39,8 +39,8 @@ pub use env::{
 };
 pub use error::ProjectError;
 pub use local_config::{
-    LocalAuthConfig, LocalConfig, LocalConnectorsConfig, LocalFrontendConfig, LocalFunctionsConfig,
-    LocalServerConfig, LocalTokensConfig, TokenSourceKind,
+    LocalAuthConfig, LocalConfig, LocalConnectorsConfig, LocalFabricConfig, LocalFrontendConfig,
+    LocalFunctionsConfig, LocalServerConfig, LocalTokensConfig, TokenSourceKind,
 };
 pub use package::{
     CLIENT_PACKAGE, CORE_PACKAGE, PackageJson, RayfinPackage, SUPPORTED_SDK_VERSION,
