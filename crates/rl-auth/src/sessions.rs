@@ -1,23 +1,29 @@
 //! Sessions: sign-ins as refresh-token families, rotation, sign-out, and the in-memory list of
-//! signed-out sessions that access-token verification consults.
+//! signed-out sessions that access-token verification consults, kept in step with the database.
 
-use std::{collections::HashMap, fmt, sync::Arc};
+use std::{collections::HashMap, fmt, sync::Arc, time::Duration};
 
 use parking_lot::RwLock;
+use rl_db::Db;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use tokio::time::MissedTickBehavior;
 
 use crate::{
-    AuthError, AuthService,
+    AuthError, AuthService, AuthSettings,
     jwt::{AccessClaims, Jwt, LEEWAY_SECONDS, TokenError},
     users::{User, find_user},
-    util::{b64url, constant_time_eq, random_bytes, sha256},
+    util::{b64url, constant_time_eq, random_bytes, sha256, unix_now_ms},
 };
 
 /// A rotated refresh token presented within this window of the session's last refresh gets a new
 /// access token and its own refresh token back (concurrent tabs, retries): the real service's
 /// fixed reuse interval.
 pub(crate) const REUSE_WINDOW_MS: i64 = 10_000;
+
+/// How often a running service reads the sign-outs recorded in the database, to see those of
+/// other processes (the CLI).
+pub(crate) const REVOKED_SESSIONS_POLL: Duration = Duration::from_secs(2);
 
 const INVALID_OR_MALFORMED: &str = "The refresh token is invalid or malformed";
 const INVALID: &str = "The refresh token is invalid";
@@ -59,21 +65,50 @@ fn token_response(jwt: &Jwt, access_token: String, refresh_token: String) -> Tok
     }
 }
 
-/// Signed-out sessions whose access tokens may not have expired yet.
-#[derive(Default)]
-pub(crate) struct RevokedSessions(RwLock<HashMap<String, i64>>);
+/// Signed-out sessions whose access tokens may not have expired yet, with the time they were
+/// signed out, and the database they are recorded in.
+pub(crate) struct RevokedSessions {
+    sessions: RwLock<HashMap<String, i64>>,
+    db: Db,
+}
 
 impl RevokedSessions {
-    pub(crate) fn contains(&self, session_id: &str) -> bool {
-        self.0.read().contains_key(session_id)
+    pub(crate) fn new(db: Db) -> Self {
+        Self {
+            sessions: RwLock::default(),
+            db,
+        }
     }
 
-    /// Adds sessions revoked at `revoked_at`, dropping entries revoked before `horizon` (all their
-    /// access tokens have expired).
-    fn add(&self, ids: impl IntoIterator<Item = String>, revoked_at: i64, horizon: i64) {
-        let mut revoked = self.0.write();
+    pub(crate) fn contains(&self, session_id: &str) -> bool {
+        self.sessions.read().contains_key(session_id)
+    }
+
+    /// Adds sessions with the time they were signed out, dropping entries signed out before
+    /// `horizon` (all their access tokens have expired).
+    fn add(&self, sessions: impl IntoIterator<Item = (String, i64)>, horizon: i64) {
+        let mut revoked = self.sessions.write();
         revoked.retain(|_, at| *at >= horizon);
-        revoked.extend(ids.into_iter().map(|id| (id, revoked_at)));
+        revoked.extend(sessions);
+    }
+
+    /// Adds the sessions the database says were signed out since `horizon`, by this process or
+    /// another one.
+    async fn read(&self, horizon: i64) -> Result<(), AuthError> {
+        let rows = self
+            .db
+            .call(move |conn| -> Result<Vec<(String, i64)>, AuthError> {
+                let mut statement = conn.prepare(
+                    "SELECT id, revoked_at FROM _rl_auth_sessions WHERE revoked_at >= ?1",
+                )?;
+                let rows = statement
+                    .query_map([horizon], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .await??;
+        self.add(rows, horizon);
+        Ok(())
     }
 }
 
@@ -242,34 +277,55 @@ impl AuthService {
 
     /// Rejects the access tokens of sessions signed out at `now` from now on.
     pub(crate) fn forget_sessions(&self, session_ids: Vec<String>, now: i64) {
-        self.revoked
-            .add(session_ids, now, now - self.revocation_window_ms());
+        self.revoked.add(
+            session_ids.into_iter().map(|id| (id, now)),
+            now - self.revocation_window_ms(),
+        );
     }
 
     /// Startup: drops sessions that no token can use any more and remembers the recently signed-out
     /// ones, whose access tokens may still be presented.
     pub(crate) async fn load_revoked_sessions(&self) -> Result<(), AuthError> {
         let now = self.now_ms();
-        let horizon = now - self.revocation_window_ms();
-        let revoked = self
-            .db
-            .call(move |conn| -> Result<Vec<(String, i64)>, AuthError> {
+        // Rows stay for as long as a token of the longest lifetime could need them: the CLI (with
+        // the default lifetime) and later runs with a longer `expiryInMinutes` read them too.
+        let (_, longest_minutes) = AuthSettings::ACCESS_TOKEN_MINUTES;
+        let unneeded_before = now - (i64::from(longest_minutes) * 60 + LEEWAY_SECONDS) * 1000;
+        self.db
+            .call(move |conn| {
                 conn.execute(
                     "DELETE FROM _rl_auth_sessions WHERE revoked_at < ?1 OR expires_at < ?1",
-                    [horizon],
-                )?;
-                let mut statement = conn.prepare(
-                    "SELECT id, revoked_at FROM _rl_auth_sessions WHERE revoked_at IS NOT NULL",
-                )?;
-                let rows = statement
-                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(rows)
+                    [unneeded_before],
+                )
             })
             .await??;
-        let mut map = self.revoked.0.write();
-        map.extend(revoked);
-        Ok(())
+        self.revoked.read(now - self.revocation_window_ms()).await
+    }
+
+    /// Follows the sign-outs other processes record in the database (the CLI's `users delete`
+    /// and `users reset-password`): reads them every [`REVOKED_SESSIONS_POLL`] for as long as the
+    /// service lives, on the system clock. The task holds no database handle between reads.
+    pub(crate) fn watch_revoked_sessions(&self) {
+        let revoked = Arc::downgrade(&self.revoked);
+        let window = self.revocation_window_ms();
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(REVOKED_SESSIONS_POLL);
+            ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            // The first tick is immediate, and startup has just read them.
+            ticks.tick().await;
+            loop {
+                ticks.tick().await;
+                let Some(revoked) = revoked.upgrade() else {
+                    return;
+                };
+                if let Err(error) = revoked.read(unix_now_ms() - window).await {
+                    tracing::warn!(
+                        "could not read the signed-out sessions from the database, so sign-outs \
+                         made with the CLI are not seen yet: {error}"
+                    );
+                }
+            }
+        });
     }
 
     fn refresh_lifetime_ms(&self) -> i64 {
@@ -450,6 +506,101 @@ mod tests {
                 .refresh(kept.refresh_token.as_deref().unwrap())
                 .await
                 .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn lowering_the_lifetime_does_not_revive_signed_out_tokens() {
+        use rl_model::{CallerError, CallerResolver};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = rl_db::Db::open(&dir.path().join("db.sqlite")).unwrap();
+        let keys = dir.path().join("keys");
+        let mut settings = crate::AuthSettings::new(crate::tests::APP_ID);
+        settings.access_token_minutes = 60;
+        let before = AuthService::new(db.clone(), keys.clone(), settings.clone())
+            .await
+            .unwrap();
+        // The first run, 25 minutes ago: a sign-in, then its sign-out.
+        before.advance_clock(-25 * 60_000);
+        let user = before.create_user("alice", "secret1").await.unwrap();
+        let ended = before.issue_session(&user).await.unwrap();
+        before.revoke_all_sessions(&user.id).await.unwrap();
+
+        settings.access_token_minutes = 15;
+        let after = AuthService::new(db, keys, settings).await.unwrap();
+        assert_eq!(
+            after.resolve(Some(&ended.access_token)),
+            Err(CallerError::InvalidToken)
+        );
+        let fresh = after.issue_session(&user).await.unwrap();
+        assert!(after.resolve(Some(&fresh.access_token)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn the_cli_keeps_the_sign_outs_a_longer_lifetime_needs() {
+        use rl_model::{CallerError, CallerResolver};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = rl_db::Db::open(&dir.path().join("db.sqlite")).unwrap();
+        let keys = dir.path().join("keys");
+        let mut settings = AuthSettings::new(crate::tests::APP_ID);
+        settings.access_token_minutes = 120;
+        let before = AuthService::new(db.clone(), keys.clone(), settings.clone())
+            .await
+            .unwrap();
+        before.advance_clock(-70 * 60_000);
+        let user = before.create_user("alice", "secret1").await.unwrap();
+        let ended = before.issue_session(&user).await.unwrap();
+        before.revoke_all_sessions(&user.id).await.unwrap();
+
+        // `rayfin-local users list` opens the service with the default lifetime (60 minutes).
+        AuthService::new(
+            db.clone(),
+            keys.clone(),
+            AuthSettings::new(crate::tests::APP_ID),
+        )
+        .await
+        .unwrap();
+        let after = AuthService::new(db, keys, settings).await.unwrap();
+        assert_eq!(
+            after.resolve(Some(&ended.access_token)),
+            Err(CallerError::InvalidToken)
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_outs_made_by_another_process_are_seen_within_seconds() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("db.sqlite");
+        let keys = dir.path().join("keys");
+        let settings = crate::AuthSettings::new(crate::tests::APP_ID);
+        let server = AuthService::new(
+            rl_db::Db::open(&path).unwrap(),
+            keys.clone(),
+            settings.clone(),
+        )
+        .await
+        .unwrap();
+        let user = server.create_user("alice", "secret1").await.unwrap();
+        let tokens = server.issue_session(&user).await.unwrap();
+
+        // `rayfin-local users delete`: its own connection, in its own process.
+        let cli = AuthService::new(rl_db::Db::open(&path).unwrap(), keys, settings)
+            .await
+            .unwrap();
+        cli.delete_user("alice").await.unwrap();
+        let deadline = std::time::Instant::now() + REVOKED_SESSIONS_POLL * 5;
+        while server.verify_session_token(&tokens.access_token).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the sign-out was not seen"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(
+            server.verify_session_token(&tokens.access_token),
+            Err(TokenError::Revoked)
         );
     }
 

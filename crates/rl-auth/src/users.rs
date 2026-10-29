@@ -1,11 +1,12 @@
 //! Users: local username/password accounts (and, later, Entra identities), with argon2id
 //! password hashes. The user-management API the CLI and the sign-in portal use lives here.
 
-use std::fmt;
+use std::{fmt, num::NonZeroUsize, sync::LazyLock};
 
 use argon2::{Argon2, PasswordHasher, PasswordVerifier, password_hash};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use time::OffsetDateTime;
+use tokio::sync::Semaphore;
 
 use crate::{AuthError, AuthService, util::datetime_from_ms};
 
@@ -218,17 +219,12 @@ impl AuthService {
                         ..user
                     });
                 }
-                let base = email.clone().unwrap_or_else(|| oid.clone());
-                let username =
-                    if find_user(&tx, "username_key = ?1", &username_key(&base))?.is_some() {
-                        format!("{base} ({oid})")
-                    } else {
-                        base
-                    };
+                let id = uuid::Uuid::new_v4().to_string();
+                let username = available_username(&tx, email.as_deref(), &oid, &id)?;
                 let user = insert_user(
                     &tx,
                     &NewUser {
-                        id: uuid::Uuid::new_v4().to_string(),
+                        id,
                         username_key: username_key(&username),
                         username,
                         email,
@@ -247,6 +243,30 @@ impl AuthService {
 
 const USER_COLUMNS: &str =
     "id, username, email, display_name, password_hash IS NOT NULL, entra_oid, created_at";
+
+/// A free username for a new Entra user: the email (else the object id), then the email with the
+/// object id, the object id, and the email with the new user's id. Anyone can sign up with any
+/// username, so the first ones may be taken; nobody can know the user id beforehand.
+fn available_username(
+    conn: &Connection,
+    email: Option<&str>,
+    oid: &str,
+    user_id: &str,
+) -> Result<String, AuthError> {
+    let base = email.unwrap_or(oid);
+    let candidates = [
+        base.to_owned(),
+        format!("{base} ({oid})"),
+        oid.to_owned(),
+        format!("{base} ({user_id})"),
+    ];
+    for candidate in candidates {
+        if find_user(conn, "username_key = ?1", &username_key(&candidate))?.is_none() {
+            return Ok(candidate);
+        }
+    }
+    Err(AuthError::UsernameTaken)
+}
 
 fn user_from_row(row: &Row<'_>) -> rusqlite::Result<User> {
     Ok(User {
@@ -392,25 +412,48 @@ pub(crate) fn looks_like_email(text: &str) -> bool {
         })
 }
 
-async fn hash_password(password: String) -> Result<String, AuthError> {
+/// Password hashes and checks running at once. Each takes argon2's 19 MiB and a core for a
+/// moment, so a burst of sign-ins queues here instead of filling the blocking pool.
+static PASSWORD_HASHING: LazyLock<Semaphore> = LazyLock::new(|| {
+    let cores = std::thread::available_parallelism().map_or(2, NonZeroUsize::get);
+    Semaphore::new(cores.max(2))
+});
+
+/// Runs `work` on the blocking pool once a [`PASSWORD_HASHING`] permit is free.
+async fn with_password_hashing<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, AuthError> + Send + 'static,
+) -> Result<T, AuthError> {
+    let permit = PASSWORD_HASHING
+        .acquire()
+        .await
+        .map_err(|_| AuthError::PasswordHash("password hashing has stopped".into()))?;
     tokio::task::spawn_blocking(move || {
+        // Held until the work is done, even when the request is cancelled meanwhile.
+        let _permit = permit;
+        work()
+    })
+    .await?
+}
+
+async fn hash_password(password: String) -> Result<String, AuthError> {
+    with_password_hashing(move || {
         Argon2::default()
             .hash_password(password.as_bytes())
             .map(|hash| hash.to_string())
             .map_err(|error| AuthError::PasswordHash(error.to_string()))
     })
-    .await?
+    .await
 }
 
 async fn verify_password_hash(password: String, hash: String) -> Result<bool, AuthError> {
-    tokio::task::spawn_blocking(move || {
+    with_password_hashing(move || {
         match Argon2::default().verify_password(password.as_bytes(), hash.as_str()) {
             Ok(()) => Ok(true),
             Err(password_hash::Error::PasswordInvalid) => Ok(false),
             Err(error) => Err(AuthError::PasswordHash(error.to_string())),
         }
     })
-    .await?
+    .await
 }
 
 #[cfg(test)]
@@ -547,5 +590,31 @@ mod tests {
             auth.verify_password("carol@contoso.com (oid-1)", "").await,
             Err(AuthError::InvalidCredentials)
         ));
+    }
+
+    #[tokio::test]
+    async fn external_users_get_a_username_even_when_the_fallbacks_are_taken() {
+        let (_dir, auth) = service().await;
+        for taken in ["dave@contoso.com", "Dave@contoso.com (OID-2)", "oid-2"] {
+            auth.create_user(taken, "secret1").await.unwrap();
+        }
+        let user = auth
+            .find_or_create_external_user("oid-2", Some("dave@contoso.com"), None)
+            .await
+            .unwrap();
+        assert_eq!(user.username, format!("dave@contoso.com ({})", user.id));
+        assert_eq!(user.email.as_deref(), Some("dave@contoso.com"));
+        let again = auth
+            .find_or_create_external_user("oid-2", Some("dave@contoso.com"), None)
+            .await
+            .unwrap();
+        assert_eq!(again.id, user.id);
+
+        auth.create_user("oid-3", "secret1").await.unwrap();
+        let no_email = auth
+            .find_or_create_external_user("oid-3", None, None)
+            .await
+            .unwrap();
+        assert_eq!(no_email.username, "oid-3 (oid-3)");
     }
 }

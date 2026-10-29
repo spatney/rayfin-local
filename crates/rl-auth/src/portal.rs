@@ -528,7 +528,7 @@ mod tests {
     use super::*;
     use crate::{
         AuthSettings,
-        entra::tests::{FakeTokens, entra_settings, user_claims},
+        entra::tests::{FakeTokens, app_only_claims, entra_settings, user_claims},
         routes::tests::{Answer, App, app_from},
         tests::{APP_ID, service_with},
         util::sha256,
@@ -875,6 +875,32 @@ mod tests {
         )
         .await;
         assert_eq!(rebound.status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn continue_as_refuses_an_app_only_azure_sign_in() {
+        let (dir, auth) = service_with(entra_settings()).await;
+        let app = app_from(
+            dir,
+            auth.with_entra(Arc::new(FakeTokens(Ok(app_only_claims())))),
+        );
+        let (_, csrf) = open_page(&app).await;
+        let who = from_page(&app, &csrf, "whoami", json!({})).await;
+        assert_eq!(who.body["available"], false);
+        assert_eq!(
+            who.body["message"],
+            "your Azure sign-in is not a user account"
+        );
+        let refused = from_page(&app, &csrf, "entra", challenge()).await;
+        assert_eq!(refused.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(refused.body["error"], "entra_unavailable");
+        assert!(
+            refused.body["message"]
+                .as_str()
+                .unwrap()
+                .contains("not a user account")
+        );
+        assert!(app.auth.list_users().await.unwrap().is_empty());
     }
 
     #[tokio::test]

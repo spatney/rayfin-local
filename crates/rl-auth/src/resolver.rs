@@ -6,9 +6,10 @@ use crate::AuthService;
 
 impl CallerResolver for AuthService {
     /// No token: anonymous. Otherwise the token must be one of this service's access tokens
-    /// (signature, `kid`, `alg`, expiry with 5 minutes of leeway, `iss`, `aud`) whose session has
-    /// not been signed out in this process. Signed-out sessions are rejected at once, as on the
-    /// real service; a sign-out made by another process (the CLI) is seen at the next refresh.
+    /// (signature, `kid`, `alg`, expiry with 5 minutes of leeway, a lifetime no longer than the
+    /// current one, `iss`, `aud`) whose session has not been signed out. Sign-outs made by this
+    /// process are rejected at once, as on the real service; those made by another process (the
+    /// CLI's `users delete` and `users reset-password`) within 2 seconds.
     fn resolve(&self, bearer: Option<&str>) -> Result<Caller, CallerError> {
         let Some(token) = bearer else {
             return Ok(Caller::anonymous());

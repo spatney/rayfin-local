@@ -4,8 +4,12 @@ use serde_json::{Map, Value, json};
 
 use crate::AuthError;
 
-/// Claims a static custom claim may not replace: the service needs them to verify its tokens.
-const RESERVED_CLAIMS: &[&str] = &["sub", "sid", "iss", "aud", "exp", "nbf", "iat", "jti"];
+/// Claims a static custom claim may not replace (compared case-insensitively): the service needs
+/// them to verify its tokens, and app policies trust `sub`, `email` and `role` to say who the user
+/// is. The platform's reserved claim names (`RESERVED_CLAIM_NAMES` in the Rayfin CLI).
+const RESERVED_CLAIMS: &[&str] = &[
+    "sub", "email", "role", "sid", "iss", "aud", "exp", "iat", "nbf", "jti", "name", "scope",
+];
 
 /// The auth settings of the app, filled by the binary from `rayfin.yml` `services.auth`.
 ///
@@ -31,10 +35,11 @@ pub struct AuthSettings {
     /// Local only: whether anyone may sign up (`POST /signup`). On by default.
     pub signup_enabled: bool,
     /// Local only: a password sign-in for an email with no account creates the account (when
-    /// sign-up is allowed) instead of answering `invalid_grant`. Many app templates sign in to a
-    /// local backend with a fixed dev account and fall back to `signUp` on `INVALID_GRANT`, a
-    /// fallback that never runs with SDK 1.36.2 (`@microsoft/rayfin-client` exports its own
-    /// `AuthError` class, not the one the auth module throws). Off in [`AuthSettings::new`].
+    /// [`signup_enabled`](Self::signup_enabled), whatever `password.enabled` says) instead of
+    /// answering `invalid_grant`. Many app templates sign in to a local backend with a fixed dev
+    /// account and fall back to `signUp` on `INVALID_GRANT`, a fallback that never runs with SDK
+    /// 1.36.2 (`@microsoft/rayfin-client` exports its own `AuthError` class, not the one the auth
+    /// module throws). Off in [`AuthSettings::new`].
     pub auto_create_users: bool,
     /// `fabric.enabled`: "Sign in with Fabric" (the broker popup).
     pub fabric_enabled: bool,
@@ -47,7 +52,8 @@ pub struct AuthSettings {
     /// `allowedRedirectUris`.
     pub allowed_redirect_uris: Vec<String>,
     /// `customClaims`: static claims added to every access token; `${NAME}` is replaced with
-    /// the environment variable `NAME` when it is set.
+    /// the environment variable `NAME` when it is set. Reserved names (`sub`, `email`, `role`,
+    /// `name`, `scope` and the registered JWT claims) are ignored with a warning.
     pub custom_claims: Vec<(String, String)>,
     /// `scopes`: joined with spaces into the `scope` claim and the token response's `scope`.
     pub scopes: Vec<String>,
@@ -116,7 +122,7 @@ impl Default for EntraSettings {
 impl AuthSettings {
     pub const DEFAULT_ACCESS_TOKEN_MINUTES: u32 = 60;
     pub const DEFAULT_REFRESH_TOKEN_DAYS: u32 = 90;
-    const ACCESS_TOKEN_MINUTES: (u32, u32) = (15, 43_200);
+    pub(crate) const ACCESS_TOKEN_MINUTES: (u32, u32) = (15, 43_200);
     const REFRESH_TOKEN_DAYS: (u32, u32) = (1, 365);
 
     /// The real service's defaults for the app `app_id`.
@@ -149,8 +155,8 @@ impl AuthSettings {
         format!("https://{app_id}.rayfin.io")
     }
 
-    /// Clamps lifetimes like the real service and drops custom claims that would break
-    /// verification.
+    /// Clamps lifetimes like the real service and drops custom claims that would replace reserved
+    /// claims.
     pub(crate) fn normalized(mut self) -> Result<Self, AuthError> {
         if self.app_id.trim().is_empty() {
             return Err(AuthError::Settings(
@@ -167,11 +173,15 @@ impl AuthSettings {
         self.session_absolute_lifetime_minutes =
             self.session_absolute_lifetime_minutes.map(|m| m.max(1));
         self.custom_claims.retain(|(name, _)| {
-            let reserved = RESERVED_CLAIMS.contains(&name.as_str());
+            let reserved = RESERVED_CLAIMS
+                .iter()
+                .any(|claim| claim.eq_ignore_ascii_case(name));
             if reserved {
                 tracing::warn!(
                     claim = %name,
-                    "services.auth.customClaims cannot replace a registered claim; ignoring it"
+                    "services.auth.customClaims cannot set a reserved claim (sub, email, role, \
+                     name, scope, sid, iss, aud, exp, iat, nbf, jti); ignoring it: rename it in \
+                     rayfin/rayfin.yml"
                 );
             }
             !reserved
@@ -255,10 +265,14 @@ mod tests {
     }
 
     #[test]
-    fn custom_claims_cannot_replace_registered_claims() {
+    fn custom_claims_cannot_replace_reserved_claims() {
         let mut settings = AuthSettings::new("app");
         settings.custom_claims = vec![
             ("sub".into(), "admin".into()),
+            ("email".into(), "admin@contoso.com".into()),
+            ("Role".into(), "Admin".into()),
+            ("name".into(), "Admin".into()),
+            ("scope".into(), "admin".into()),
             ("app_version".into(), "1.0.0".into()),
         ];
         let settings = settings.normalized().unwrap();

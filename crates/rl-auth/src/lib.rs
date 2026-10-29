@@ -44,7 +44,7 @@ pub struct AuthService {
     pub(crate) db: Db,
     pub(crate) settings: AuthSettings,
     pub(crate) jwt: Arc<jwt::Jwt>,
-    pub(crate) revoked: sessions::RevokedSessions,
+    pub(crate) revoked: Arc<sessions::RevokedSessions>,
     pub(crate) portal: portal::Portal,
     pub(crate) entra: entra::Entra,
     /// Shifts the service's clock; tests use it to travel in time.
@@ -53,7 +53,8 @@ pub struct AuthService {
 
 impl AuthService {
     /// Opens the auth service: brings its tables up to date, and loads the signing key from
-    /// `keys_dir` (creating it on first run).
+    /// `keys_dir` (creating it on first run). Until the service is dropped, a Tokio task reads the
+    /// sign-outs other processes (the CLI) record in the database every 2 seconds.
     ///
     /// The Entra exchange downloads Microsoft's signing keys with `reqwest`: the process must
     /// install a rustls crypto provider first (the binary installs ring at startup).
@@ -77,15 +78,16 @@ impl AuthService {
             .await??;
         let jwt = Arc::new(jwt::Jwt::new(key, &settings));
         let service = Self {
-            db,
             settings,
             jwt,
-            revoked: sessions::RevokedSessions::default(),
+            revoked: Arc::new(sessions::RevokedSessions::new(db.clone())),
+            db,
             portal: portal::Portal::new()?,
             entra: entra::Entra::new(),
             clock_offset_ms: AtomicI64::new(0),
         };
         service.load_revoked_sessions().await?;
+        service.watch_revoked_sessions();
         Ok(service)
     }
 

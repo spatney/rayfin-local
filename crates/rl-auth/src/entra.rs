@@ -248,7 +248,7 @@ impl AuthService {
         if !self.tenant_allowed(tenant) {
             return Err(EntraTokenError::Tenant(tenant.to_owned()));
         }
-        if text_claim(&claims, "scp").is_none() || text_claim(&claims, "idtyp") == Some("app") {
+        if !is_delegated(&claims) {
             return Err(EntraTokenError::NotDelegated);
         }
         identity_from_claims(&claims)
@@ -288,8 +288,9 @@ impl AuthService {
         self.settings.entra_signin.enabled && self.entra.tokens.is_some()
     }
 
-    /// The developer's identity, from a Power BI token minted for them (no signature check: the
-    /// token comes from their own Azure sign-in, not from a client).
+    /// The developer's identity, from a Power BI token minted for them, which must be a user's
+    /// (delegated) like an exchanged token. No signature check: the token comes from their own
+    /// Azure sign-in, not from a client.
     pub(crate) async fn developer_identity(&self) -> Result<EntraIdentity, DeveloperIdentityError> {
         let Some(tokens) = &self.entra.tokens else {
             return Err(DeveloperIdentityError {
@@ -309,6 +310,11 @@ impl AuthService {
             hint: Some("Sign in with your user account: `az login`.".into()),
         };
         let claims = rl_tokens::jwt_claims(&token.token).ok_or_else(not_a_user)?;
+        // A service principal or managed identity (`az login --service-principal`/`--identity`)
+        // has an `oid` and a `tid` too, but it is not a person to sign in as.
+        if !is_delegated(&claims) {
+            return Err(not_a_user());
+        }
         let identity = identity_from_claims(&claims).map_err(|_| not_a_user())?;
         if !self.tenant_allowed(&identity.tenant_id) {
             return Err(DeveloperIdentityError {
@@ -327,6 +333,11 @@ impl AuthService {
 fn issued_by(issuer: &str, tenant: &str) -> bool {
     issuer.eq_ignore_ascii_case(&format!("https://sts.windows.net/{tenant}/"))
         || issuer.eq_ignore_ascii_case(&format!("https://login.microsoftonline.com/{tenant}/v2.0"))
+}
+
+/// Whether the token is a user's (delegated: it has `scp`), not an application's.
+fn is_delegated(claims: &Map<String, Value>) -> bool {
+    text_claim(claims, "scp").is_some() && text_claim(claims, "idtyp") != Some("app")
 }
 
 fn identity_from_claims(claims: &Map<String, Value>) -> Result<EntraIdentity, EntraTokenError> {
@@ -654,5 +665,23 @@ pub(crate) mod tests {
         let auth = auth.with_entra(Arc::new(FakeTokens(Ok(service_principal))));
         let error = auth.developer_identity().await.unwrap_err();
         assert!(error.hint.unwrap().contains("az login"));
+
+        let (_dir, auth) = service_with(entra_settings()).await;
+        let auth = auth.with_entra(Arc::new(FakeTokens(Ok(app_only_claims()))));
+        let error = auth.developer_identity().await.unwrap_err();
+        assert!(error.message.contains("not a user account"), "{error:?}");
+    }
+
+    /// The claims of a Power BI token az mints when signed in as a service principal or a managed
+    /// identity: an `oid` and a `tid`, but application permissions instead of `scp`.
+    pub(crate) fn app_only_claims() -> Value {
+        let mut claims = user_claims();
+        let object = claims.as_object_mut().unwrap();
+        for name in ["scp", "name", "unique_name", "upn"] {
+            object.remove(name);
+        }
+        object.insert("idtyp".into(), "app".into());
+        object.insert("roles".into(), json!(["Tenant.Read.All"]));
+        claims
     }
 }

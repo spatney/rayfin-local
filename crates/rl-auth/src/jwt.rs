@@ -142,6 +142,10 @@ impl Jwt {
 
     /// Verifies the signature, `kid`, `alg`, `exp`/`nbf` (with leeway), `iss`, `aud`, `sub` and
     /// `sid` of `token` at `now` (Unix seconds). Session revocation is the caller's check.
+    ///
+    /// A token minted for longer than the current lifetime (`expiryInMinutes` lowered since) is
+    /// expired: signed-out sessions are only remembered for the current lifetime, so such a token
+    /// could outlive its session's sign-out.
     pub(crate) fn verify(&self, token: &str, now: i64) -> Result<AccessClaims, TokenError> {
         let mut parts = token.split('.');
         let (Some(header_part), Some(payload_part), Some(signature_part), None) =
@@ -164,6 +168,10 @@ impl Jwt {
         let claims = decode_object(payload_part)?;
         let exp = number_claim(&claims, "exp").ok_or(TokenError::MissingClaim("exp"))?;
         if now > exp.saturating_add(LEEWAY_SECONDS) {
+            return Err(TokenError::Expired);
+        }
+        let iat = number_claim(&claims, "iat").ok_or(TokenError::MissingClaim("iat"))?;
+        if exp.saturating_sub(iat) > self.access_ttl_seconds {
             return Err(TokenError::Expired);
         }
         if number_claim(&claims, "nbf").is_some_and(|nbf| nbf > now.saturating_add(LEEWAY_SECONDS))

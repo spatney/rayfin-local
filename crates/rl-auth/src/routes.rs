@@ -384,11 +384,12 @@ impl AuthService {
     /// Creates the account for a password sign-in to an email that has none, when
     /// [`AuthSettings::auto_create_users`] and sign-up allow it. `None` leaves the sign-in to the
     /// usual checks (an existing account, or credentials sign-up would refuse).
+    ///
+    /// `password.enabled: false` does not stop it, as it does not stop the password grant (it
+    /// only closes sign-up and password reset): apps that offer only Fabric sign-in in production
+    /// often sign in locally with a fixed dev account.
     async fn auto_create(&self, email: &str, password: &str) -> Result<Option<User>, ApiError> {
-        if !(self.settings.auto_create_users
-            && self.settings.signup_enabled
-            && self.settings.password_enabled)
-        {
+        if !(self.settings.auto_create_users && self.settings.signup_enabled) {
             return Ok(None);
         }
         let exists = self
@@ -748,6 +749,28 @@ pub(crate) mod tests {
         let answer = app.sign_in("dev@contoso.com", "LocalDev!Pass123").await;
         assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
         assert!(app.auth.list_users().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn auto_create_works_when_password_auth_is_off() {
+        let mut settings = AuthSettings::new(APP_ID);
+        settings.auto_create_users = true;
+        settings.password_enabled = false;
+        let app = app_with(settings).await;
+
+        let first = app.sign_in("dev@contoso.com", "LocalDev!Pass123").await;
+        assert_eq!(first.status, StatusCode::OK, "{}", first.body);
+        assert!(app.auth.resolve(Some(text(&first, "accessToken"))).is_ok());
+        let wrong = app.sign_in("dev@contoso.com", "not the password").await;
+        assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            wrong.body,
+            error("invalid_grant", "Invalid email or password")
+        );
+        assert_eq!(app.auth.list_users().await.unwrap().len(), 1);
+        // Sign-up itself stays closed.
+        let signed_up = app.sign_up("other@contoso.com", "secret1").await;
+        assert_eq!(signed_up.body["error"], "auth_mode_disabled");
     }
 
     #[tokio::test]
