@@ -34,6 +34,7 @@ Keep the backend on loopback (the default `--host 127.0.0.1`): any other address
 | Sessions: access tokens, refresh-token rotation, sign-out, sign-out everywhere | Supported | ES256 access tokens shaped like the service's, with the lifetimes of `services.auth` in `rayfin.yml`. |
 | JWKS and runtime settings (`/.well-known/jwks.json`, `/api/projectRuntimeSettings`) | Supported | The settings mirror `services.auth` in `rayfin.yml`. |
 | "Sign in with Fabric" (`ensureSignedInWithFabric`) | Differs | The popup opens rayfin-local's sign-in page (`/.rayfin-local/portal`) instead of the Fabric portal. It offers local sign-in, sign-up and "Continue as &lt;you&gt;". The handshake with the app is the SDK's own (`brokeredAuth.*` messages, then a one-time handoff code). |
+| Embedded sign-in (`initEmbeddedAuth`) | Differs | Fabric frames the app and answers its `fabric-auth` handoff requests. Locally, open `/.rayfin-local/portal/embed` (the banner's **Embedded** URL): you sign in on that page, and it frames the app with `?fabricEmbedded=true` and answers the same requests for you. It doesn't stamp Fabric's `_fu` user hint, so the app signs in afresh on each load, as with an older Fabric host. Other host requests answer `NOT_SUPPORTED`. |
 | Entra users | Differs | Local users are not Entra users. "Continue as" signs you in with your own Entra account (the one your tokens come from), and is offered only when the backend listens on loopback. |
 | The `email` claim | Differs | Set only when the username is an email address; "Continue as" sets it to your user principal name. Policies on `claims.email` need such a user. |
 | Entra token exchange (`POST /api/auth/v1/brokered/token`: `signInWithEntraToken`, the Vite plugin's auto-login) | Differs | Accepted on loopback even when `services.auth.fabric.externalEntraExchange` is off, with a warning; Fabric needs `services.auth.fabric.enabled` and `externalEntraExchange`. Tokens are checked against Microsoft's signing keys. |
@@ -52,11 +53,12 @@ It generates the schema DAB generates for your entities and answers with DAB's d
 | Mutations: create, update, delete | Supported | |
 | Aggregations (`groupBy`, `aggregate`) | Supported | |
 | `@role` policies and field permissions | Supported | The `anonymous` and `authenticated` roles, with DAB's per-action inheritance. A policy that reads a claim the caller doesn't have fails the request, as on Fabric. |
+| The `anonymous` role | Differs | Allowed, as on a tenant where an administrator turned on "Enable anonymous data access for Fabric Apps (Preview)"; that setting is off by default, and without it `rayfin up` refuses the schema and requests without a token get a 401. `serve` warns when entities grant `anonymous`; `[fabric] anonymous_data_access = false` in `rayfin-local.toml` acts like a tenant without the setting. |
 | Constraints | Supported | The database enforces required fields, lengths, `@set` values, the email shape, minimum lengths, uniqueness and foreign keys, as on Fabric. Patterns and other `min`/`max` options are checked only by the SDK's form validation, on both. |
 | Text comparisons | Differs | Case-insensitive like Fabric SQL's default collation, but SQLite's `NOCASE` folds ASCII letters only: `'É' = 'é'` is false locally and true on Fabric. On the `postgresql` dialect, text compares case-sensitively. |
 | Decimals | Differs | Stored as doubles (`REAL`), with output rounded to the column's scale. About 15 significant digits are exact, so a `DECIMAL(18,2)` above about 10^13 loses cents; Fabric is exact to the declared precision. |
 | Dates | Differs | Stored as UTC ISO-8601 text with 100 ns precision. Responses use Fabric's format (`YYYY-MM-DDTHH:MM:SS.fffZ`), so the difference shows only in the SQLite file. |
-| Schema changes | Differs | `serve` applies them from `rayfin/data` when it starts, not a deployment. Changes that would lose data are refused until you pass `--force-schema`. |
+| Schema changes | Differs | `serve` applies them from `rayfin/data` when it starts, not a deployment. Changes that would lose data are refused until you pass `--force-schema`. A data package (`services.data.path`) is built with `services.data.buildCommand` first, as `rayfin up` and `rayfin dev` do, at every start and when its sources change. |
 | Introspection (`__schema`, `__type`) | Not supported | Refused unless `services.data.allowIntrospection` is true, as on Fabric; when allowed, rayfin-local still answers an error (no introspection resolver yet). `__typename` always works. |
 | Data from a deployed app | Not supported | The local database starts empty; nothing is copied from Fabric. |
 
@@ -108,7 +110,7 @@ rayfin-local builds your functions package and runs it on your Node.js, with the
 | --- | --- | --- |
 | Deployment (`rayfin up`), Fabric items, workspaces and their permissions | Not supported | Nothing is deployed, and no Fabric item is created or changed. |
 | Workspace, item and tenant ids | Differs | Taken from `rayfin/.env` when the app was deployed, else generated. The app id and the publishable key (`pk-local-…`) are local. |
-| SDK versions | Differs | rayfin-local implements 1.36.x; with another version, `serve` warns that behavior may differ. |
+| SDK versions | Differs | rayfin-local implements 1.36.x; with another version, `serve` warns that behavior may differ. Before 1.36, apps with database policies (`@role` with `policy`) can't be analyzed, and `serve` says to upgrade. |
 
 ## Local only
 

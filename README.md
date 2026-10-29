@@ -92,6 +92,7 @@ flowchart LR
 `rayfin-local serve`:
 
 1. Reads `rayfin/rayfin.yml` and analyzes the entities in `rayfin/data` with your project's own `@microsoft/rayfin-core`, as the Rayfin CLI does.
+   A data package with `services.data.buildCommand` (a workspace layout with `services.data.path`) is built first, as the CLI does.
 2. Creates or migrates a SQLite database in `.rayfin-local/`.
 3. Starts one backend that answers every route the SDK calls: auth, `/graphql`, functions, connectors and storage, with your `@role` policies enforced.
 4. Builds your functions and runs them on a Node.js host with the real `@microsoft/fabric-user-data-functions` package, without Azure Functions Core Tools.
@@ -108,6 +109,7 @@ flowchart LR
 | `@role` permissions and row-level policies | Yes | Enforced in SQL, for every query and mutation. |
 | Sign-up and sign-in with email and password | Yes | Local users. |
 | "Sign in with Fabric" (`ensureSignedInWithFabric`) | Emulated | A local sign-in page: create an account, or continue as your Azure identity. |
+| Embedded sign-in (`initEmbeddedAuth`) | Emulated | A local page plays the Fabric host: it frames the app and signs it in. |
 | Functions, `ctx.getDataClient()`, secrets | Yes | Rebuilt and reloaded when the sources change. |
 | Function connections (`ctx.Tokens.ADO`, `.AzureAI`, `.Fabric`, `.Sql`, `.Storage`) | As you | Tokens for your own Azure account, not the app's identity. |
 | `fabric-semanticmodel` connectors | As you | Real Power BI queries with your token. |
@@ -212,6 +214,7 @@ Its port is remembered per project; when it is busy, rayfin-local takes the next
 | `/connector-invoke/<name>` | Your connectors. |
 | `/api/storage/*` | Storage. |
 | `/.rayfin-local/portal` | The local "Sign in with Fabric" page. |
+| `/.rayfin-local/portal/embed` | The local Fabric host, for apps that sign in embedded. |
 | `/.rayfin-local/health` | `{"ok":true}` once the backend is up. |
 
 As on Fabric, `/api/*`, `/graphql`, `/functions/*` and `/connector-invoke/*` need an `X-Publishable-Key` header; the local key is in `/rayfin.config.json`.
@@ -230,6 +233,9 @@ Users are local: they live in `.rayfin-local/db.sqlite`, not in Entra ID.
   One local convenience: a password sign-in for an email that has no account creates the account (a wrong password for an existing account is still refused).
   Many app templates sign in to a local backend with a fixed development account (`MockAuthService`) and fall back to sign-up when it doesn't exist yet, a fallback the 1.36.2 SDK never reaches because `@microsoft/rayfin-client` exports a different `AuthError` class from the one it throws.
   Turn this off with `[auth] auto_create_users = false` in `rayfin-local.toml`.
+- **Apps that sign in only inside Fabric** (`initEmbeddedAuth`, which does nothing outside a Fabric frame) need the **Embedded** URL from the banner, `http://localhost:7171/.rayfin-local/portal/embed`.
+  That page plays Fabric's role: sign in there once, and it shows the app in a frame and signs it in, as Fabric does.
+  Its bar has **Reload app** and **Switch user**.
 - **The `email` claim** is set only when the username is an email address; "Continue as" sets it to your user principal name.
   Policies that compare `claims.email` need such a user.
 
@@ -297,11 +303,15 @@ Outside it, rayfin-local writes only build output: what your build commands prod
 
 ## Schema changes
 
-Each time `serve` starts, and whenever a file in `rayfin/data` changes while it runs, rayfin-local analyzes your entities and brings the SQLite tables up to date.
+Each time `serve` starts, and whenever an entity source changes while it runs (the files in `rayfin/data` and `rayfin/storage`, the files they import, and the tsconfig files), rayfin-local analyzes your entities and brings the SQLite tables up to date.
+
+In a workspace layout, where `services.data.path` names a data package whose `package.json` `exports` (or `main`) the entities, the analysis imports the package's build output.
+`serve` runs `services.data.buildCommand` in that package before it analyzes, at every start and whenever the sources of the package (or of the workspace packages its output imports) change, with the output prefixed with `[build]`; a failed build stops `serve`, or keeps the previous schema while it runs.
+Rebuilding the package yourself also counts as a change.
 
 - Changes that lose no data apply automatically: new entities, new optional fields, fields with a default, longer text, new indexes.
 - Changes that would lose data are refused with a list of exactly what would be lost: dropped entities or fields that hold values, values that can't be converted to a new type, required fields without a default.
-  Restart with `serve --force-schema` to apply them anyway, or `serve --reset` to start over.
+  Restart with `serve --force-schema` to apply them anyway (a `serve` started with it also applies them as you edit), or `serve --reset` to start over.
 
 Changes to `rayfin.yml` itself (services, auth settings, connectors, secrets) and to the storage folders apply on the next start; `serve` prints a reminder when it sees them.
 
@@ -335,9 +345,16 @@ inspect_port = 9229     # --inspect
 
 [auth]
 auto_create_users = true   # a password sign-in to an unknown email creates the account
+
+[fabric]
+anonymous_data_access = true   # false: act like a tenant without anonymous data access
 ```
 
 A port set by a flag or in this file must be free, or `serve` stops with an error; remembered and default ports move to the next free one.
+
+Fabric accepts the `anonymous` role (`@anonymous()`, `@role('anonymous', ...)`) only when a tenant administrator turns on **Enable anonymous data access for Fabric Apps (Preview)**, which is off by default.
+rayfin-local allows it and warns when your entities use it.
+With `anonymous_data_access = false`, `serve` refuses such entities, as `rayfin up` does on a tenant without the setting, and answers requests without a token with Fabric's 401.
 
 ## Commands and flags
 
@@ -406,11 +423,16 @@ Run `rayfin-local doctor` first: it checks what `serve` needs and says what to f
   Use the Rayfin CLI's login (`--token-source rayfin`, or `source = "rayfin"` under `[tokens]`), or override the audience's scope under `[tokens.scopes]`.
 - **"… is not the 1.36 SDK rayfin-local implements".**
   rayfin-local implements the wire contract of `@microsoft/rayfin-*` 1.36.x; with another version, behavior may differ from Fabric.
+  Before 1.36, `@microsoft/rayfin-core` can't describe database policies to rayfin-local, so apps with `@role` policies fail to analyze: upgrade the app's `@microsoft/rayfin-*` packages to 1.36.
+- **"Cannot find type definition file for …" (TS2688) when the entities are analyzed.**
+  TypeScript also loads the `@types` packages in the `node_modules` of every parent folder; set `"types"` (or `"typeRoots"`) in `rayfin/tsconfig.json`, or remove the stray folder the message names.
 - **"rayfin-local serve is already running this project".**
   Only one `serve` runs a project at a time; the message gives the other one's process id and URLs.
   Use it, or stop it (Ctrl+C in its terminal) and start again.
 - **A schema change is refused.**
   The message lists the data the change would lose; restart with `--force-schema` to accept that, or `--reset` to start over.
+- **The app says it must be opened in Fabric** (for example "Can't open this app outside Fabric").
+  It signs in only inside a Fabric frame: open the banner's **Embedded** URL (`/.rayfin-local/portal/embed` on the backend) instead of the App URL.
 - **"Continue as" is missing from the sign-in page.**
   It needs a loopback `--host` and a token from `az login` or the Rayfin CLI's login.
 
