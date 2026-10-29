@@ -126,12 +126,23 @@
         Copy-Item -LiteralPath $exe -Destination $new -Force
         # Run the new binary before it replaces anything, so a system that can't run it keeps what
         # it has. It runs from the install folder because policies may forbid programs in %TEMP%.
+        $blocked = $false
         try {
             $installed = & $new --version
             $code = $LASTEXITCODE
         } catch {
-            Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue
-            throw "The downloaded rayfin-local.exe doesn't run on this system: $($_.Exception.Message)"
+            $cause = $_.Exception.InnerException
+            if ($cause -is [System.ComponentModel.Win32Exception] -and $cause.NativeErrorCode -in 5, 1260) {
+                # Windows refused to start it (access denied, or blocked by a policy): on managed
+                # devices, Microsoft Defender's attack surface reduction rules can refuse new,
+                # unsigned downloads, depending on the program that starts them. Install anyway.
+                $blocked = $true
+                $installed = "rayfin-local $version"
+                $code = 0
+            } else {
+                Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue
+                throw "The downloaded rayfin-local.exe doesn't run on this system: $($_.Exception.Message)"
+            }
         }
         if ($code -ne 0) {
             Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue
@@ -155,6 +166,12 @@
     }
 
     Write-Host "Installed $installed to $dest"
+    if ($blocked) {
+        Write-Warning ("Windows refused to start rayfin-local.exe from this shell (Access is denied). On managed " +
+            "devices, Microsoft Defender can block new, unsigned programs downloaded from the internet, depending " +
+            "on the program that starts them. If running rayfin-local is blocked too, run it from PowerShell 7 " +
+            "(pwsh), or build it on this machine instead: $($fromSource -replace '^build it from source instead: ', '')")
+    }
 
     $onPath = @($env:Path -split ';' | Where-Object { $_.TrimEnd('\') -ieq $installDir.TrimEnd('\') }).Count -gt 0
     if ($env:RAYFIN_LOCAL_NO_MODIFY_PATH -eq '1') {

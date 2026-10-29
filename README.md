@@ -407,6 +407,10 @@ Every command takes these options:
 
 Run `rayfin-local doctor` first: it checks what `serve` needs and says what to fix.
 
+- **Windows: "Access is denied" when you run `rayfin-local`, or the installer warns that Windows refused to start it.**
+  On managed devices, Microsoft Defender's attack surface reduction rules can block new, unsigned programs downloaded from the internet, depending on the program that starts them (in our tests: blocked from `cmd` and sometimes Windows PowerShell 5.1, allowed from PowerShell 7).
+  Run it from PowerShell 7 (`pwsh`), or build it on your machine instead: `cargo install --locked --git https://github.com/spatney/rayfin-local rayfin-local`.
+
 - **"Node.js was not found" or "Node.js … is too old".**
   Install Node.js 20 or later from <https://nodejs.org>, or set `RAYFIN_LOCAL_NODE` to a `node` executable.
 - **"@microsoft/rayfin-core is not installed".**
