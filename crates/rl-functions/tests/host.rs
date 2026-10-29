@@ -624,6 +624,7 @@ fn manager_options() -> ManagerOptions {
     ManagerOptions {
         start_wait: Duration::from_secs(60),
         stop_grace: Duration::from_secs(2),
+        drain_timeout: Duration::from_secs(30),
         restart_on_timeout: true,
     }
 }
@@ -679,7 +680,8 @@ async fn manager_reload_and_timeouts_replace_the_host() {
     let before = manager.host().await.unwrap();
     manager.reload().await.unwrap();
     assert_eq!(counter(&manager).await, json!(1));
-    assert!(!before.is_alive());
+    // Idle, the replaced host exits right away.
+    assert_eq!(before.exited().await.code, Some(0));
 
     let timed_out = manager
         .invoke(
@@ -692,6 +694,61 @@ async fn manager_reload_and_timeouts_replace_the_host() {
         "{timed_out:?}"
     );
     assert_eq!(counter(&manager).await, json!(1));
+    manager.stop().await;
+}
+
+#[tokio::test]
+async fn manager_reload_lets_the_replaced_host_finish_its_invocations() {
+    let output = Output::default();
+    // Far shorter than the invocation: only the drain may keep the replaced host for it.
+    let options = ManagerOptions {
+        stop_grace: Duration::from_millis(200),
+        ..manager_options()
+    };
+    let manager = HostManager::with_options(fixture_config(&output).await, options);
+    manager.start().await.unwrap();
+    let old = manager.host().await.unwrap();
+    assert_eq!(counter(&manager).await, json!(1));
+    let slow = {
+        let (manager, old) = (manager.clone(), old.clone());
+        tokio::spawn(async move {
+            let slow = call("slow", json!({"ms": 3000}));
+            manager.invoke_on(&old, slow, TIMEOUT).await
+        })
+    };
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    manager.reload().await.unwrap();
+
+    // A late invocation on the replaced host is refused there and runs on the new one, which has
+    // fresh module state.
+    let late = manager
+        .invoke_on(&old, call("counter", json!({})), TIMEOUT)
+        .await
+        .unwrap();
+    assert_eq!(envelope(&late)["output"], json!(1));
+    let slow = slow.await.unwrap().unwrap();
+    assert_eq!(envelope(&slow)["output"], json!(3000));
+    assert_eq!(old.exited().await.code, Some(0));
+    manager.stop().await;
+}
+
+#[tokio::test]
+async fn manager_starts_again_after_a_start_failure_that_may_pass() {
+    let output = Output::default();
+    let package = package_with("process.exit(3);\n");
+    let manager = HostManager::with_options(
+        package_config(package.path(), &output).await,
+        manager_options(),
+    );
+    let failure = manager.start().await;
+    assert!(
+        matches!(&failure, Err(error @ HostError::ExitedBeforeReady { .. }) if error.is_transient()),
+        "{failure:?}"
+    );
+
+    // No reload: the next invocation starts the host again.
+    std::fs::write(package.path().join("index.js"), "export {};\n").unwrap();
+    assert!(manager.host().await.unwrap().functions().is_empty());
     manager.stop().await;
 }
 

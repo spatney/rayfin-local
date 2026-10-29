@@ -241,6 +241,14 @@ impl FunctionHost {
         invocation: HostInvocation,
         timeout: Duration,
     ) -> Result<HostResponse, HostError> {
+        self.send(&invocation, timeout).await
+    }
+
+    pub(super) async fn send(
+        &self,
+        invocation: &HostInvocation,
+        timeout: Duration,
+    ) -> Result<HostResponse, HostError> {
         let function = &invocation.function_name;
         let registered = self
             .function(function)
@@ -306,9 +314,18 @@ impl FunctionHost {
         }
     }
 
-    /// Stops the host: in-flight invocations get up to `grace` to finish and `appTerminate`
-    /// hooks run, then whatever is left of the process tree is killed.
+    /// Stops the host: in-flight invocations get up to `grace` to finish (the host exits as soon
+    /// as none is left) and `appTerminate` hooks run, then whatever is left of the process tree is
+    /// killed. Invocations sent meanwhile fail with [`HostError::ShuttingDown`]. Stopping a host
+    /// that is stopping again with a shorter `grace` cuts the first grace short.
     pub async fn stop(&self, grace: Duration) {
+        self.begin_stop(grace).await;
+        self.finish_stop(grace).await;
+    }
+
+    /// Asks the host to shut down: once this returns it refuses new invocations, and it exits as
+    /// soon as those in flight are done (within `grace`).
+    pub(super) async fn begin_stop(&self, grace: Duration) {
         if self.is_alive() {
             let request = wire::ControlRequest {
                 kind: "shutdown",
@@ -319,14 +336,19 @@ impl FunctionHost {
                 let _ =
                     tokio::time::timeout(Duration::from_secs(2), exchange(self.port, &line)).await;
             }
-            let mut exit = self.exit.clone();
-            let deadline = grace + Duration::from_secs(3);
-            if tokio::time::timeout(deadline, exit.wait_for(Option::is_some))
-                .await
-                .is_err()
-            {
-                self.kill();
-            }
+        }
+    }
+
+    /// Waits for the exit [`begin_stop`](Self::begin_stop) asked for, and kills what is left of
+    /// the process tree when it takes longer than `grace` (and the `appTerminate` hooks).
+    pub(super) async fn finish_stop(&self, grace: Duration) {
+        let mut exit = self.exit.clone();
+        let deadline = grace + Duration::from_secs(3);
+        if tokio::time::timeout(deadline, exit.wait_for(Option::is_some))
+            .await
+            .is_err()
+        {
+            self.kill();
         }
         self.exited().await;
     }
@@ -374,6 +396,7 @@ fn into_response(function: &str, reply: wire::Reply) -> Result<HostResponse, Hos
         .ok_or_else(|| HostError::Protocol("a failed reply without an error".into()))?;
     Err(match error.kind.as_str() {
         "notFound" => HostError::NotFound(function.to_owned()),
+        "shuttingDown" => HostError::ShuttingDown,
         "notInvocable" => HostError::NotInvocable {
             name: function.to_owned(),
             trigger: error.message,

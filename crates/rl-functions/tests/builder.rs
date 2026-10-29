@@ -170,13 +170,29 @@ async fn output_changes_are_reported() {
     expect_event(&mut watch, WatchEvent::OutputChanged).await;
 
     // Source maps, declarations and build info do not change what runs.
-    settle().await;
-    while watch.try_next().is_some() {}
+    drain_until_quiet(&mut watch).await;
     write(&dir.path().join("dist").join("index.js.map"), "{}");
     write(&dir.path().join("dist").join("index.d.ts"), "export {};\n");
     write(&dir.path().join("dist").join("tsconfig.tsbuildinfo"), "{}");
     tokio::time::sleep(Duration::from_secs(1)).await;
     assert_eq!(watch.try_next(), None);
+}
+
+/// Takes the events until none came for a second: FSEvents (macOS) can report a change late, or
+/// again, after its event was taken.
+async fn drain_until_quiet(watch: &mut FunctionsWatch) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    let mut quiet_since = tokio::time::Instant::now();
+    while quiet_since.elapsed() < Duration::from_secs(1) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the watch kept reporting changes"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        while watch.try_next().is_some() {
+            quiet_since = tokio::time::Instant::now();
+        }
+    }
 }
 
 #[tokio::test]

@@ -281,4 +281,22 @@ describe('function host (failures)', () => {
     assert.equal(envelope(await slow).output, 300);
     assert.equal(await host.exited, 0);
   });
+
+  test('shutdown refuses new invocations, and a shorter one cuts the drain short', async () => {
+    const host = startHost();
+    const { payload } = await host.announced;
+    const slow = (ms) => send(payload.port, {
+      type: 'invoke', secret: host.secret, invocationId: randomUUID(), functionName: 'slow', headers: {},
+      body: JSON.stringify({ ms }),
+    });
+    const running = slow(30000).catch(() => 'cut');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(await send(payload.port, { type: 'shutdown', secret: host.secret, drainMs: 60000 }), { ok: true });
+    assert.equal((await slow(1)).error.kind, 'shuttingDown');
+    const cutAt = Date.now();
+    assert.deepEqual(await send(payload.port, { type: 'shutdown', secret: host.secret, drainMs: 100 }), { ok: true });
+    assert.equal(await host.exited, 0);
+    assert.ok(Date.now() - cutAt < 10000);
+    assert.equal(await running, 'cut');
+  });
 });

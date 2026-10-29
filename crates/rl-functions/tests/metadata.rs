@@ -344,6 +344,40 @@ async fn ensure_fresh_regenerates_only_when_stale() {
 }
 
 #[tokio::test]
+async fn ensure_fresh_regenerates_after_a_source_saved_during_generation() {
+    let Some((node, typescript)) = toolchain().await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let app = fixture_app(dir.path());
+    let cache = dir.path().join("cache");
+    let request = input(&app, &typescript);
+    let path = metadata::metadata_path(&app);
+    let generated = metadata::ensure_fresh_with(&node, &request, &cache, sink())
+        .await
+        .unwrap();
+
+    // The stamp holds the newest input before generation; a source saved while the helper ran is
+    // newer than that, yet older than the file written when it finished.
+    let set_modified = |file: &Path, time| {
+        let file = fs::File::options().write(true).open(file).unwrap();
+        file.set_modified(time).unwrap();
+    };
+    let saved = fs::metadata(&path).unwrap().modified().unwrap() + Duration::from_secs(1);
+    set_modified(&app.join("src").join("udf.ts"), saved);
+    set_modified(&path, saved + Duration::from_secs(1));
+    assert!(!metadata::is_stale(&app, &path));
+    // Without the UDF declarations generating again changes `backlog` (its audience alias no
+    // longer resolves), which shows that the file was generated again.
+    fs::remove_dir_all(app.join("node_modules")).unwrap();
+    let regenerated = metadata::ensure_fresh_with(&node, &request, &cache, sink())
+        .await
+        .unwrap();
+    assert_ne!(generated.audiences("backlog"), []);
+    assert_eq!(regenerated.audiences("backlog"), []);
+}
+
+#[tokio::test]
 async fn generation_errors_say_what_to_fix() {
     let Some((node, typescript)) = toolchain().await else {
         return;

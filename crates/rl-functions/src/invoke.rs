@@ -33,7 +33,8 @@
 //!   (413), valid JSON (400; an empty body means `{}`).
 //! - **Errors without an envelope** use the deployed shape `{"error": <code>, "message"}`
 //!   (Rayfin: `Middleware/RayfinExceptionMiddleware.cs`): unknown function 404
-//!   `FUNCTION_NOT_FOUND`; host (re)starting 503 `FUNCTION_HOST_STARTING` with `Retry-After`;
+//!   `FUNCTION_NOT_FOUND`; host (re)starting, or its start failed for a reason that may pass
+//!   (it is tried again), 503 `FUNCTION_HOST_STARTING` with `Retry-After`;
 //!   functions not built or not loadable 503 `FUNCTIONS_UNAVAILABLE`; past the timeout (250 s,
 //!   the UDF ceiling) 408 `FUNCTION_INVOKE_TIMEOUT`; no response from the function (a crash, a
 //!   `BigInt` result) 500 `FUNCTION_INVOKE_FAILED`. Deployed 5xx bodies hide their cause behind
@@ -47,7 +48,9 @@
 //! For each audience the function declares, a token from the [`TokenSource`] (the audience's
 //! default scope, which the broker maps to an override) arrives as its `FabricItem` binding;
 //! when one can't be minted the function still runs and reading `ctx.Tokens.<Audience>` throws
-//! "No token available…", and rayfin-local warns with the token source's hint.
+//! "No token available…", and rayfin-local warns with the token source's hint. The audience is
+//! then not tried again for 30 s, and an invocation waits at most 3 s for a token another one is
+//! getting, so a missing sign-in does not slow every invocation down.
 //!
 //! The host environment is `local.settings.json`'s `Values`, then the declared secrets, then:
 //! `RAYFIN_API_URL` (this backend, with a trailing `/`), `RAYFIN_PUBLISHABLE_KEY`,

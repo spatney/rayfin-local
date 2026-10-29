@@ -88,9 +88,12 @@
 //!   [RegisteredFunction]}`, right after `ready`;
 //! - `{"type": "invoke", secret, invocationId, functionName, method, url, headers, body,
 //!   bodyEncoding, bindings}` → `{"ok": true, "response": {status, headers: [[name, value]], body,
-//!   bodyEncoding}}` or `{"ok": false, "error": {kind, name, message, stack}}`;
+//!   bodyEncoding}}` or `{"ok": false, "error": {kind, name, message, stack}}`, where the kind
+//!   `shuttingDown` ([`HostError::ShuttingDown`]) refuses invocations that arrive after a
+//!   shutdown;
 //! - `{"type": "shutdown", secret, drainMs}` → `{"ok": true}`; the host lets in-flight
-//!   invocations deliver their replies (up to `drainMs`), runs `appTerminate` hooks and exits 0.
+//!   invocations deliver their replies (up to `drainMs`; a later shutdown can only shorten that),
+//!   runs `appTerminate` hooks and exits 0, as soon as no invocation is in flight.
 //!
 //! Bodies are UTF-8 text, or `latin1` (one char per byte) when they are not valid UTF-8. A plain
 //! TCP exchange needs no HTTP client (reqwest would need a process-wide rustls provider even for
@@ -104,6 +107,7 @@
 //! [`FunctionHost`]: crate::host::FunctionHost
 //! [`HostManager`]: crate::host::HostManager
 //! [`HostError::Failed`]: crate::host::HostError::Failed
+//! [`HostError::ShuttingDown`]: crate::host::HostError::ShuttingDown
 //! [`HostResponse::udf_status`]: crate::host::HostResponse::udf_status
 //! [`HostConfig::inspect_port`]: crate::host::HostConfig::inspect_port
 //! [`HostConfig::node_args`]: crate::host::HostConfig::node_args
@@ -397,10 +401,11 @@ impl HostResponse {
 
 /// Why the host could not run a function.
 ///
-/// For the invoke routes: `Starting` and `Stopped` are 503, `NotFound` and `NotInvocable` 404,
-/// `Timeout` 408. The others mean no envelope exists; `Failed` carries what the UDF package puts
-/// in an `InternalError` (`error_type`, `message`), and the start failures (`MissingEntry`,
-/// `Node`, `Load`, `ExitedBeforeReady`, `StartTimeout`) say what to fix in the package.
+/// For the invoke routes: `Starting`, `ShuttingDown` and `Stopped` are 503, `NotFound` and
+/// `NotInvocable` 404, `Timeout` 408. The others mean no envelope exists; `Failed` carries what
+/// the UDF package puts in an `InternalError` (`error_type`, `message`), and the start failures
+/// (`MissingEntry`, `Node`, `Load`, `ExitedBeforeReady`, `StartTimeout`) say what to fix in the
+/// package; those that may pass ([`is_transient`](Self::is_transient)) are 503 with `Retry-After`.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum HostError {
     #[error(
@@ -424,6 +429,10 @@ pub enum HostError {
     /// The host is (re)starting; answer 503.
     #[error("the function host is starting; try again in a moment")]
     Starting,
+    /// The host was asked to shut down (it was replaced, or is stopping) and refused the
+    /// invocation without running it; [`HostManager`] runs it on the current host instead.
+    #[error("the function host is shutting down; try again in a moment")]
+    ShuttingDown,
     #[error("the function host is stopped")]
     Stopped,
     #[error("no function named '{0}' is registered")]
@@ -453,6 +462,18 @@ pub enum HostError {
 impl From<NodeError> for HostError {
     fn from(error: NodeError) -> Self {
         HostError::Node(Arc::new(error))
+    }
+}
+
+impl HostError {
+    /// Whether a failed start may succeed when tried again: the package took too long to load,
+    /// the process ended without a word (e.g. the inspector's port was still taken), or the new
+    /// host could not be reached. A package that threw while loading stays failed until a reload.
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            HostError::StartTimeout(_) | HostError::ExitedBeforeReady { .. } | HostError::Io(_)
+        )
     }
 }
 

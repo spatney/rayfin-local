@@ -281,9 +281,12 @@ impl WatchPaths {
 
     /// Whether a changed path is compiled output, and whether it is an input of the metadata.
     fn classify(&self, path: &Path) -> (bool, bool) {
+        // An output folder's own events are not output (see below), even once it is gone: the
+        // files in it report their removal themselves.
         let in_output = self.outputs.iter().any(|(dir, recursive)| {
             path.strip_prefix(dir).is_ok_and(|relative| {
-                (*recursive || relative.components().count() <= 1)
+                !relative.as_os_str().is_empty()
+                    && (*recursive || relative.components().count() <= 1)
                     && !relative
                         .components()
                         .any(|component| component.as_os_str() == "node_modules")
@@ -482,6 +485,11 @@ mod tests {
         assert_eq!(classify(&in_place, "src/app.js"), (true, false));
         assert_eq!(classify(&in_place, "src/app.d.ts"), (false, false));
         assert_eq!(classify(&in_place, "src/app.ts"), (false, true));
+
+        // An output folder's own event, also once the folder is gone.
+        let removed = WatchPaths::new(root, &src, &[root.join("out")]);
+        assert_eq!(classify(&removed, "out"), (false, false));
+        assert_eq!(classify(&removed, "out/index.js"), (true, false));
 
         // `main` at the package root: only its own folder is output.
         let flat = WatchPaths::new(root, &src, &[root.to_owned()]);

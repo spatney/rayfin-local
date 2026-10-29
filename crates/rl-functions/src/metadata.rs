@@ -6,7 +6,7 @@
 //! metadata" when the file is missing, invalid or not schema 2.x. The function host runs in the
 //! functions directory, so the file belongs at `<functions dir>/runtimemetadata.json`, which is
 //! where `rayfin dev` writes it too. It is a generated artifact, rewritten only when its content
-//! changes; a stamp in the cache folder remembers that an older file was found current.
+//! changes; a stamp in the cache folder remembers which inputs it was generated from.
 //!
 //! `js/udf-metadata.mjs` generates it with the functions package's own TypeScript compiler,
 //! following the rules of the Rayfin CLI 1.36.2 type generation, so the output is byte-for-byte
@@ -88,9 +88,10 @@ pub fn load(path: &Path) -> Result<RuntimeMetadata, MetadataError> {
     Ok(metadata)
 }
 
-/// Whether the metadata at `metadata_path` must be regenerated: it is missing, or older than one
-/// of its inputs (`package.json`, `tsconfig*.json`, and the TypeScript files and folders under
-/// `src/`, without `node_modules` and `dist`). Folders count so that removing a file counts.
+/// Whether the metadata at `metadata_path` is missing or older than one of its inputs
+/// (`package.json`, `tsconfig*.json`, and the TypeScript files and folders under `src/`, without
+/// `node_modules` and `dist`). Folders count so that removing a file counts. This judges a file
+/// by its age alone; [`ensure_fresh`] prefers the stamp of the file's generation when it has one.
 pub fn is_stale(functions_dir: &Path, metadata_path: &Path) -> bool {
     is_older_than(metadata_path, newest_input(functions_dir))
 }
@@ -211,9 +212,11 @@ pub async fn generate(
 }
 
 /// Returns the functions' metadata, regenerating `<functions_dir>/runtimemetadata.json` first
-/// when it is stale ([`is_stale`]) or unusable. The file is replaced atomically, and only when
-/// its content changes. `cache_dir` holds the helper and a stamp that remembers when an older
-/// file was found current, so it is not regenerated again until an input changes.
+/// when an input changed since it was generated, or it is unusable. The file is replaced
+/// atomically, and only when its content changes. `cache_dir` holds the helper and a stamp that
+/// remembers the inputs the file was generated from: while it describes the file, it decides
+/// whether the file is current, whatever the file's age; otherwise the file is current unless it
+/// is [stale](is_stale).
 pub async fn ensure_fresh(
     node: &NodeRuntime,
     functions_dir: &Path,
@@ -237,7 +240,7 @@ pub async fn ensure_fresh_with(
         .clone()
         .unwrap_or_else(|| metadata_path(functions_dir));
     let newest = newest_input(functions_dir);
-    if !is_older_than(&path, newest) || Stamp::vouches(cache_dir, &path, newest) {
+    if is_current(cache_dir, &path, newest) {
         match load(&path) {
             Ok(metadata) => return Ok(metadata),
             Err(error) => tracing::info!("{error}"),
@@ -270,9 +273,21 @@ pub async fn ensure_fresh_with(
     Ok(generated.metadata)
 }
 
+/// Whether the metadata at `path` describes inputs no newer than `newest_input`. The stamp of the
+/// last generation decides when it describes the file: the file's own modification time proves
+/// nothing then, since it is written after a generation that takes seconds, and a source saved
+/// meanwhile is newer than the inputs read yet older than the file. A file another tool wrote is
+/// current when no input is newer than it.
+fn is_current(cache_dir: &Path, path: &Path, newest_input: Option<SystemTime>) -> bool {
+    match Stamp::load(cache_dir, path) {
+        Some(stamp) => stamp.inputs_modified >= newest_input.map(epoch_time),
+        None => !is_older_than(path, newest_input),
+    }
+}
+
 /// What the last generation produced: a metadata file with this content is current while no
-/// input is newer than `inputs_modified`, even when the file itself is older (it is not rewritten
-/// when its content stays the same).
+/// input is newer than `inputs_modified`, whether the file itself is older (it is not rewritten
+/// when its content stays the same) or newer (an input saved during generation is not in it).
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Stamp {
@@ -283,16 +298,14 @@ struct Stamp {
 }
 
 impl Stamp {
-    fn vouches(cache_dir: &Path, path: &Path, newest_input: Option<SystemTime>) -> bool {
-        let Some(stamp) = fs::read(cache_dir.join(STAMP_FILE))
+    /// The stamp of the last generation, when the file at `path` still holds what it produced.
+    fn load(cache_dir: &Path, path: &Path) -> Option<Self> {
+        let stamp: Stamp = fs::read(cache_dir.join(STAMP_FILE))
             .ok()
-            .and_then(|bytes| serde_json::from_slice::<Stamp>(&bytes).ok())
-        else {
-            return false;
-        };
-        stamp.metadata_path == path
-            && stamp.inputs_modified >= newest_input.map(epoch_time)
-            && fs::read_to_string(path).is_ok_and(|content| content == stamp.content)
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())?;
+        (stamp.metadata_path == path
+            && fs::read_to_string(path).is_ok_and(|content| content == stamp.content))
+        .then_some(stamp)
     }
 
     fn save(cache_dir: &Path, path: &Path, newest_input: Option<SystemTime>, content: &str) {

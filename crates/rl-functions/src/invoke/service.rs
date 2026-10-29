@@ -10,18 +10,21 @@ use rl_model::CallerResolver;
 use rl_tokens::TokenSource;
 use tokio::{sync::oneshot, task::JoinHandle};
 
-use super::{FunctionsConfig, FunctionsError, routes, tokens::TokenWarnings};
+use super::{FunctionsConfig, FunctionsError, routes, tokens::TokenFetches};
 use crate::{
     builder::{self, BuildConfig, BuildError, FunctionsWatch, WatchEvent},
     host::{
-        HostConfig, HostError, HostManager, RegisteredFunction, local_settings_values,
-        secrets_header,
+        HostConfig, HostError, HostManager, ManagerOptions, RegisteredFunction,
+        local_settings_values, secrets_header,
     },
     metadata,
 };
 
 /// How long [`FunctionsService::stop`] waits for the watcher (and `npm run build:watch`).
 const WATCH_STOP_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// How long loading the package may take with the inspector on.
+const INSPECT_READY_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// The app's functions, served locally: built with the package's build command, described by a
 /// current `runtimemetadata.json`, run on a supervised [`HostManager`], and rebuilt and reloaded
@@ -37,7 +40,7 @@ pub struct FunctionsService {
     pub(super) secrets_header: String,
     pub(super) callers: Arc<dyn CallerResolver>,
     pub(super) tokens: Arc<dyn TokenSource>,
-    pub(super) token_warnings: TokenWarnings,
+    pub(super) token_fetches: TokenFetches,
     pub(super) manager: HostManager,
     /// Why the functions can't run (the build failed); invocations answer 503 with it.
     unavailable: Mutex<Option<String>>,
@@ -107,13 +110,13 @@ impl FunctionsService {
                 .map(|(name, value)| (name.as_str(), value.as_str())),
         );
         let service = Arc::new(Self {
-            manager: HostManager::new(host_config),
+            manager: HostManager::with_options(host_config, manager_options(&config)),
             config,
             api_url,
             secrets_header,
             callers,
             tokens,
-            token_warnings: TokenWarnings::default(),
+            token_fetches: TokenFetches::default(),
             unavailable: Mutex::new(unavailable),
             watcher: Mutex::new(None),
         });
@@ -304,7 +307,22 @@ fn host_config(
     );
     host.env = env;
     host.inspect_port = config.inspect_port;
+    if config.inspect_port.is_some() {
+        // A breakpoint in the package's startup code holds the load.
+        host.ready_timeout = INSPECT_READY_TIMEOUT;
+    }
     Ok(host)
+}
+
+/// A replaced host may finish its invocations within their timeout. With the inspector, a
+/// timed-out invocation does not replace the host: it may be paused at a breakpoint, and the
+/// debug session would end with the host.
+fn manager_options(config: &FunctionsConfig) -> ManagerOptions {
+    ManagerOptions {
+        drain_timeout: config.invoke_timeout,
+        restart_on_timeout: config.inspect_port.is_none(),
+        ..ManagerOptions::default()
+    }
 }
 
 fn invocable(functions: &[RegisteredFunction]) -> impl Iterator<Item = &RegisteredFunction> {

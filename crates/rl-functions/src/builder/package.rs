@@ -93,20 +93,12 @@ pub(super) fn tsconfig_out_dir(functions_dir: &Path) -> Option<PathBuf> {
 fn parse_jsonc(text: &str) -> Option<Value> {
     let text = text.trim_start_matches('\u{feff}');
     let mut json = String::with_capacity(text.len());
+    // A comma is written once the next token (past whitespace and comments) shows that it is not
+    // a trailing one.
+    let mut comma = false;
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
         match ch {
-            '"' => {
-                json.push(ch);
-                while let Some(ch) = chars.next() {
-                    json.push(ch);
-                    match ch {
-                        '\\' => json.extend(chars.next()),
-                        '"' => break,
-                        _ => {}
-                    }
-                }
-            }
             '/' if chars.peek() == Some(&'/') => {
                 while chars.next_if(|&next| next != '\n').is_some() {}
             }
@@ -121,14 +113,31 @@ fn parse_jsonc(text: &str) -> Option<Value> {
                 }
                 json.push(' ');
             }
-            ',' => {
-                let rest = chars.clone().find(|next| !next.is_whitespace());
-                if !matches!(rest, Some('}' | ']')) {
-                    json.push(ch);
+            ch if ch.is_whitespace() => json.push(ch),
+            ch => {
+                if std::mem::take(&mut comma) && !matches!(ch, '}' | ']') {
+                    json.push(',');
+                }
+                match ch {
+                    ',' => comma = true,
+                    '"' => {
+                        json.push(ch);
+                        while let Some(ch) = chars.next() {
+                            json.push(ch);
+                            match ch {
+                                '\\' => json.extend(chars.next()),
+                                '"' => break,
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => json.push(ch),
                 }
             }
-            _ => json.push(ch),
         }
+    }
+    if comma {
+        json.push(',');
     }
     serde_json::from_str(&json).ok()
 }
@@ -147,6 +156,16 @@ mod tests {
             Some(json!({"a": "http://x/*y*/", "b": [1, 2], "c": "q\",//"}))
         );
         assert_eq!(parse_jsonc("{\"a\": }"), None);
+    }
+
+    #[test]
+    fn jsonc_drops_trailing_commas_before_comments() {
+        let text = "{\n  \"compilerOptions\": {\n    \"outDir\": \"dist\", // x\n  },\n  \
+                    \"include\": [\"src\", /* y */ ], /* z */\n}\n";
+        assert_eq!(
+            parse_jsonc(text),
+            Some(json!({"compilerOptions": {"outDir": "dist"}, "include": ["src"]}))
+        );
     }
 
     #[test]

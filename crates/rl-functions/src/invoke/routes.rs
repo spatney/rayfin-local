@@ -96,7 +96,7 @@ async fn answer(service: &FunctionsService, name: &str, request: Request) -> Ans
     }
     let host = match service.manager.host().await {
         Ok(host) => host,
-        Err(error) => return host_error(name, error),
+        Err(error) => return host_error(name, error, true),
     };
     let function = match host.function(name) {
         Some(function) if function.accepts("POST") => function,
@@ -107,7 +107,7 @@ async fn answer(service: &FunctionsService, name: &str, request: Request) -> Ans
         service.tokens.as_ref(),
         &function.audiences(),
         name,
-        &service.token_warnings,
+        &service.token_fetches,
     )
     .await;
     let mut invocation = HostInvocation::new(name, body);
@@ -148,7 +148,7 @@ async fn answer(service: &FunctionsService, name: &str, request: Request) -> Ans
         .await
     {
         Ok(response) => pass_through(response),
-        Err(error) => host_error(name, error),
+        Err(error) => host_error(name, error, false),
     }
 }
 
@@ -180,20 +180,14 @@ fn pass_through(response: HostResponse) -> Answer {
     }
 }
 
-fn host_error(name: &str, error: HostError) -> Answer {
+/// Answers a host error; `starting` when it comes from getting a running host (a failed start)
+/// rather than from the invocation.
+fn host_error(name: &str, error: HostError, starting: bool) -> Answer {
     match error {
-        HostError::Starting => {
-            let (mut response, outcome) = refuse(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "FUNCTION_HOST_STARTING",
-                "The function host is starting; try again in a moment.",
-            );
-            response.headers_mut().insert(
-                header::RETRY_AFTER,
-                HeaderValue::from_static(RETRY_AFTER_SECONDS),
-            );
-            (response, outcome)
-        }
+        HostError::Starting | HostError::ShuttingDown => retry_later(
+            "FUNCTION_HOST_STARTING",
+            "The function host is starting; try again in a moment.".into(),
+        ),
         HostError::Stopped => refuse(
             StatusCode::SERVICE_UNAVAILABLE,
             "FUNCTIONS_UNAVAILABLE",
@@ -217,9 +211,16 @@ fn host_error(name: &str, error: HostError) -> Answer {
             message,
             ..
         } => invoke_failed(name, &format!("{error_type}: {message}")),
-        error @ (HostError::Exited { .. } | HostError::Protocol(_) | HostError::Io(_)) => {
+        error @ (HostError::Exited { .. } | HostError::Protocol(_) | HostError::Io(_))
+            if !starting =>
+        {
             invoke_failed(name, &error.to_string())
         }
+        // The manager starts the host again on the next invocation.
+        error if error.is_transient() => retry_later(
+            "FUNCTION_HOST_STARTING",
+            format!("The function host could not start: {error}. Try again in a moment."),
+        ),
         start_failure => refuse(
             StatusCode::SERVICE_UNAVAILABLE,
             "FUNCTIONS_UNAVAILABLE",
@@ -229,6 +230,16 @@ fn host_error(name: &str, error: HostError) -> Answer {
             ),
         ),
     }
+}
+
+/// A 503 with `Retry-After`.
+fn retry_later(code: &'static str, message: String) -> Answer {
+    let (mut response, outcome) = refuse(StatusCode::SERVICE_UNAVAILABLE, code, message);
+    response.headers_mut().insert(
+        header::RETRY_AFTER,
+        HeaderValue::from_static(RETRY_AFTER_SECONDS),
+    );
+    (response, outcome)
 }
 
 /// The function ran but produced no response.

@@ -17,8 +17,9 @@
 //     {type: 'describe', secret} -> {ok: true, programmingModel, functions}
 //     {type: 'invoke', secret, invocationId, functionName, method, url, headers, body, bodyEncoding, bindings}
 //       -> {ok: true, response: {status, headers: [[name, value]], body, bodyEncoding}}
-//        | {ok: false, error: {kind, name, message, stack}}
-//     {type: 'shutdown', secret, drainMs} -> {ok: true}; in-flight invocations get drainMs, then exit 0
+//        | {ok: false, error: {kind, name, message, stack}}; kind 'shuttingDown' once a shutdown was asked
+//     {type: 'shutdown', secret, drainMs} -> {ok: true}; in-flight invocations get drainMs (a later,
+//       shorter drainMs cuts that short), then exit 0; the host exits as soon as none is in flight
 //   Bodies are UTF-8 text ('utf8') or, when they are not valid UTF-8, one char per byte ('latin1').
 //
 // The UDF package replaces `console.*` with loggers bound to the running invocation, so this file
@@ -424,37 +425,56 @@ let shuttingDown = false;
 /** Invocation connections not closed yet: their replies are delivered before the host exits. */
 let inFlight = 0;
 const idleWaiters = [];
+/** When the drain ends, in-flight invocations or not; a later, shorter shutdown brings it forward. */
+let drainDeadline = Infinity;
+let drainTimer;
+
+function endDrain() {
+  for (const resolve of idleWaiters.splice(0)) resolve();
+}
 
 function trackUntilClosed(socket) {
   inFlight += 1;
   socket.once('close', () => {
     inFlight -= 1;
-    if (inFlight === 0) for (const resolve of idleWaiters.splice(0)) resolve();
+    if (inFlight === 0) endDrain();
   });
 }
 
-/** Resolves once no invocation is in flight, or after `timeoutMs`. */
-function whenIdle(timeoutMs) {
-  if (inFlight === 0) return Promise.resolve();
-  return new Promise((resolve) => {
-    idleWaiters.push(resolve);
-    setTimeout(resolve, timeoutMs);
-  });
+/** Resolves once no invocation is in flight, or at the drain deadline. */
+function whenIdle() {
+  if (inFlight === 0 || Date.now() >= drainDeadline) return Promise.resolve();
+  return new Promise((resolve) => idleWaiters.push(resolve));
 }
 
-async function shutdown(code, drainMs) {
+/**
+ * Refuses new invocations, lets those in flight finish for up to `drainMs` (a later call can only
+ * shorten that), runs the `appTerminate` hooks and exits. It winds down on a later turn, so that
+ * the reply to a shutdown request is written first.
+ */
+function shutdown(code, drainMs) {
+  const delay = Math.min(Math.max(drainMs, 0), 0x7fffffff);
+  const deadline = Date.now() + delay;
+  if (deadline < drainDeadline) {
+    drainDeadline = deadline;
+    clearTimeout(drainTimer);
+    drainTimer = setTimeout(endDrain, delay);
+  }
   if (shuttingDown) return;
   shuttingDown = true;
-  await whenIdle(drainMs);
-  try {
-    await Promise.race([
-      runHooks('appTerminate', { hookData: appHookData, appHookData }),
-      new Promise((resolve) => setTimeout(resolve, 2000)),
-    ]);
-  } catch (error) {
-    writeLine(stderr, `appTerminate hook failed: ${describeError(error).message}`);
-  }
-  exitAfterFlush(code);
+  setImmediate(async () => {
+    await whenIdle();
+    clearTimeout(drainTimer);
+    try {
+      await Promise.race([
+        runHooks('appTerminate', { hookData: appHookData, appHookData }),
+        new Promise((resolve) => setTimeout(resolve, 2000)),
+      ]);
+    } catch (error) {
+      writeLine(stderr, `appTerminate hook failed: ${describeError(error).message}`);
+    }
+    exitAfterFlush(code);
+  });
 }
 
 async function handleRequest(line, socket) {
@@ -468,6 +488,12 @@ async function handleRequest(line, socket) {
     return { ok: false, error: { kind: 'unauthorized', message: 'Missing or wrong host secret.' } };
   }
   if (request.type === 'invoke') {
+    if (shuttingDown) {
+      return {
+        ok: false,
+        error: { kind: 'shuttingDown', message: 'The function host is shutting down and takes no new invocations.' },
+      };
+    }
     trackUntilClosed(socket);
     return runInvocation(request);
   }
@@ -480,7 +506,7 @@ async function handleRequest(line, socket) {
   }
   if (request.type === 'shutdown') {
     const drainMs = Number(request.drainMs);
-    setImmediate(() => shutdown(0, Number.isFinite(drainMs) ? drainMs : 0));
+    shutdown(0, Number.isFinite(drainMs) ? drainMs : 0);
     return { ok: true };
   }
   return { ok: false, error: { kind: 'protocol', message: `Unknown request type '${request.type}'.` } };
