@@ -29,7 +29,8 @@ Keep the backend on loopback (the default `--host 127.0.0.1`): any other address
 | Feature | Status | Notes |
 | --- | --- | --- |
 | Username/password sign-up and sign-in | Supported | Users live in `.rayfin-local/db.sqlite`, with argon2id password hashes. |
-| Password sign-in for an unknown email | Differs | Creates the account (when sign-up is allowed) instead of answering `invalid_grant`, so app templates that sign in with a fixed dev account work; SDK 1.36.2 breaks their sign-up fallback. `[auth] auto_create_users = false` restores Fabric's answer. |
+| Password sign-in for an unknown email | Differs | Creates the account (when sign-up is allowed, even if `password.enabled` is false) instead of answering `invalid_grant`, so app templates that sign in with a fixed dev account work; SDK 1.36.2 breaks their sign-up fallback. `[auth] auto_create_users = false` restores Fabric's answer. |
+| Static `customClaims` | Differs | A custom claim named like a reserved claim (`sub`, `email`, `role`, `name`, `scope`, `sid`, `iss`, `aud`, `exp`, `iat`, `nbf`, `jti`) is ignored with a warning; Fabric's token issuer would put it in place of the standard claim in every user's token. Other custom claims are added as on Fabric. |
 | Sessions: access tokens, refresh-token rotation, sign-out, sign-out everywhere | Supported | ES256 access tokens shaped like the service's, with the lifetimes of `services.auth` in `rayfin.yml`. |
 | JWKS and runtime settings (`/.well-known/jwks.json`, `/api/projectRuntimeSettings`) | Supported | The settings mirror `services.auth` in `rayfin.yml`. |
 | "Sign in with Fabric" (`ensureSignedInWithFabric`) | Differs | The popup opens rayfin-local's sign-in page (`/.rayfin-local/portal`) instead of the Fabric portal. It offers local sign-in, sign-up and "Continue as &lt;you&gt;". The handshake with the app is the SDK's own (`brokeredAuth.*` messages, then a one-time handoff code). |

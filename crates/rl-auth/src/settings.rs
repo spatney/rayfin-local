@@ -6,7 +6,9 @@ use crate::AuthError;
 
 /// Claims a static custom claim may not replace (compared case-insensitively): the service needs
 /// them to verify its tokens, and app policies trust `sub`, `email` and `role` to say who the user
-/// is. The platform's reserved claim names (`RESERVED_CLAIM_NAMES` in the Rayfin CLI).
+/// is. These are the platform's reserved claim names (`RESERVED_CLAIM_NAMES` in the Rayfin CLI),
+/// which the CLI enforces for dynamic claims; Fabric's token issuer applies static `customClaims`
+/// over the standard claims unchecked, which rayfin-local does not reproduce.
 const RESERVED_CLAIMS: &[&str] = &[
     "sub", "email", "role", "sid", "iss", "aud", "exp", "iat", "nbf", "jti", "name", "scope",
 ];
@@ -179,8 +181,9 @@ impl AuthSettings {
             if reserved {
                 tracing::warn!(
                     claim = %name,
-                    "services.auth.customClaims cannot set a reserved claim (sub, email, role, \
-                     name, scope, sid, iss, aud, exp, iat, nbf, jti); ignoring it: rename it in \
+                    "services.auth.customClaims sets the reserved claim '{name}': on Fabric it \
+                     would replace that claim in every user's token (so policies comparing it \
+                     would see one value for all users); rayfin-local ignores it. Rename it in \
                      rayfin/rayfin.yml"
                 );
             }
