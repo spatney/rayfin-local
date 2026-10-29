@@ -8,6 +8,7 @@ use axum::{
     body::{Body, Bytes},
     http::{HeaderMap, Request, StatusCode},
 };
+use futures_util::StreamExt;
 use http_body_util::BodyExt;
 use rl_db::Db;
 use rl_model::{
@@ -173,6 +174,16 @@ impl Harness {
             .body(Body::from(bytes.to_vec()))
             .unwrap();
         self.send(request).await
+    }
+
+    /// A signed `GET` with extra request headers, as a browser's media element sends it.
+    async fn get(&self, url: &str, headers: &[(&str, &str)]) -> Reply {
+        let path = url.strip_prefix(ORIGIN).expect("signed URLs are absolute");
+        let mut request = Request::builder().uri(path);
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        self.send(request.body(Body::empty()).unwrap()).await
     }
 
     async fn poll(&self, user: Option<&str>, id: &str) -> Value {
@@ -527,6 +538,133 @@ async fn sizes_and_content_types_follow_the_folder() {
         .api("POST", "/api/storage/upload", alice, Some(over_quota))
         .await;
     assert_eq!(reply.code(), "TooLarge");
+}
+
+#[tokio::test]
+async fn commits_keep_uploads_staged_together_within_the_quota() {
+    let h = harness_with(model(), |config| config.max_total_bytes = 10).await;
+    let alice = Some("alice");
+    // Both PUTs see the same 10 free bytes; only the first commit still fits.
+    let (first, first_url) = h.start(alice, note("a.txt", None)).await.unwrap();
+    let (second, second_url) = h.start(alice, note("b.txt", None)).await.unwrap();
+    for url in [&first_url, &second_url] {
+        let put = h.signed("PUT", url, "text/plain", &[b'x'; 8]).await;
+        assert_eq!(put.status, StatusCode::CREATED);
+    }
+    let commit = |id: &str| format!("/api/storage/uploads/{id}/commit");
+    let reply = h.api("POST", &commit(&first), alice, None).await;
+    assert_eq!(reply.status, StatusCode::ACCEPTED);
+    let reply = h.api("POST", &commit(&second), alice, None).await;
+    assert_eq!(
+        (reply.status, reply.code()),
+        (StatusCode::BAD_REQUEST, "TooLarge".into())
+    );
+    let poll = h.poll(alice, &second).await;
+    assert_eq!(
+        (poll["status"].clone(), poll["errorCode"].clone()),
+        (json!("Failed"), json!("UPLOAD_SIZE_EXCEEDS_LIMIT"))
+    );
+    assert!(h.files("staging").is_empty());
+    assert_eq!(h.paths(alice, "folder=public-notes").await, ["a.txt"]);
+    // An overwrite frees the bytes of the version it replaces.
+    h.upload(alice, note("a.txt", None), &[b'y'; 9])
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_cancelled_put_leaves_no_partial_file() {
+    let h = harness().await;
+    let (_, url) = h
+        .start(Some("alice"), note("slow.txt", None))
+        .await
+        .unwrap();
+    // The client sends three bytes, then goes away.
+    let sent = futures_util::stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(b"abc"))]);
+    let request = Request::builder()
+        .method("PUT")
+        .uri(url.strip_prefix(ORIGIN).unwrap())
+        .header("content-type", "text/plain")
+        .body(Body::from_stream(
+            sent.chain(futures_util::stream::pending()),
+        ))
+        .unwrap();
+    let put = tokio::spawn(h.router.clone().oneshot(request));
+    // Not `DirEntry::metadata`: Windows lists the size of an open file as of its last close.
+    let written = || {
+        std::fs::read_dir(h.root.join("staging"))
+            .unwrap()
+            .flatten()
+            .any(|entry| std::fs::metadata(entry.path()).is_ok_and(|meta| meta.len() == 3))
+    };
+    for _ in 0..500 {
+        if written() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(written(), "the PUT never wrote its bytes");
+    put.abort();
+    assert!(put.await.unwrap_err().is_cancelled());
+    assert!(h.files("staging").is_empty(), "{:?}", h.files("staging"));
+}
+
+#[tokio::test]
+async fn signed_downloads_serve_a_single_byte_range() {
+    let h = harness().await;
+    h.upload(Some("alice"), note("r.txt", None), b"hello world")
+        .await
+        .unwrap();
+    let download = h
+        .api(
+            "POST",
+            "/api/storage/download",
+            None,
+            Some(note("r.txt", None)),
+        )
+        .await;
+    let url = download.json()["signedUrl"].as_str().unwrap().to_owned();
+    let etag = format!("\"{HELLO_SHA256}\"");
+
+    for (range, bytes, content_range) in [
+        ("bytes=0-4", "hello", "bytes 0-4/11"),
+        ("bytes=4-99", "o world", "bytes 4-10/11"),
+        ("bytes=6-", "world", "bytes 6-10/11"),
+        ("bytes=-5", "world", "bytes 6-10/11"),
+        ("bytes=-99", "hello world", "bytes 0-10/11"),
+    ] {
+        let get = h
+            .get(&url, &[("range", range), ("if-range", etag.as_str())])
+            .await;
+        assert_eq!(get.status, StatusCode::PARTIAL_CONTENT, "{range}");
+        assert_eq!(&get.body[..], bytes.as_bytes(), "{range}");
+        assert_eq!(get.headers["content-range"], content_range);
+        assert_eq!(get.headers["content-length"], bytes.len().to_string());
+        assert_eq!(get.headers["accept-ranges"], "bytes");
+        assert_eq!(get.headers["content-type"], "text/plain");
+        assert_eq!(get.headers["etag"], etag);
+        assert_eq!(get.headers["x-content-type-options"], "nosniff");
+    }
+    for range in ["bytes=11-", "bytes=-0"] {
+        let get = h.get(&url, &[("range", range)]).await;
+        assert_eq!(get.status, StatusCode::RANGE_NOT_SATISFIABLE, "{range}");
+        assert_eq!(get.headers["content-range"], "bytes */11");
+    }
+    // No range, several, a malformed one, another unit or another version's `If-Range`: all of
+    // the object.
+    for headers in [
+        vec![],
+        vec![("range", "bytes=0-1,4-5")],
+        vec![("range", "bytes=4-2")],
+        vec![("range", "lines=0-1")],
+        vec![("range", "bytes=0-4"), ("if-range", "\"other\"")],
+    ] {
+        let get = h.get(&url, &headers).await;
+        assert_eq!(get.status, StatusCode::OK, "{headers:?}");
+        assert_eq!(&get.body[..], b"hello world");
+        assert_eq!(get.headers["content-length"], "11");
+        assert_eq!(get.headers["accept-ranges"], "bytes");
+    }
 }
 
 #[tokio::test]

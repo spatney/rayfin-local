@@ -71,6 +71,9 @@ pub(crate) enum ApiError {
     /// A signed download URL that is invalid or expired.
     #[error("{0}")]
     SignatureRejected(String),
+    /// A `Range` that selects none of the object (416 on the signed download URL).
+    #[error("{0}")]
+    RangeNotSatisfiable(String),
     #[error("rayfin-local storage failed: {0}")]
     Internal(String),
 }
@@ -85,6 +88,7 @@ impl ApiError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::PayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::RangeNotSatisfiable(_) => StatusCode::RANGE_NOT_SATISFIABLE,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::NoStorage
             | Self::InvalidFolder(_)
@@ -116,6 +120,7 @@ impl ApiError {
             Self::BadRequest(_)
             | Self::PayloadTooLarge(_)
             | Self::SignatureRejected(_)
+            | Self::RangeNotSatisfiable(_)
             | Self::Internal(_) => "Unexpected",
         }
     }

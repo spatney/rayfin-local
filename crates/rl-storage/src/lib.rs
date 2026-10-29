@@ -12,7 +12,7 @@
 //! | `POST /api/storage/uploads/{id}/commit` | 202 `{operationId}` |
 //! | `DELETE /api/storage/uploads/{id}` | 204 |
 //! | `POST /api/storage/download` `{folder, fileName, prefix?, expiresInSeconds?}` | 200 `{signedUrl, expiresAt}` |
-//! | `GET {signedUrl}` | 200, the bytes |
+//! | `GET {signedUrl}` (`Range: bytes=…` optional) | 200, the bytes; or 206, one byte range |
 //! | `GET /api/storage/list?folder&prefix&continuation&limit` | 200 `{items, continuation?}` |
 //! | `DELETE /api/storage/delete` `{folder, fileName, prefix?}` | 202 `{operationId}` |
 //!

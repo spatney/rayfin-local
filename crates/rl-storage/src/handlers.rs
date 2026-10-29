@@ -3,6 +3,7 @@
 
 use std::{
     collections::HashMap,
+    io::SeekFrom,
     path::{Path as FsPath, PathBuf},
     sync::Arc,
     time::Duration,
@@ -28,7 +29,7 @@ use rusqlite::Connection;
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Map, Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
@@ -288,7 +289,8 @@ async fn signed_put(
             let Some(operation) = store::operation(conn, &id, now)? else {
                 return Ok((None, 0));
             };
-            // An overwrite frees the bytes of the version it replaces.
+            // An overwrite frees the bytes of the version it replaces. Uploads staged side by side
+            // all see the same free bytes here: the commit re-checks the quota.
             let replaced = store::object_at(conn, &operation.folder, &operation.path)?
                 .map_or(0, |object| object.size);
             let used = store::used_bytes(conn)?.saturating_sub(replaced);
@@ -333,22 +335,14 @@ async fn signed_put(
     }
 
     let blob = Uuid::new_v4().simple().to_string();
-    let part = state.staging.join(format!("{blob}.part"));
+    let mut part = PartFile {
+        path: state.staging.join(format!("{blob}.part")),
+        complete: false,
+    };
     let staged = state.staging.join(&blob);
-    let received = match receive(body, &part, limit).await {
-        Ok(received) => tokio::fs::rename(&part, &staged)
-            .await
-            .map(|()| received)
-            .map_err(ApiError::from),
-        Err(error) => Err(error),
-    };
-    let (size, etag) = match received {
-        Ok(received) => received,
-        Err(error) => {
-            store::remove_file(&part);
-            return Err(error);
-        }
-    };
+    let (size, etag) = receive(body, &part.path, limit).await?;
+    tokio::fs::rename(&part.path, &staged).await?;
+    part.complete = true;
     let (id, staged_blob, staged_etag) = (operation.id, blob, etag.clone());
     let commit_by = store::now_unix() + COMMIT_GRACE_SECS;
     let marked = state
@@ -364,6 +358,21 @@ async fn signed_put(
         ));
     }
     Ok((StatusCode::CREATED, [(header::ETAG, etag)]).into_response())
+}
+
+/// The file a PUT writes its bytes to, deleted when dropped before `complete`: a PUT that fails,
+/// or is cancelled because its client went away, leaves nothing in `staging/`.
+struct PartFile {
+    path: PathBuf,
+    complete: bool,
+}
+
+impl Drop for PartFile {
+    fn drop(&mut self) {
+        if !self.complete {
+            store::remove_file(&self.path);
+        }
+    }
 }
 
 /// Streams `body` to `path`, at most `limit` bytes; the size and the quoted SHA-256 ETag.
@@ -448,8 +457,8 @@ fn commit(
     }
 }
 
-/// Re-checks the rules against the current object, moves the staged file into place and saves
-/// the new version; the blob of the version it replaced.
+/// Re-checks the rules and the quota against the current objects, moves the staged file into
+/// place and saves the new version; the blob of the version it replaced.
 fn store_upload(
     conn: &mut Connection,
     state: &AppState,
@@ -464,14 +473,15 @@ fn store_upload(
         .ok_or_else(|| folder_gone(&operation.folder))?;
     let tx = conn.transaction()?;
     let existing = store::object_at(&tx, &operation.folder, &operation.path)?;
-    let mut object = new_version(
-        operation,
-        existing.as_ref(),
-        caller,
-        operation.staged_size.unwrap_or_default(),
-        now,
-    );
+    let size = operation.staged_size.unwrap_or_default();
+    let mut object = new_version(operation, existing.as_ref(), caller, size, now);
     authorize_write(folder, caller, &object, existing.as_ref())?;
+    // Each PUT only saw the committed bytes, so uploads staged side by side must fit together.
+    Limits::new(&state.config, folder).check_quota(
+        size,
+        existing.as_ref(),
+        store::used_bytes(&tx)?,
+    )?;
     object.blob = operation.staged_blob.clone().unwrap_or_default();
     object.etag = operation.staged_etag.clone().unwrap_or_default();
     let target = state.objects.join(&object.blob);
@@ -541,8 +551,14 @@ async fn start_download(
     .into_response())
 }
 
-/// `GET <signed download URL>` → 200 with the bytes and their headers.
-async fn signed_get(State(state): Shared, Path(token): Path<String>) -> Result<Response, ApiError> {
+/// `GET <signed download URL>` → 200 with the bytes and their headers, or 206 with the single
+/// byte range a `Range` header asks for (media elements seek this way; Azure Blob SAS URLs
+/// support it too).
+async fn signed_get(
+    State(state): Shared,
+    Path(token): Path<String>,
+    request: HeaderMap,
+) -> Result<Response, ApiError> {
     let blob = state
         .signer
         .verify(Purpose::Download, &token, store::now_unix())
@@ -566,12 +582,58 @@ async fn signed_get(State(state): Shared, Path(token): Path<String>) -> Result<R
         .call(move |conn| store::object_by_blob(conn, &lookup))
         .await??
         .ok_or_else(gone)?;
-    let file = match tokio::fs::File::open(state.objects.join(&blob)).await {
+    let mut file = match tokio::fs::File::open(state.objects.join(&blob)).await {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(gone()),
         Err(error) => return Err(error.into()),
     };
-    let mut response = Response::new(Body::from_stream(ReaderStream::new(file)));
+    // RFC 9110 §13.1.5: a client resuming another version of the object gets all of this one.
+    let range = if request
+        .get(header::IF_RANGE)
+        .is_some_and(|validator| validator != object.etag.as_str())
+    {
+        ByteRange::Whole
+    } else {
+        ByteRange::parse(request.get(header::RANGE), object.size)
+    };
+    let mut response = match range {
+        ByteRange::Whole => {
+            let mut response = Response::new(Body::from_stream(ReaderStream::new(file)));
+            response
+                .headers_mut()
+                .insert(header::CONTENT_LENGTH, HeaderValue::from(object.size));
+            response
+        }
+        ByteRange::Part { first, last } => {
+            file.seek(SeekFrom::Start(first)).await?;
+            let length = last - first + 1;
+            let body = Body::from_stream(ReaderStream::new(file.take(length)));
+            let content_range = format!("bytes {first}-{last}/{}", object.size);
+            let mut response = Response::new(body);
+            *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+            let headers = response.headers_mut();
+            headers.insert(header::CONTENT_LENGTH, HeaderValue::from(length));
+            headers.insert(
+                header::CONTENT_RANGE,
+                HeaderValue::from_str(&content_range).expect("a byte range is a header value"),
+            );
+            response
+        }
+        ByteRange::Unsatisfiable => {
+            let mut response = ApiError::RangeNotSatisfiable(format!(
+                "The requested byte range selects none of the object's {} bytes; ask for a range \
+                 within them, or send no Range header for the whole object.",
+                object.size
+            ))
+            .into_response();
+            response.headers_mut().insert(
+                header::CONTENT_RANGE,
+                HeaderValue::from_str(&format!("bytes */{}", object.size))
+                    .expect("a byte range is a header value"),
+            );
+            return Ok(response);
+        }
+    };
     let headers = response.headers_mut();
     let header_value = |value: &str, fallback: &'static str| {
         HeaderValue::from_str(value).unwrap_or_else(|_| HeaderValue::from_static(fallback))
@@ -580,7 +642,7 @@ async fn signed_get(State(state): Shared, Path(token): Path<String>) -> Result<R
         header::CONTENT_TYPE,
         header_value(&object.content_type, DEFAULT_CONTENT_TYPE),
     );
-    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(object.size));
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     headers.insert(header::ETAG, header_value(&object.etag, "\"\""));
     if let Some(disposition) = object
         .content_disposition
@@ -607,6 +669,57 @@ async fn signed_get(State(state): Shared, Path(token): Path<String>) -> Result<R
         HeaderValue::from_static("nosniff"),
     );
     Ok(response)
+}
+
+/// What a `Range` header selects of an object. Only one byte range is served: several ranges,
+/// other units and malformed values get the whole object, as RFC 9110 §14.2 allows.
+enum ByteRange {
+    Whole,
+    /// The bytes `first..=last`.
+    Part {
+        first: u64,
+        last: u64,
+    },
+    Unsatisfiable,
+}
+
+impl ByteRange {
+    fn parse(range: Option<&HeaderValue>, size: u64) -> Self {
+        let Some((first, last)) = range
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split_once('='))
+            .filter(|(unit, set)| unit.trim().eq_ignore_ascii_case("bytes") && !set.contains(','))
+            .and_then(|(_, set)| set.trim().split_once('-'))
+        else {
+            return Self::Whole;
+        };
+        let (first, last) = match (byte_position(first), byte_position(last)) {
+            // `bytes=-n`: the last n bytes, or all of a shorter object.
+            (None, Some(suffix)) if first.is_empty() => {
+                if suffix == 0 || size == 0 {
+                    return Self::Unsatisfiable;
+                }
+                (size.saturating_sub(suffix), u64::MAX)
+            }
+            // `bytes=a-`: from a to the end.
+            (Some(first), None) if last.is_empty() => (first, u64::MAX),
+            (Some(first), Some(last)) if first <= last => (first, last),
+            _ => return Self::Whole,
+        };
+        if first >= size {
+            return Self::Unsatisfiable;
+        }
+        Self::Part {
+            first,
+            last: last.min(size - 1),
+        }
+    }
+}
+
+/// A `Range` byte position (ASCII digits), saturating at `u64::MAX`.
+fn byte_position(digits: &str) -> Option<u64> {
+    (!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit()))
+        .then(|| digits.parse().unwrap_or(u64::MAX))
 }
 
 /// `GET /api/storage/list?folder=&prefix=&continuation=&limit=` → 200 `{items, continuation?}`:
@@ -866,6 +979,12 @@ impl Limits {
                 folder.name, self.per_object
             )));
         }
+        self.check_quota(size, existing, used)
+    }
+
+    /// Whether an upload of `size` bytes, replacing `existing`, fits in the quota while `used`
+    /// bytes are stored.
+    fn check_quota(&self, size: u64, existing: Option<&Object>, used: u64) -> Result<(), ApiError> {
         let replaced = existing.map_or(0, |existing| existing.size);
         if used.saturating_sub(replaced).saturating_add(size) > self.total {
             return Err(ApiError::TooLarge(format!(
