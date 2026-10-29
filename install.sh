@@ -133,7 +133,7 @@ main() {
 
     target="$(detect_target)"
     TMP_DIR="$(mktemp -d 2>/dev/null || mktemp -d -t rayfin-local)"
-    trap 'rm -rf "$TMP_DIR"' EXIT
+    trap 'rm -rf "$TMP_DIR"; rm -f "$INSTALL_DIR/.rayfin-local.new"' EXIT
     trap 'exit 130' INT TERM
 
     [ -n "$VERSION" ] || VERSION="$(latest_version)"
@@ -153,15 +153,17 @@ main() {
     [ -f "$binary" ] || fail "$archive has no rayfin-local binary"
 
     mkdir -p "$INSTALL_DIR"
-    # Copy, then rename over the old binary: the swap is atomic, and a running rayfin-local keeps
-    # working.
-    cp "$binary" "$INSTALL_DIR/.rayfin-local.new"
-    chmod 755 "$INSTALL_DIR/.rayfin-local.new"
-    mv -f "$INSTALL_DIR/.rayfin-local.new" "$INSTALL_DIR/rayfin-local"
-
-    if ! installed="$("$INSTALL_DIR/rayfin-local" --version 2>&1)"; then
-        fail "$INSTALL_DIR/rayfin-local was installed but doesn't run ($installed). On Linux it needs glibc 2.35 or later; $(from_source)"
+    new="$INSTALL_DIR/.rayfin-local.new"
+    cp "$binary" "$new"
+    chmod 755 "$new"
+    # Run the new binary before it replaces anything, so a system that can't run it keeps what it
+    # has. It runs from the install folder because temporary folders may forbid running programs.
+    if ! installed="$("$new" --version 2>&1)"; then
+        rm -f "$new"
+        fail "the downloaded rayfin-local doesn't run on this system ($installed). On Linux it needs glibc 2.34 or later; $(from_source)"
     fi
+    # Renaming over the old binary is atomic, and a running rayfin-local keeps working.
+    mv -f "$new" "$INSTALL_DIR/rayfin-local"
     say "Installed $installed to $INSTALL_DIR/rayfin-local"
     path_hint
     say ""

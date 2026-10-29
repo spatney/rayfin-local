@@ -156,7 +156,7 @@ $env:RAYFIN_LOCAL_VERSION = '0.1.0'; irm https://raw.githubusercontent.com/spatn
 | --- | --- |
 | Windows x64 (and Windows on ARM, through emulation) | `x86_64-pc-windows-msvc` |
 | macOS on Apple silicon or Intel | `aarch64-apple-darwin`, `x86_64-apple-darwin` |
-| Linux x64 or ARM64 with glibc 2.35 or later (Ubuntu 22.04, Debian 12, Fedora 36, RHEL 9 or newer) | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` |
+| Linux x64 or ARM64 with glibc 2.34 or later (Ubuntu 22.04, Debian 12, Fedora 35, RHEL 9 or newer) | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` |
 
 Other ways to install:
 
@@ -290,6 +290,7 @@ Outside it, rayfin-local writes only build output: what your build commands prod
 | `cache/` | Analysis output and the helper scripts rayfin-local runs with Node.js. |
 | `state.json` | The local app id, publishable key, workspace, item and tenant ids, and the last ports. |
 | `secrets.json` | Local secret values. |
+| `serve.lock`, `serve.json` | Keep a second `serve` (or a `reset`) off the project while one runs. |
 
 - `rayfin-local serve --reset` starts from an empty database: it deletes `db.sqlite` (data, users and sessions) and `storage/`, and keeps the rest.
 - `rayfin-local reset` deletes the whole folder after asking (`--yes` skips the question).
@@ -405,6 +406,9 @@ Run `rayfin-local doctor` first: it checks what `serve` needs and says what to f
   Use the Rayfin CLI's login (`--token-source rayfin`, or `source = "rayfin"` under `[tokens]`), or override the audience's scope under `[tokens.scopes]`.
 - **"… is not the 1.36 SDK rayfin-local implements".**
   rayfin-local implements the wire contract of `@microsoft/rayfin-*` 1.36.x; with another version, behavior may differ from Fabric.
+- **"rayfin-local serve is already running this project".**
+  Only one `serve` runs a project at a time; the message gives the other one's process id and URLs.
+  Use it, or stop it (Ctrl+C in its terminal) and start again.
 - **A schema change is refused.**
   The message lists the data the change would lose; restart with `--force-schema` to accept that, or `--reset` to start over.
 - **"Continue as" is missing from the sign-in page.**

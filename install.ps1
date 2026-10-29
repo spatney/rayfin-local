@@ -119,9 +119,24 @@
 
         New-Item -ItemType Directory -Force -Path $installDir | Out-Null
         $dest = Join-Path $installDir 'rayfin-local.exe'
+        $new = Join-Path $installDir 'rayfin-local.new.exe'
         # Leftovers of earlier updates, if the old binary was running then.
         Get-ChildItem -LiteralPath $installDir -Filter 'rayfin-local.exe.*.old' -ErrorAction SilentlyContinue |
             Remove-Item -Force -ErrorAction SilentlyContinue
+        Copy-Item -LiteralPath $exe -Destination $new -Force
+        # Run the new binary before it replaces anything, so a system that can't run it keeps what
+        # it has. It runs from the install folder because policies may forbid programs in %TEMP%.
+        try {
+            $installed = & $new --version
+            $code = $LASTEXITCODE
+        } catch {
+            Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue
+            throw "The downloaded rayfin-local.exe doesn't run on this system: $($_.Exception.Message)"
+        }
+        if ($code -ne 0) {
+            Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue
+            throw "The downloaded rayfin-local.exe doesn't run on this system (exit code $code)"
+        }
         # A running rayfin-local.exe can't be overwritten, but it can be renamed.
         $old = $null
         if (Test-Path -LiteralPath $dest) {
@@ -129,7 +144,7 @@
             Move-Item -LiteralPath $dest -Destination $old
         }
         try {
-            Copy-Item -LiteralPath $exe -Destination $dest
+            Move-Item -LiteralPath $new -Destination $dest
         } catch {
             if ($old) { Move-Item -LiteralPath $old -Destination $dest -Force }
             throw
@@ -139,8 +154,6 @@
         Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    $installed = & $dest --version
-    if ($LASTEXITCODE -ne 0) { throw "$dest was installed but doesn't run (exit code $LASTEXITCODE)" }
     Write-Host "Installed $installed to $dest"
 
     $onPath = @($env:Path -split ';' | Where-Object { $_.TrimEnd('\') -ieq $installDir.TrimEnd('\') }).Count -gt 0
