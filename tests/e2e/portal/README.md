@@ -1,17 +1,23 @@
-# Sign-in popup end-to-end test
+# Sign-in portal end-to-end test
 
-Drives rayfin-local's sign-in portal (the popup `ensureSignedInWithFabric` opens) with a real
-browser and the real Rayfin SDK 1.36.2. `crates/rl-auth/tests/portal_e2e.rs` starts the auth
-routes behind `rl-server` and runs `run.mjs`, which:
+Drives rayfin-local's sign-in portal (the popup `ensureSignedInWithFabric` opens, and the local
+Fabric host for apps using `initEmbeddedAuth`) with a real browser and the real Rayfin SDK
+1.36.2. `crates/rl-auth/tests/portal_e2e.rs` starts the auth routes behind `rl-server` and runs
+`run.mjs`, which:
 
-1. bundles `app.js` (a Sign in button calling `ensureSignedInWithFabric`) with esbuild, taking
+1. bundles `app.js` (a Sign in button calling `ensureSignedInWithFabric`, or `initEmbeddedAuth`
+   on load when framed with `fabricEmbedded=true`) with esbuild, taking
    `@microsoft/rayfin-client` and `@microsoft/rayfin-auth-provider-fabric` from an app's
    `node_modules`;
 2. serves it from its own origin, as Vite serves an app next to the backend;
 3. clicks Sign in in Chromium (Playwright) and, in the popup: signs in with a wrong then the
    right password, signs up, uses "Continue as" (with a fake developer token), cancels, and
    closes the popup; it also opens the portal without an opener;
-4. prints `RESULT <json>` with what the app saw (session, refresh, errors), which the Rust test
+4. opens the app in the local Fabric host (`/.rayfin-local/portal/embed?app=…`), where the app
+   signs in with the real `initEmbeddedAuth`: signs in on the host, reloads the page and the
+   app, switches to a new account, and checks that a request the host does not support fails
+   at once;
+5. prints `RESULT <json>` with what the app saw (session, refresh, errors), which the Rust test
    checks.
 
 ## Run it

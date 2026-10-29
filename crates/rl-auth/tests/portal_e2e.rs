@@ -1,7 +1,8 @@
 //! The sign-in popup end to end: a real browser (Playwright) runs the real
 //! `ensureSignedInWithFabric` (SDK 1.36.2) against the auth routes behind `rl-server`, and signs
 //! in with a password, by signing up, with "Continue as" (a fake developer token), then cancels
-//! and closes the popup.
+//! and closes the popup. It also runs the real `initEmbeddedAuth` in the local Fabric host's frame:
+//! signs in on the host, reloads the page and the app, and switches to a new account.
 //!
 //! Ignored by default. Set up once: `npm install` and `npx playwright install chromium` in
 //! `tests/e2e/portal` (without the Chromium download it falls back to the installed Edge). The
@@ -27,6 +28,7 @@ const PUBLISHABLE_KEY: &str = "pk-portal-e2e";
 const USER: &str = "ada@contoso.test";
 const PASSWORD: &str = "correct horse";
 const NEW_USER: &str = "grace@contoso.test";
+const EMBED_USER: &str = "hopper@contoso.test";
 
 /// The developer's identity for "Continue as": an unsigned token with a user's claims.
 struct DeveloperTokens;
@@ -135,6 +137,7 @@ async fn the_sdk_signs_in_through_the_portal_popup() {
         .env("RL_USER", USER)
         .env("RL_PASSWORD", PASSWORD)
         .env("RL_NEW_USER", NEW_USER)
+        .env("RL_EMBED_USER", EMBED_USER)
         .output()
         .await
         .expect("node runs (is Node on PATH?)");
@@ -189,4 +192,35 @@ async fn the_sdk_signs_in_through_the_portal_popup() {
         assert!(result["ms"].as_u64().unwrap() < 30_000, "{cancelled}");
     }
     assert_eq!(out["noOpener"]["title"], "Open this from the app");
+
+    let embedded = &out["embedded"];
+    assert_eq!(embedded["framedBeforeSignIn"], 0, "{embedded}");
+    assert_eq!(embedded["user"], format!("Signed in as {USER}"));
+    assert_eq!(embedded["formAfterReload"], false);
+    for (step, email) in [
+        ("first", USER),
+        ("reloaded", USER),
+        ("reloadedApp", USER),
+        ("switched", EMBED_USER),
+    ] {
+        let result = &embedded[step];
+        assert_eq!(result["ok"], true, "{step}: {embedded}");
+        assert_eq!(result["session"]["user"]["email"], email, "{step}");
+        assert_eq!(result["refreshed"], true, "{step}");
+        assert_eq!(result["unsupported"]["code"], "NOT_SUPPORTED", "{step}");
+        assert!(
+            result["unsupported"]["ms"].as_u64().unwrap() < 5_000,
+            "{step}"
+        );
+    }
+    assert_eq!(embedded["first"]["session"]["user"]["id"], user.id.as_str());
+    let hopper = auth.find_user(EMBED_USER).await.unwrap().unwrap();
+    assert_eq!(
+        embedded["switched"]["session"]["user"]["id"],
+        hopper.id.as_str()
+    );
+    assert_eq!(
+        embedded["switchedUser"],
+        format!("Signed in as {EMBED_USER}")
+    );
 }

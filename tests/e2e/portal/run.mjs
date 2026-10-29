@@ -8,6 +8,7 @@
 //                         @microsoft/rayfin-auth-provider-fabric 1.36.2
 //   RL_USER, RL_PASSWORD  an existing password user
 //   RL_NEW_USER           a username to sign up with
+//   RL_EMBED_USER         a username to sign up with on the local Fabric host
 //
 // Prints one line `RESULT <json>` with what each scenario observed; the Rust test asserts on it.
 import { createServer } from 'node:http';
@@ -168,6 +169,48 @@ await scenario('noOpener', async () => {
   const title = await direct.textContent('#message-title');
   await context.close();
   return { title };
+});
+
+/** What the app in the Fabric host's (current) frame saw. */
+async function frameResult(host) {
+  const frame = await (await host.waitForSelector('#frame:not([hidden]) iframe')).contentFrame();
+  await frame.waitForFunction(() => window.__result !== undefined, null, { timeout: 30_000 });
+  return frame.evaluate(() => window.__result);
+}
+
+// The local Fabric host frames the app, which signs in with `initEmbeddedAuth`.
+await scenario('embedded', async () => {
+  const context = await browser.newContext();
+  const host = await context.newPage();
+  host.on('console', (message) => {
+    if (message.type() === 'error') console.error(`[host] ${message.text()}`);
+  });
+  await host.goto(`${api}/.rayfin-local/portal/embed?${new URLSearchParams({ app: appUrl })}`);
+  await host.waitForSelector('#username:enabled');
+  const framedBeforeSignIn = await host.$$eval('#frame iframe', (frames) => frames.length);
+  await host.fill('#username', env('RL_USER'));
+  await host.fill('#password', env('RL_PASSWORD'));
+  await host.click('#submit');
+  const first = await frameResult(host);
+  const user = await host.textContent('#bar-user');
+  // F5 keeps the sign-in: the app signs in again without the form.
+  await host.reload();
+  const reloaded = await frameResult(host);
+  const formAfterReload = await host.isVisible('#card');
+  await host.click('#reload-app');
+  const reloadedApp = await frameResult(host);
+  // Switch user: sign up on the host, and the app reloads as the new account.
+  await host.click('#switch-user');
+  await host.waitForSelector('#username:enabled');
+  await host.click('#tab-signup');
+  await host.fill('#username', env('RL_EMBED_USER'));
+  await host.fill('#password', 'embed secret');
+  await host.fill('#confirm', 'embed secret');
+  await host.click('#submit');
+  const switched = await frameResult(host);
+  const switchedUser = await host.textContent('#bar-user');
+  await context.close();
+  return { framedBeforeSignIn, first, user, reloaded, formAfterReload, reloadedApp, switched, switchedUser };
 });
 
 await browser.close();

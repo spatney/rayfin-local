@@ -1,11 +1,14 @@
-// The rayfin-local sign-in page: the popup `ensureSignedInWithFabric` opens. The handshake is
-// described in crates/rl-auth/src/portal.rs.
+// The rayfin-local sign-in page: the popup `ensureSignedInWithFabric` opens, or the local Fabric
+// host that frames an app using `initEmbeddedAuth` (`config.embed`). The handshakes are
+// described in crates/rl-auth/src/portal.rs and crates/rl-auth/src/portal/embed.rs.
 (() => {
   'use strict';
 
   const config = JSON.parse(document.getElementById('rl-config').textContent);
   const el = (id) => document.getElementById(id);
-  const opener = window.opener;
+  // On the Fabric host: { src: the app's URL in embedded mode, origin: the app's origin }.
+  const embed = config.embed || null;
+  const opener = embed ? null : window.opener;
   const READY_INTERVAL_MS = 500;
   const READY_ATTEMPTS = 20;
   const CANCELLED = 'Sign-in was cancelled.';
@@ -233,9 +236,31 @@
     window.close();
   }
 
+  // Where a sign-in goes and what it sends besides the credentials, or null while the page
+  // cannot sign in: the popup sends the app's challenge, the Fabric host asks for a session.
+  function signInRequest(path) {
+    if (embed) return { path: `embed/${path}`, body: {} };
+    if (finished || !challenge) return null;
+    return { path, body: challenge };
+  }
+
+  // Takes a successful sign-in's answer: a code for the app, or the Fabric host's session.
+  function signedIn(body) {
+    if (!body) return false;
+    if (embed) {
+      if (typeof body.hostToken !== 'string') return false;
+      startSession(body);
+      return true;
+    }
+    if (typeof body.handoffCode !== 'string') return false;
+    complete(body.handoffCode);
+    return true;
+  }
+
   async function onSubmit(event) {
     event.preventDefault();
-    if (busy || finished || !challenge) return;
+    const request = signInRequest(mode);
+    if (busy || !request) return;
     const username = el('username').value.trim();
     const password = el('password').value;
     if (!username || !password) {
@@ -250,12 +275,9 @@
     }
     showError('form-error', '');
     setBusy(true, mode === 'signup' ? 'Creating your account…' : 'Signing in…');
-    const answer = await api(mode, { ...challenge, username, password });
+    const answer = await api(request.path, { ...request.body, username, password });
     setBusy(false);
-    if (answer.ok && answer.body && typeof answer.body.handoffCode === 'string') {
-      complete(answer.body.handoffCode);
-      return;
-    }
+    if (answer.ok && signedIn(answer.body)) return;
     showError('form-error', answer.message);
     if (answer.status === 401) {
       el('password').select();
@@ -279,22 +301,21 @@
       return;
     }
     const body = answer.body || {};
-    const hint = body.hint || 'Sign in to the Azure CLI (`az login`), then open this window again.';
+    const again = embed ? 'reload this page' : 'open this window again';
+    const hint = body.hint || `Sign in to the Azure CLI (\`az login\`), then ${again}.`;
     el('entra-note').textContent = body.message
       ? `To continue with your Microsoft account: ${hint} (${body.message})`
       : `To continue with your Microsoft account: ${hint}`;
   }
 
   async function onEntra() {
-    if (busy || finished || !challenge || !identity) return;
+    const request = signInRequest('entra');
+    if (busy || !request || !identity) return;
     showError('entra-error', '');
     setBusy(true, 'Signing in with your Microsoft account…');
-    const answer = await api('entra', challenge);
+    const answer = await api(request.path, request.body);
     setBusy(false);
-    if (answer.ok && answer.body && typeof answer.body.handoffCode === 'string') {
-      complete(answer.body.handoffCode);
-      return;
-    }
+    if (answer.ok && signedIn(answer.body)) return;
     showError('entra-error', answer.message);
   }
 
@@ -303,11 +324,181 @@
     window.close();
   }
 
+  // ---- The local Fabric host ----
+
+  // The developer's session on this page ({ hostToken, user }), kept for the tab and the app.
+  const SESSION_KEY = embed ? `rayfin-local fabric host ${embed.origin}` : '';
+  const BRIDGE_CHANNEL = 'fabric-auth';
+  let session = null;
+  let frame = null;
+  let identityRequested = false;
+
+  function storedSession() {
+    try {
+      const value = JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null');
+      if (value && typeof value.hostToken === 'string') return value;
+    } catch {
+      // Nothing usable stored.
+    }
+    return null;
+  }
+
+  function describeUser(user) {
+    const { name, email, username } = user || {};
+    const account = email || username || '';
+    return name && name !== account ? `${name}${account ? ` (${account})` : ''}` : account;
+  }
+
+  function remember(value) {
+    session = value;
+    try {
+      if (value) sessionStorage.setItem(SESSION_KEY, JSON.stringify(value));
+      else sessionStorage.removeItem(SESSION_KEY);
+    } catch {
+      // No session storage: the sign-in lasts until the page reloads.
+    }
+    el('bar-user').textContent = value ? `Signed in as ${describeUser(value.user)}` : 'Not signed in';
+    el('reload-app').hidden = !value;
+    el('switch-user').hidden = !value;
+  }
+
+  // Loads the app in a new frame: no history entries, and the old frame's messages are ignored.
+  function loadApp() {
+    const next = document.createElement('iframe');
+    next.title = appLabel;
+    next.src = embed.src;
+    el('frame').replaceChildren(next);
+    frame = next;
+    el('card').hidden = true;
+    el('frame').hidden = false;
+  }
+
+  function showCard() {
+    el('frame').hidden = true;
+    el('card').hidden = false;
+  }
+
+  function showSignIn(note) {
+    showCard();
+    el('message').hidden = true;
+    el('signin').hidden = false;
+    el('fields').disabled = busy;
+    el('tabs').hidden = !config.signUp;
+    setStatus('');
+    showError('form-error', note || '');
+    updateEntraButton();
+    el('username').focus();
+    if (config.entra && !identityRequested) {
+      identityRequested = true;
+      loadIdentity();
+    }
+  }
+
+  function startSession(body) {
+    remember({ hostToken: body.hostToken, user: body.user || null });
+    el('password').value = '';
+    el('confirm').value = '';
+    loadApp();
+  }
+
+  function switchUser() {
+    remember(null);
+    el('frame').replaceChildren();
+    frame = null;
+    showSignIn('');
+  }
+
+  const refusal = (code, message) => ({ success: false, error: { code, message } });
+
+  // Answers the app's `auth.requestHandoff` with a code for the signed-in developer.
+  async function handOff(payload) {
+    if (!session) {
+      if (el('card').hidden || el('signin').hidden) showSignIn('');
+      return refusal('ACCESS_DENIED', 'Nobody is signed in on the rayfin-local Fabric host.');
+    }
+    const { callbackUrl, codeChallenge, codeChallengeMethod, state } = payload || {};
+    let target = null;
+    try {
+      target = new URL(callbackUrl).origin;
+    } catch {
+      // Refused below.
+    }
+    if (target !== embed.origin) {
+      return refusal(
+        'INVALID_REQUEST',
+        `The handoff request's callbackUrl (${callbackUrl}) is not the app's origin (${embed.origin}).`,
+      );
+    }
+    const answer = await api('embed/handoff', {
+      hostToken: session.hostToken,
+      returnOrigin: callbackUrl,
+      codeChallenge,
+      codeChallengeMethod,
+      state,
+    });
+    if (answer.ok && answer.body && typeof answer.body.handoffCode === 'string') {
+      return { success: true, result: { handoffCode: answer.body.handoffCode, state: answer.body.state } };
+    }
+    if (answer.status === 401) {
+      remember(null);
+      showSignIn(answer.message);
+    } else if (answer.status === 403) {
+      showCard();
+      showMessage('This page has expired', answer.message, false);
+    }
+    const code = answer.status === 401 || answer.status === 403
+      ? 'ACCESS_DENIED'
+      : (answer.body && answer.body.error) || 'HANDOFF_FAILED';
+    return refusal(code, answer.message);
+  }
+
+  async function onHostMessage(event) {
+    if (!frame || event.source !== frame.contentWindow || event.origin !== embed.origin) return;
+    const data = event.data;
+    if (!data || typeof data !== 'object' || typeof data.requestId !== 'string') return;
+    const { channel, kind, requestId } = data;
+    // The SDK's `externalEmbed.ready` goes unanswered, as in Fabric.
+    if (typeof kind !== 'string' || kind === 'response' || kind === 'externalEmbed.ready') return;
+    const source = event.source;
+    const outcome = channel === BRIDGE_CHANNEL && kind === 'auth.requestHandoff'
+      ? await handOff(data.payload)
+      : refusal('NOT_SUPPORTED', `rayfin-local's Fabric host doesn't support ${channel}/${kind}.`);
+    const reply = {
+      channel: typeof channel === 'string' ? channel : BRIDGE_CHANNEL,
+      version: 1,
+      kind: 'response',
+      requestId,
+      ...outcome,
+    };
+    try {
+      source.postMessage(reply, embed.origin);
+    } catch {
+      // The frame is gone.
+    }
+  }
+
+  function startHost() {
+    el('cancel').hidden = true;
+    el('target-origin').textContent = embed.origin;
+    el('target').hidden = false;
+    el('reload-app').addEventListener('click', loadApp);
+    el('switch-user').addEventListener('click', switchUser);
+    window.addEventListener('message', onHostMessage);
+    const stored = storedSession();
+    remember(stored);
+    if (stored) loadApp();
+    else showSignIn('');
+  }
+
   el('form').addEventListener('submit', onSubmit);
   el('tab-signin').addEventListener('click', () => setMode('signin'));
   el('tab-signup').addEventListener('click', () => setMode('signup'));
   el('tabs').addEventListener('keydown', onTabKey);
   el('entra-button').addEventListener('click', onEntra);
+  if (embed) {
+    startHost();
+    return;
+  }
   el('cancel').addEventListener('click', close);
   el('message-close').addEventListener('click', close);
   window.addEventListener('pagehide', reportFailure);

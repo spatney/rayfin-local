@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="robots" content="noindex">
+<title>{{title}}</title>
+<link rel="icon" href="data:,">
+<style nonce="{{nonce}}">{{style}}</style>
+<script type="application/json" id="rl-config">{{config}}</script>
+</head>
+<body class="host">
+<header class="bar">
+  <span class="bar-app">{{app}}</span>
+  <span class="bar-host">Local Fabric host · rayfin-local</span>
+  <span id="bar-user" class="bar-user"></span>
+  <button type="button" id="reload-app" class="bar-button" hidden>Reload app</button>
+  <button type="button" id="switch-user" class="bar-button" hidden>Switch user</button>
+</header>
+<div class="stage">
+{{card}}
+<div id="frame" class="frame" hidden></div>
+</div>
+<script nonce="{{nonce}}">{{script}}</script>
+</body>
+</html>

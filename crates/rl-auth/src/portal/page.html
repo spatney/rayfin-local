@@ -11,52 +11,7 @@
 <script type="application/json" id="rl-config">{{config}}</script>
 </head>
 <body>
-<main class="card" aria-labelledby="title">
-  <h1 id="title">{{title}}</h1>
-  <p id="target" class="target" hidden>for <span id="target-origin" class="origin"></span></p>
-  <p id="status" class="status" role="status" aria-live="polite">Connecting to the app…</p>
-
-  <section id="message" class="message" aria-labelledby="message-title" hidden>
-    <h2 id="message-title"></h2>
-    <p id="message-text"></p>
-    <button type="button" id="message-close" class="secondary" hidden>Close</button>
-  </section>
-
-  <section id="signin" hidden>
-    <div id="entra" class="entra" hidden>
-      <button type="button" id="entra-button" class="primary" disabled hidden></button>
-      <p id="entra-note" class="note">Checking your Azure CLI sign-in…</p>
-      <p id="entra-error" class="error" role="alert" hidden></p>
-      <p class="divider"><span>or</span></p>
-    </div>
-
-    <div id="tabs" class="tabs" role="tablist" aria-label="Account">
-      <button type="button" role="tab" id="tab-signin" aria-selected="true" aria-controls="form">Sign in</button>
-      <button type="button" role="tab" id="tab-signup" aria-selected="false" aria-controls="form" tabindex="-1">Create account</button>
-    </div>
-
-    <form id="form" role="tabpanel" aria-labelledby="tab-signin" novalidate>
-      <fieldset id="fields" disabled>
-        <label for="username">Username or email</label>
-        <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
-        <label for="password">Password</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required>
-        <div id="confirm-row" hidden>
-          <label for="confirm">Confirm password</label>
-          <input id="confirm" name="confirm" type="password" autocomplete="new-password">
-        </div>
-        <p id="form-error" class="error" role="alert" hidden></p>
-        <button type="submit" id="submit" class="primary">Sign in</button>
-      </fieldset>
-    </form>
-    <button type="button" id="cancel" class="link">Cancel</button>
-  </section>
-
-  <section id="done" hidden>
-    <h2>You're signed in</h2>
-    <p>Return to the app. You can close this window.</p>
-  </section>
-</main>
+{{card}}
 <footer>rayfin-local — local development sign-in</footer>
 <script nonce="{{nonce}}">{{script}}</script>
 </body>

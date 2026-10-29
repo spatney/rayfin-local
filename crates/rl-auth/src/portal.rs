@@ -21,6 +21,11 @@
 //!
 //! The JSON endpoints serve the page only: they need its CSRF token (`X-Rayfin-Local-CSRF`) and
 //! an `Origin` equal to the portal's own; "Continue as" also needs a loopback `Host`.
+//!
+//! The portal also hosts apps that sign in with `initEmbeddedAuth`, as Fabric does: see
+//! [`embed`] and [`EMBED_HOST_PATH`].
+
+mod embed;
 
 use std::sync::Arc;
 
@@ -49,6 +54,10 @@ use crate::{
 /// Where the sign-in portal lives on the backend: the app's `fabricPortalUrl` is
 /// `<api origin>` + this.
 pub const PORTAL_PATH: &str = "/.rayfin-local/portal";
+/// The local Fabric host: a page that runs the app in a frame, in embedded mode, and signs it
+/// in like Fabric does for apps using `initEmbeddedAuth`. `?app=<url>` names the app; without
+/// it, the page frames the one set with [`AuthService::set_embed_app_url`].
+pub const EMBED_HOST_PATH: &str = "/.rayfin-local/portal/embed";
 const API_PATH: &str = "/.rayfin-local/portal/api";
 const CSRF_HEADER: &str = "x-rayfin-local-csrf";
 const CSRF_CONTEXT: &[u8] = b"rayfin-local portal csrf v1\n";
@@ -57,27 +66,34 @@ const CSRF_LIFETIME_MS: i64 = 60 * 60 * 1000;
 const MAX_STATE_CHARS: usize = 512;
 
 const PAGE: &str = include_str!("portal/page.html");
+const CARD: &str = include_str!("portal/card.html");
 const STYLE: &str = include_str!("portal/page.css");
 const SCRIPT: &str = include_str!("portal/page.js");
 
 type AppState = State<Arc<AuthService>>;
 
 /// The portal's state: the key of its CSRF tokens (new on every start, so pages from a previous
-/// run are refused).
+/// run are refused), and the local Fabric host's.
 pub(crate) struct Portal {
     csrf_key: hmac::Key,
+    host: embed::Host,
 }
 
 impl Portal {
     pub(crate) fn new() -> Result<Self, AuthError> {
         Ok(Self {
             csrf_key: hmac::Key::new(hmac::HMAC_SHA256, &random_bytes::<32>()?),
+            host: embed::Host::default(),
         })
     }
 
-    /// `<random>.<issued at ms>.<HMAC>`.
-    fn csrf_token(&self, now_ms: i64) -> Result<String, AuthError> {
-        let body = format!("{}.{now_ms}", b64url(&random_bytes::<16>()?));
+    /// `<random>.<expires at ms>.<HMAC>`: each page says how long it can be used.
+    fn csrf_token(&self, now_ms: i64, lifetime_ms: i64) -> Result<String, AuthError> {
+        let body = format!(
+            "{}.{}",
+            b64url(&random_bytes::<16>()?),
+            now_ms + lifetime_ms
+        );
         let tag = hmac::sign(&self.csrf_key, &[CSRF_CONTEXT, body.as_bytes()].concat());
         Ok(format!("{body}.{}", b64url(tag.as_ref())))
     }
@@ -94,9 +110,8 @@ impl Portal {
             return false;
         }
         body.split_once('.')
-            .and_then(|(_, issued)| issued.parse::<i64>().ok())
-            // A minute of slack for a clock that steps back.
-            .is_some_and(|issued| issued <= now_ms + 60_000 && now_ms - issued <= CSRF_LIFETIME_MS)
+            .and_then(|(_, expires)| expires.parse::<i64>().ok())
+            .is_some_and(|expires| now_ms <= expires)
     }
 }
 
@@ -115,6 +130,20 @@ pub(crate) fn routes() -> Router<Arc<AuthService>> {
         .route("/.rayfin-local/portal/api/signin", post(sign_in))
         .route("/.rayfin-local/portal/api/signup", post(sign_up))
         .route("/.rayfin-local/portal/api/entra", post(continue_as_entra))
+        .route(EMBED_HOST_PATH, get(embed::host_page))
+        .route(
+            "/.rayfin-local/portal/api/embed/signin",
+            post(embed::sign_in),
+        )
+        .route(
+            "/.rayfin-local/portal/api/embed/signup",
+            post(embed::sign_up),
+        )
+        .route("/.rayfin-local/portal/api/embed/entra", post(embed::entra))
+        .route(
+            "/.rayfin-local/portal/api/embed/handoff",
+            post(embed::handoff),
+        )
         .layer(middleware::map_response(protect))
 }
 
@@ -181,10 +210,11 @@ impl AuthService {
     /// per-response CSP nonce.
     fn portal_page(&self) -> Result<Response, AuthError> {
         let nonce = b64url(&random_bytes::<16>()?);
-        let csrf = self.portal.csrf_token(self.now_ms())?;
+        let csrf = self.portal.csrf_token(self.now_ms(), CSRF_LIFETIME_MS)?;
         let app_name = self.settings.app_name.as_deref();
-        let title =
-            app_name.map_or_else(|| "Sign in".to_owned(), |name| format!("Sign in to {name}"));
+        let title = escape_html(
+            &app_name.map_or_else(|| "Sign in".to_owned(), |name| format!("Sign in to {name}")),
+        );
         let config = json!({
             "csrf": csrf,
             "api": API_PATH,
@@ -197,38 +227,28 @@ impl AuthService {
             PAGE,
             &[
                 ("nonce", &nonce),
-                ("title", &escape_html(&title)),
+                ("title", &title),
                 ("config", &script_json(&config)),
                 ("style", STYLE),
+                ("card", &fill(CARD, &[("heading", &title)])),
                 ("script", SCRIPT),
             ],
         );
-        let csp = format!(
-            "default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; \
-             img-src data:; connect-src 'self'; base-uri 'none'; form-action 'none'; \
-             frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'"
-        );
-        Response::builder()
-            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
-            .header(header::CONTENT_SECURITY_POLICY, csp)
-            .header(header::X_FRAME_OPTIONS, "DENY")
-            .header(header::REFERRER_POLICY, "no-referrer")
-            .header("cross-origin-resource-policy", "same-origin")
-            .body(Body::from(html))
-            .map_err(|_| AuthError::Crypto("could not build the sign-in page"))
+        html_page(StatusCode::OK, &page_csp(&nonce, None), html)
     }
 
     /// The checks of every JSON endpoint: auth is on, and the request comes from the portal's
     /// own page (its CSRF token, and an `Origin` equal to the portal's). Returns the `Host`.
     fn portal_request(&self, headers: &HeaderMap, uri: &Uri) -> Result<String, ApiError> {
         self.require_enabled()?;
-        let host = headers
-            .get(header::HOST)
-            .and_then(|value| value.to_str().ok())
-            .or_else(|| uri.authority().map(|authority| authority.as_str()))
-            .map(str::trim)
-            .filter(|host| !host.is_empty())
-            .ok_or_else(not_from_the_page)?;
+        self.page_request(headers, uri)
+            .ok_or_else(not_from_the_page)
+    }
+
+    /// The `Host` of a request from one of the portal's pages: one with a page's CSRF token,
+    /// and an `Origin` equal to the portal's.
+    fn page_request(&self, headers: &HeaderMap, uri: &Uri) -> Option<String> {
+        let host = request_host(headers, uri)?;
         let same_origin = headers
             .get(header::ORIGIN)
             .and_then(|value| value.to_str().ok())
@@ -240,11 +260,8 @@ impl AuthService {
         let token = headers
             .get(CSRF_HEADER)
             .and_then(|value| value.to_str().ok());
-        if !same_origin || !token.is_some_and(|token| self.portal.csrf_valid(token, self.now_ms()))
-        {
-            return Err(not_from_the_page());
-        }
-        Ok(host.to_owned())
+        (same_origin && token.is_some_and(|token| self.portal.csrf_valid(token, self.now_ms())))
+            .then(|| host.to_owned())
     }
 
     /// The app's challenge, checked like the real broker checks it.
@@ -288,29 +305,32 @@ impl AuthService {
                 "returnOrigin must be the app's http(s) origin, such as http://localhost:5173.",
             ));
         };
-        let own = ["http", "https"]
-            .iter()
-            .filter_map(|scheme| web_origin(&format!("{scheme}://{host}")))
-            .any(|own| own == origin);
+        if self.may_sign_in(&origin, Some(host)) {
+            return Ok(origin);
+        }
+        Err(error(
+            StatusCode::BAD_REQUEST,
+            "invalid_return_origin",
+            cannot_sign_in(&origin),
+        ))
+    }
+
+    /// Whether apps on `origin` (from [`web_origin`]) may be signed in, for a portal reached on
+    /// `host`.
+    fn may_sign_in(&self, origin: &str, host: Option<&str>) -> bool {
+        let own = host.is_some_and(|host| {
+            ["http", "https"]
+                .iter()
+                .filter_map(|scheme| web_origin(&format!("{scheme}://{host}")))
+                .any(|own| own == origin)
+        });
         let listed = self
             .settings
             .allowed_redirect_uris
             .iter()
             .filter_map(|uri| web_origin(uri))
             .any(|allowed| allowed == origin);
-        if is_loopback_origin(&origin) || own || listed {
-            return Ok(origin);
-        }
-        Err(error(
-            StatusCode::BAD_REQUEST,
-            "invalid_return_origin",
-            format!(
-                "{origin} cannot receive sign-ins. rayfin-local signs in apps on this machine \
-                 (localhost, 127.0.0.1, [::1]) and on the origins listed in \
-                 services.auth.allowedRedirectUris in rayfin/rayfin.yml: open the app on \
-                 localhost, or add {origin} there."
-            ),
-        ))
+        is_loopback_origin(origin) || own || listed
     }
 
     fn portal_challenge(
@@ -333,13 +353,19 @@ impl AuthService {
         let host = self.portal_request(headers, uri)?;
         let fields = Fields::json(body)?;
         let request = self.handoff_request(&fields, &host)?;
-        let (Some(username), Some(password)) = credentials(&fields)? else {
+        let user = self.password_user(&fields).await?;
+        self.handoff(&user, &request).await
+    }
+
+    /// The user whose username and password `fields` carry.
+    async fn password_user(&self, fields: &Fields) -> Result<User, ApiError> {
+        let (Some(username), Some(password)) = credentials(fields)? else {
             return Err(ApiError::invalid_request(
                 "Enter your username and password.",
             ));
         };
         match self.verify_password(username, password).await {
-            Ok(user) => self.handoff(&user, &request).await,
+            Ok(user) => Ok(user),
             Err(AuthError::InvalidCredentials) => Err(error(
                 StatusCode::UNAUTHORIZED,
                 "invalid_credentials",
@@ -356,23 +382,34 @@ impl AuthService {
         body: &[u8],
     ) -> Result<Value, ApiError> {
         let host = self.portal_request(headers, uri)?;
-        if !self.settings.signup_enabled {
-            return Err(error(
-                StatusCode::FORBIDDEN,
-                "signup_disabled",
-                "Creating accounts is turned off for this app. Ask the developer for an account \
-                 (`rayfin-local users add`).",
-            ));
-        }
+        self.require_sign_up()?;
         let fields = Fields::json(body)?;
         let request = self.handoff_request(&fields, &host)?;
-        let (Some(username), Some(password)) = credentials(&fields)? else {
+        let user = self.new_user(&fields).await?;
+        self.handoff(&user, &request).await
+    }
+
+    fn require_sign_up(&self) -> Result<(), ApiError> {
+        if self.settings.signup_enabled {
+            return Ok(());
+        }
+        Err(error(
+            StatusCode::FORBIDDEN,
+            "signup_disabled",
+            "Creating accounts is turned off for this app. Ask the developer for an account \
+             (`rayfin-local users add`).",
+        ))
+    }
+
+    /// Creates the account whose username and password `fields` carry.
+    async fn new_user(&self, fields: &Fields) -> Result<User, ApiError> {
+        let (Some(username), Some(password)) = credentials(fields)? else {
             return Err(ApiError::invalid_request(
                 "Choose a username and a password.",
             ));
         };
         match self.create_user(username, password).await {
-            Ok(user) => self.handoff(&user, &request).await,
+            Ok(user) => Ok(user),
             Err(AuthError::UsernameTaken) => Err(error(
                 StatusCode::CONFLICT,
                 "user_exists",
@@ -430,6 +467,12 @@ impl AuthService {
         let host = self.portal_request(headers, uri)?;
         self.require_entra_portal(&host)?;
         let request = self.handoff_request(&Fields::json(body)?, &host)?;
+        let user = self.developer_user().await?;
+        self.handoff(&user, &request).await
+    }
+
+    /// The developer's user, from their Azure sign-in (created on first use).
+    async fn developer_user(&self) -> Result<User, ApiError> {
         let identity = self.developer_identity().await.map_err(|failure| {
             let message = match failure.hint {
                 Some(hint) => format!(
@@ -444,15 +487,13 @@ impl AuthService {
                 message,
             )
         })?;
-        let user = self
-            .find_or_create_external_user(
-                &identity.object_id,
-                identity.email.as_deref(),
-                identity.name.as_deref(),
-            )
-            .await
-            .map_err(|failure| ApiError::internal(&failure))?;
-        self.handoff(&user, &request).await
+        self.find_or_create_external_user(
+            &identity.object_id,
+            identity.email.as_deref(),
+            identity.name.as_deref(),
+        )
+        .await
+        .map_err(|failure| ApiError::internal(&failure))
     }
 
     async fn handoff(&self, user: &User, request: &HandoffRequest) -> Result<Value, ApiError> {
@@ -470,6 +511,49 @@ fn credentials(fields: &Fields) -> Result<(Option<&str>, Option<&str>), ApiError
         .text("password")?
         .filter(|password| !password.is_empty());
     Ok((username, password))
+}
+
+fn cannot_sign_in(origin: &str) -> String {
+    format!(
+        "{origin} cannot receive sign-ins. rayfin-local signs in apps on this machine \
+         (localhost, 127.0.0.1, [::1]) and on the origins listed in \
+         services.auth.allowedRedirectUris in rayfin/rayfin.yml: open the app on localhost, or \
+         add {origin} there."
+    )
+}
+
+/// The request's `Host` (`name[:port]`).
+fn request_host<'a>(headers: &'a HeaderMap, uri: &'a Uri) -> Option<&'a str> {
+    headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| uri.authority().map(|authority| authority.as_str()))
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+}
+
+/// The CSP of the portal's pages: only their own nonced style and script run, they only call
+/// their own origin, nothing frames them, and they frame `frame_src` only (the Fabric host's
+/// app).
+fn page_csp(nonce: &str, frame_src: Option<&str>) -> String {
+    let frames = frame_src.map_or_else(String::new, |source| format!("frame-src {source}; "));
+    format!(
+        "default-src 'none'; script-src 'nonce-{nonce}'; style-src 'nonce-{nonce}'; \
+         img-src data:; connect-src 'self'; {frames}base-uri 'none'; form-action 'none'; \
+         frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'"
+    )
+}
+
+fn html_page(status: StatusCode, csp: &str, html: String) -> Result<Response, AuthError> {
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CONTENT_SECURITY_POLICY, csp)
+        .header(header::X_FRAME_OPTIONS, "DENY")
+        .header(header::REFERRER_POLICY, "no-referrer")
+        .header("cross-origin-resource-policy", "same-origin")
+        .body(Body::from(html))
+        .map_err(|_| AuthError::Crypto("could not build the sign-in page"))
 }
 
 /// `template` with each `{{name}}` replaced by its value, in one pass (values are not scanned).
@@ -534,11 +618,11 @@ mod tests {
         util::sha256,
     };
 
-    const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
-    const HOST: &str = "localhost:7171";
-    const APP_ORIGIN: &str = "http://localhost:5175";
+    pub(super) const VERIFIER: &str = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    pub(super) const HOST: &str = "localhost:7171";
+    pub(super) const APP_ORIGIN: &str = "http://localhost:5175";
 
-    fn challenge() -> Value {
+    pub(super) fn challenge() -> Value {
         json!({
             "codeChallenge": b64url(&sha256(VERIFIER.as_bytes())),
             "codeChallengeMethod": "S256",
@@ -547,14 +631,14 @@ mod tests {
         })
     }
 
-    fn with(mut body: Value, extra: Value) -> Value {
+    pub(super) fn with(mut body: Value, extra: Value) -> Value {
         for (name, value) in extra.as_object().unwrap() {
             body[name] = value.clone();
         }
         body
     }
 
-    async fn portal_app(settings: AuthSettings) -> App {
+    pub(super) async fn portal_app(settings: AuthSettings) -> App {
         let (dir, auth) = service_with(settings).await;
         app_from(dir, auth)
     }
@@ -576,7 +660,7 @@ mod tests {
         (page, csrf)
     }
 
-    fn between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
+    pub(super) fn between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
         let from = text.find(start).unwrap() + start.len();
         &text[from..from + text[from..].find(end).unwrap()]
     }
@@ -591,7 +675,7 @@ mod tests {
         call_on(app, HOST, endpoint, csrf, origin, body).await
     }
 
-    async fn call_on(
+    pub(super) async fn call_on(
         app: &App,
         host: &str,
         endpoint: &str,
@@ -624,7 +708,12 @@ mod tests {
         .await
     }
 
-    async fn redeem(app: &App, code: &str, verifier: &str, redirect_uri: &str) -> Answer {
+    pub(super) async fn redeem(
+        app: &App,
+        code: &str,
+        verifier: &str,
+        redirect_uri: &str,
+    ) -> Answer {
         app.post(
             "/api/auth/v1/token",
             json!({

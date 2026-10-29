@@ -43,7 +43,8 @@ impl AuthService {
     /// - [`JWKS_PATH`] and [`RUNTIME_SETTINGS_PATH`]
     /// - `POST /api/auth/v1/brokered/token`: the external Entra exchange, when
     ///   [`crate::EntraSettings::enabled`]
-    /// - the sign-in portal under [`crate::PORTAL_PATH`] (the app's `fabricPortalUrl`)
+    /// - the sign-in portal under [`crate::PORTAL_PATH`] (the app's `fabricPortalUrl`), with the
+    ///   local Fabric host at [`crate::EMBED_HOST_PATH`]
     /// - the routes of features rayfin-local lacks (magic links, email verification, password
     ///   reset email), answering as the real service does when the feature is disabled
     ///

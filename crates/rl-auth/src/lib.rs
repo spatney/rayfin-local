@@ -1,6 +1,7 @@
 //! Rayfin auth, locally: users with username/password, sessions as ES256 JWTs with rotating
-//! refresh tokens, JWKS, the Fabric sign-in popup emulation (`ensureSignedInWithFabric`), and
-//! the Entra token exchange. Implements [`rl_model::CallerResolver`] for the other routes.
+//! refresh tokens, JWKS, the Fabric sign-in popup emulation (`ensureSignedInWithFabric`), a
+//! local Fabric host for embedded apps (`initEmbeddedAuth`), and the Entra token exchange.
+//! Implements [`rl_model::CallerResolver`] for the other routes.
 //!
 //! The wire contract is the real Rayfin auth service's, as the SDK 1.36.2 sees it: see
 //! [`AuthService::router`] for the routes.
@@ -30,7 +31,7 @@ use std::{
 use rl_db::Db;
 
 pub use error::AuthError;
-pub use portal::PORTAL_PATH;
+pub use portal::{EMBED_HOST_PATH, PORTAL_PATH};
 pub use routes::{JWKS_PATH, RUNTIME_SETTINGS_PATH};
 pub use sessions::TokenResponse;
 pub use settings::{AuthSettings, EntraSettings};
