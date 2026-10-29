@@ -359,6 +359,12 @@ impl AuthService {
                 "Email and password are required for password grant",
             ));
         };
+        if let Some(user) = self.auto_create(email, password).await? {
+            return self
+                .issue_session(&user)
+                .await
+                .map_err(|error| ApiError::internal(&error));
+        }
         let user = match self.verify_password(email, password).await {
             Ok(user) => user,
             Err(AuthError::InvalidCredentials) => {
@@ -373,6 +379,38 @@ impl AuthService {
         self.issue_session(&user)
             .await
             .map_err(|error| ApiError::internal(&error))
+    }
+
+    /// Creates the account for a password sign-in to an email that has none, when
+    /// [`AuthSettings::auto_create_users`] and sign-up allow it. `None` leaves the sign-in to the
+    /// usual checks (an existing account, or credentials sign-up would refuse).
+    async fn auto_create(&self, email: &str, password: &str) -> Result<Option<User>, ApiError> {
+        if !(self.settings.auto_create_users
+            && self.settings.signup_enabled
+            && self.settings.password_enabled)
+        {
+            return Ok(None);
+        }
+        let exists = self
+            .find_user(email)
+            .await
+            .map_err(|error| ApiError::internal(&error))?
+            .is_some();
+        if exists {
+            return Ok(None);
+        }
+        match self.create_user(email, password).await {
+            Ok(user) => {
+                tracing::info!(
+                    "Created a local user on its first password sign-in (turn this off with \
+                     `[auth] auto_create_users = false` in rayfin-local.toml)"
+                );
+                Ok(Some(user))
+            }
+            // Raced with another sign-in, or input sign-up refuses: the usual checks answer.
+            Err(AuthError::UsernameTaken | AuthError::InvalidInput(_)) => Ok(None),
+            Err(error) => Err(ApiError::internal(&error)),
+        }
     }
 
     async fn refresh_grant(&self, fields: &Fields) -> Result<TokenResponse, ApiError> {
@@ -678,6 +716,38 @@ pub(crate) mod tests {
                 error("invalid_grant", "Invalid email or password")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn auto_create_signs_in_new_emails_but_not_wrong_passwords() {
+        let mut settings = AuthSettings::new(APP_ID);
+        settings.auto_create_users = true;
+        let app = app_with(settings).await;
+
+        let first = app.sign_in("dev@contoso.com", "LocalDev!Pass123").await;
+        assert_eq!(first.status, StatusCode::OK);
+        assert!(app.auth.resolve(Some(text(&first, "accessToken"))).is_ok());
+        let again = app.sign_in("DEV@contoso.com", "LocalDev!Pass123").await;
+        assert_eq!(again.status, StatusCode::OK);
+
+        let wrong = app.sign_in("dev@contoso.com", "not the password").await;
+        assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            wrong.body,
+            error("invalid_grant", "Invalid email or password")
+        );
+        assert_eq!(app.auth.list_users().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_create_respects_sign_up_being_off() {
+        let mut settings = AuthSettings::new(APP_ID);
+        settings.auto_create_users = true;
+        settings.signup_enabled = false;
+        let app = app_with(settings).await;
+        let answer = app.sign_in("dev@contoso.com", "LocalDev!Pass123").await;
+        assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
+        assert!(app.auth.list_users().await.unwrap().is_empty());
     }
 
     #[tokio::test]

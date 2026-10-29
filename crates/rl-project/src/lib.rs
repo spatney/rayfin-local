@@ -39,7 +39,7 @@ pub use env::{
 };
 pub use error::ProjectError;
 pub use local_config::{
-    LocalConfig, LocalConnectorsConfig, LocalFrontendConfig, LocalFunctionsConfig,
+    LocalAuthConfig, LocalConfig, LocalConnectorsConfig, LocalFrontendConfig, LocalFunctionsConfig,
     LocalServerConfig, LocalTokensConfig, TokenSourceKind,
 };
 pub use package::{

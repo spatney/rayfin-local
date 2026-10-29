@@ -30,6 +30,12 @@ pub struct AuthSettings {
     pub password_enabled: bool,
     /// Local only: whether anyone may sign up (`POST /signup`). On by default.
     pub signup_enabled: bool,
+    /// Local only: a password sign-in for an email with no account creates the account (when
+    /// sign-up is allowed) instead of answering `invalid_grant`. Many app templates sign in to a
+    /// local backend with a fixed dev account and fall back to `signUp` on `INVALID_GRANT`, a
+    /// fallback that never runs with SDK 1.36.2 (`@microsoft/rayfin-client` exports its own
+    /// `AuthError` class, not the one the auth module throws). Off in [`AuthSettings::new`].
+    pub auto_create_users: bool,
     /// `fabric.enabled`: "Sign in with Fabric" (the broker popup).
     pub fabric_enabled: bool,
     /// `fabric.externalEntraExchange`: `POST /api/auth/v1/brokered/token`.
@@ -125,6 +131,7 @@ impl AuthSettings {
             session_absolute_lifetime_minutes: None,
             password_enabled: true,
             signup_enabled: true,
+            auto_create_users: false,
             fabric_enabled: false,
             external_entra_exchange: false,
             email_enabled: false,

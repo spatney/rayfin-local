@@ -117,6 +117,9 @@ With `--static`, rayfin-local builds the app once with `services.staticHosting.b
 Users are local: they live in `.rayfin-local/db.sqlite`, not in Entra ID.
 
 - **Username and password.** The app's own sign-up and sign-in work as on Fabric, with any username or email address.
+  One local difference: a password sign-in for an email that has no account creates the account (a wrong password for an existing account is still refused).
+  Many app templates sign in to a local backend with a fixed dev account (`MockAuthService`) and rely on a sign-up fallback that SDK 1.36.2 never reaches, because `@microsoft/rayfin-client` exports a different `AuthError` class from the one its auth module throws.
+  Turn this off with `[auth] auto_create_users = false` in `rayfin-local.toml`.
 - **"Sign in with Fabric".** `ensureSignedInWithFabric` opens rayfin-local's sign-in page (`/.rayfin-local/portal`) in the popup instead of the Fabric portal.
   There you can sign in with a local user, create one, or choose **Continue as &lt;you&gt;** to sign in as your own Entra user (the account of your `az` or Rayfin CLI login).
   "Continue as" is offered only when the backend listens on a loopback address.
@@ -221,6 +224,9 @@ powerbi_base_url = "https://api.powerbi.com"   # for mocks and sovereign clouds
 
 [functions]
 inspect_port = 9229     # --inspect
+
+[auth]
+auto_create_users = true   # a password sign-in to an unknown email creates the account
 ```
 
 A port set by a flag or in this file must be free, or `serve` stops with an error; remembered and default ports move to the next free one.

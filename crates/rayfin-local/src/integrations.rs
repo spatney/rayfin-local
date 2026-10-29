@@ -174,6 +174,11 @@ pub fn auth_settings(project: &Project, app_id: &str, loopback: bool) -> AuthSet
     settings.scopes = auth.scopes.clone();
     settings.app_name = Some(project.display_name().to_owned());
     settings.entra_signin.enabled = loopback;
+    settings.auto_create_users = project
+        .local_config()
+        .auth
+        .auto_create_users
+        .unwrap_or(true);
     settings
 }
 

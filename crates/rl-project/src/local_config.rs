@@ -45,6 +45,16 @@ pub struct LocalConfig {
     pub connectors: LocalConnectorsConfig,
     #[serde(default)]
     pub functions: LocalFunctionsConfig,
+    #[serde(default)]
+    pub auth: LocalAuthConfig,
+}
+
+/// `[auth]`: local sign-in.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalAuthConfig {
+    /// Create the account on a password sign-in to an unknown email (default on).
+    pub auto_create_users: Option<bool>,
 }
 
 /// `[server]`: the backend.
@@ -185,7 +195,7 @@ mod tests {
             "[server]\nport = 7200\nhost = \"0.0.0.0\"\n[frontend]\nport = 5180\n[tokens]\n\
              source = \"az\"\ntenant = \"t\"\n[tokens.scopes]\nAzureAI = \"s/.default\"\n\
              [connectors]\npowerbi_base_url = \"http://127.0.0.1:9000\"\n[functions]\n\
-             inspect_port = 9230\n",
+             inspect_port = 9230\n[auth]\nauto_create_users = false\n",
         )
         .unwrap();
         assert_eq!(config.server.port, Some(7200));
@@ -198,6 +208,7 @@ mod tests {
             Some("http://127.0.0.1:9000")
         );
         assert_eq!(config.functions.inspect_port, Some(9230));
+        assert_eq!(config.auth.auto_create_users, Some(false));
         assert_eq!(parse("").unwrap(), LocalConfig::default());
     }
 
