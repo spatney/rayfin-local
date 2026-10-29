@@ -1274,7 +1274,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rayfin-local"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1390,7 +1390,7 @@ dependencies = [
 
 [[package]]
 name = "rl-auth"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "argon2",
  "axum",
@@ -1419,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "rl-connectors"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "axum",
  "base64",
@@ -1441,7 +1441,7 @@ dependencies = [
 
 [[package]]
 name = "rl-db"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "parking_lot",
  "rl-model",
@@ -1458,7 +1458,7 @@ dependencies = [
 
 [[package]]
 name = "rl-frontend"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "axum",
  "dunce",
@@ -1476,7 +1476,7 @@ dependencies = [
 
 [[package]]
 name = "rl-functions"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "axum",
  "bytes",
@@ -1499,7 +1499,7 @@ dependencies = [
 
 [[package]]
 name = "rl-graphql"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "async-graphql-parser",
  "axum",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "rl-model"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "indexmap",
  "serde",
@@ -1536,7 +1536,7 @@ dependencies = [
 
 [[package]]
 name = "rl-node"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "hex",
  "libc",
@@ -1553,7 +1553,7 @@ dependencies = [
 
 [[package]]
 name = "rl-project"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "dunce",
  "ring",
@@ -1569,7 +1569,7 @@ dependencies = [
 
 [[package]]
 name = "rl-server"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "axum",
  "http-body-util",
@@ -1585,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "rl-storage"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "axum",
  "base64",
@@ -1612,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "rl-tokens"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 dependencies = [
  "base64",
  "rl-node",
