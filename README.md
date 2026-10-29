@@ -123,18 +123,49 @@ It is tested with the real 1.36.2 SDK, and end to end with real apps.
 
 ## Install
 
-rayfin-local is a single binary.
-Build it from source with [Rust](https://rustup.rs) 1.96 or later:
+**macOS and Linux:**
 
 ```sh
-git clone <this repository>
-cd rayfin-local
-cargo install --locked --path crates/rayfin-local
+curl -fsSL https://raw.githubusercontent.com/spatney/rayfin-local/main/install.sh | sh
 ```
 
-The repository's release workflow also attaches prebuilt binaries for Windows (x64), Linux (x64) and macOS (Apple silicon and Intel) to its GitHub releases.
-Put the binary on your `PATH`, and check it against `SHA256SUMS.txt` (`sha256sum -c --ignore-missing SHA256SUMS.txt`, or `Get-FileHash <archive>` in PowerShell).
-The macOS binaries are not notarized: if Gatekeeper blocks one, run `xattr -d com.apple.quarantine rayfin-local`.
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/spatney/rayfin-local/main/install.ps1 | iex
+```
+
+The script downloads the latest [release](https://github.com/spatney/rayfin-local/releases) for your platform, checks it against the release's `SHA256SUMS.txt`, and installs the `rayfin-local` binary:
+
+- **macOS and Linux:** into `~/.local/bin`. If that folder isn't on your `PATH`, the script prints the line to add to your shell's profile.
+- **Windows:** into `%LOCALAPPDATA%\Programs\rayfin-local`, which it adds to your user `PATH`. Open a new terminal to pick it up there.
+
+Then check it with `rayfin-local --version`.
+Run the script again to update.
+`RAYFIN_LOCAL_VERSION` installs a given version and `RAYFIN_LOCAL_INSTALL_DIR` picks another folder:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/spatney/rayfin-local/main/install.sh | RAYFIN_LOCAL_VERSION=0.1.0 sh
+```
+
+```powershell
+$env:RAYFIN_LOCAL_VERSION = '0.1.0'; irm https://raw.githubusercontent.com/spatney/rayfin-local/main/install.ps1 | iex
+```
+
+| Platform | Release build |
+| --- | --- |
+| Windows x64 (and Windows on ARM, through emulation) | `x86_64-pc-windows-msvc` |
+| macOS on Apple silicon or Intel | `aarch64-apple-darwin`, `x86_64-apple-darwin` |
+| Linux x64 or ARM64 with glibc 2.35 or later (Ubuntu 22.04, Debian 12, Fedora 36, RHEL 9 or newer) | `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` |
+
+Other ways to install:
+
+- **Download** the archive for your platform from the [releases page](https://github.com/spatney/rayfin-local/releases), check it against `SHA256SUMS.txt` (`sha256sum -c --ignore-missing SHA256SUMS.txt`, or `Get-FileHash` in PowerShell), and put `rayfin-local` on your `PATH`.
+  The macOS binaries are not notarized: if Gatekeeper blocks one you downloaded with a browser, run `xattr -d com.apple.quarantine rayfin-local`.
+- **From source**, with [Rust](https://rustup.rs) 1.96 or later, for other platforms such as Alpine Linux:
+  `cargo install --locked --git https://github.com/spatney/rayfin-local rayfin-local`.
+
+To uninstall, delete the binary. On Windows, also remove `%LOCALAPPDATA%\Programs\rayfin-local` from your user `PATH`.
 
 ### Requirements
 

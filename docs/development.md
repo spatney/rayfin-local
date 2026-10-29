@@ -161,6 +161,13 @@ The essentials of [`AGENTS.md`](../AGENTS.md):
 The [release workflow](../.github/workflows/release.yml) then:
 
 - checks that the tag matches the crate version;
-- builds `rayfin-local` with Rust 1.96.0 for `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin` and `x86_64-apple-darwin`;
+- builds `rayfin-local` with Rust 1.96.0 for `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin` and `x86_64-apple-darwin` (the Linux builds run on Ubuntu 22.04, which sets their glibc requirement, and print it);
 - packages each binary with `README.md` and `LICENSE` as `rayfin-local-<version>-<target>.zip` (Windows) or `.tar.gz`;
-- publishes a GitHub Release with the archives and `SHA256SUMS.txt`, marked as a prerelease when the tag has a `-` suffix.
+- publishes a GitHub Release with the archives, `SHA256SUMS.txt`, `install.sh` and `install.ps1`, marked as a prerelease when the tag has a `-` suffix;
+- installs the published release with `install.sh` on Linux (x64 and ARM64) and macOS, and with `install.ps1` on Windows (PowerShell 7, and Windows PowerShell 5.1 through `irm | iex`), and checks the installed version. For a final release, it also checks that the scripts install it as the latest release.
+
+The README's one-line installers fetch `install.sh` and `install.ps1` from the `main` branch, and those install the latest release (prereleases excluded) unless `RAYFIN_LOCAL_VERSION` is set.
+Keep the scripts compatible with the releases they may install: they expect the archive names above and `SHA256SUMS.txt`.
+
+To try the scripts before a release, run them against an existing one: `RAYFIN_LOCAL_VERSION=<version> RAYFIN_LOCAL_INSTALL_DIR=/tmp/rl sh install.sh`, or in PowerShell set `$env:RAYFIN_LOCAL_VERSION`, `$env:RAYFIN_LOCAL_INSTALL_DIR` and `$env:RAYFIN_LOCAL_NO_MODIFY_PATH = '1'`, then run `./install.ps1`.
+Lint them with `shellcheck --shell=sh install.sh` and [actionlint](https://github.com/rhysd/actionlint) for the workflows.

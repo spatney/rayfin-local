@@ -1,7 +1,8 @@
 name: release
 
-# Pushing a version tag (`v0.2.0`) builds rayfin-local for each platform and publishes the archives
-# and their SHA-256 checksums as a GitHub Release. The tag must match the version in Cargo.toml.
+# Pushing a version tag (`v0.2.0`) builds rayfin-local for each platform, publishes the archives,
+# their SHA-256 checksums and the install scripts as a GitHub Release, then installs the release
+# with the install scripts on each platform. The tag must match the version in Cargo.toml.
 on:
   push:
     tags: ["v*"]
@@ -48,6 +49,8 @@ jobs:
           # The oldest supported Ubuntu keeps the binary's glibc requirement low.
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
           - target: aarch64-apple-darwin
             os: macos-latest
           # Cross-compiled on Apple silicon (Apple's toolchain targets both architectures), so the
@@ -71,6 +74,9 @@ jobs:
           key: ${{ matrix.target }}
       - name: Build
         run: cargo build --release --locked -p rayfin-local --target ${{ matrix.target }}
+      - name: Show the glibc the binary needs
+        if: contains(matrix.target, '-linux-')
+        run: objdump -T "target/$TARGET/release/rayfin-local" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -n 1
       - name: Package
         shell: bash
         run: |
@@ -97,25 +103,118 @@ jobs:
 
   release:
     name: publish the release
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      REPO: ${{ github.repository }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            install.sh
+            install.ps1
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
-      - name: Checksums
-        working-directory: dist
+      - name: Checksums and install scripts
         run: |
+          set -euo pipefail
+          cp install.sh install.ps1 dist/
+          cd dist
           sha256sum rayfin-local-* > SHA256SUMS.txt
           cat SHA256SUMS.txt
+      - name: Release notes
+        run: |
+          cat > notes.md <<EOF
+          ## Install
+
+          **macOS and Linux:**
+
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | RAYFIN_LOCAL_VERSION=$VERSION sh
+          \`\`\`
+
+          **Windows (PowerShell):**
+
+          \`\`\`powershell
+          \$env:RAYFIN_LOCAL_VERSION = '$VERSION'; irm https://raw.githubusercontent.com/$REPO/main/install.ps1 | iex
+          \`\`\`
+
+          Without \`RAYFIN_LOCAL_VERSION\`, the scripts install the latest release.
+          Or download the archive for your platform below, check it against \`SHA256SUMS.txt\`, and put \`rayfin-local\` on your \`PATH\`.
+          See the [README](https://github.com/$REPO#install) for requirements.
+          EOF
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             dist/rayfin-local-*
             dist/SHA256SUMS.txt
+            dist/install.sh
+            dist/install.ps1
+          body_path: notes.md
           fail_on_unmatched_files: true
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+  verify:
+    name: install (${{ matrix.os }})
+    needs: [version, release]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      # A final release is the latest one, which the scripts install when no version is given.
+      LATEST: ${{ !contains(needs.version.outputs.version, '-') }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            install.sh
+            install.ps1
+          sparse-checkout-cone-mode: false
+      - name: install.sh
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          RAYFIN_LOCAL_VERSION="$VERSION" RAYFIN_LOCAL_INSTALL_DIR="$RUNNER_TEMP/pinned" sh install.sh
+          "$RUNNER_TEMP/pinned/rayfin-local" --version | grep -Fx "rayfin-local $VERSION"
+          if [[ "$LATEST" == "true" ]]; then
+            RAYFIN_LOCAL_INSTALL_DIR="$RUNNER_TEMP/latest" sh install.sh
+            "$RUNNER_TEMP/latest/rayfin-local" --version | grep -Fx "rayfin-local $VERSION"
+          fi
+      - name: install.ps1 (PowerShell 7)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:RAYFIN_LOCAL_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'pwsh'
+          $env:RAYFIN_LOCAL_NO_MODIFY_PATH = '1'
+          if ($env:LATEST -ne 'true') { $env:RAYFIN_LOCAL_VERSION = $env:VERSION }
+          ./install.ps1
+          $installed = & (Join-Path $env:RAYFIN_LOCAL_INSTALL_DIR 'rayfin-local.exe') --version
+          if ($installed -ne "rayfin-local $env:VERSION") { throw "Installed '$installed', expected $env:VERSION" }
+      - name: install.ps1 (Windows PowerShell 5.1, through irm | iex, updating the user PATH)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:RAYFIN_LOCAL_INSTALL_DIR = Join-Path $env:RUNNER_TEMP 'powershell'
+          $env:RAYFIN_LOCAL_VERSION = $env:VERSION
+          Get-Content -Raw ./install.ps1 | Invoke-Expression
+          $installed = rayfin-local --version
+          if ($installed -ne "rayfin-local $env:VERSION") { throw "Installed '$installed', expected $env:VERSION" }
+          $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Environment')
+          $path = $key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+          if ($key.GetValueKind('Path') -ne 'ExpandString') { throw 'The user PATH is no longer REG_EXPAND_SZ' }
+          if (($path -split ';') -notcontains $env:RAYFIN_LOCAL_INSTALL_DIR) { throw "The user PATH lacks the install folder: $path" }
+          # A second run updates in place and doesn't add the folder again.
+          Get-Content -Raw ./install.ps1 | Invoke-Expression
+          $again = $key.GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+          if ($again -ne $path) { throw "A second install changed the user PATH: $again" }
