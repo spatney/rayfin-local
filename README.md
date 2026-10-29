@@ -18,13 +18,14 @@ rayfin-local serve
   my-rayfin-app is running locally
 
   App         http://localhost:5173/
+  Embedded    http://localhost:7171/.rayfin-local/portal/embed (the app inside a local Fabric frame)
   API         http://localhost:7171
   Entities    2 entities
   Functions   3 functions (askAnalyst, getBacklog, getModelRefreshStatus)
   Connectors  missioncontroltelemetry
   Storage     off (services.storage is disabled in rayfin.yml)
   Data        C:\code\my-rayfin-app\.rayfin-local
-  Sign in     Use 'Sign in with Fabric' — create any account in the popup, or continue as your Azure identity
+  Sign in     Fabric sign-in opens a local page: create any account there, or continue as your Azure identity
 
   Press Ctrl+C to stop.
 ```

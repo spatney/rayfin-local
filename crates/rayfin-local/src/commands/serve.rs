@@ -707,7 +707,7 @@ fn sign_in_hint(settings: &AuthSettings) -> String {
         return "auth is off (services.auth.enabled is false in rayfin.yml)".to_owned();
     }
     if settings.fabric_enabled {
-        let mut hint = "Use 'Sign in with Fabric' — create any account in the popup".to_owned();
+        let mut hint = "Fabric sign-in opens a local page: create any account there".to_owned();
         if settings.entra_signin.enabled {
             hint.push_str(", or continue as your Azure identity");
         }
