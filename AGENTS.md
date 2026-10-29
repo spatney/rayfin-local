@@ -47,13 +47,15 @@ Each service has a local stand-in:
 Do not rely on memory for Rayfin APIs or wire formats; they are version-locked (1.36.2).
 These are the sources of truth:
 
-- The SDK 1.36.2 dist installed in the reference app: `C:\Users\sapatney\code\fabric-apps\apps\explorer\node_modules\@microsoft\rayfin-*` (and `rayfin\functions\node_modules\@microsoft\fabric-user-data-functions`).
-- The wire contract written up by micro-fabric: `C:\Users\sapatney\code\micro-fabric\docs\compatibility.md`.
+The paths below are relative to this repository's parent folder, where the related repositories are checked out side by side.
+
+- The SDK 1.36.2 dist installed in the reference app: `fabric-apps/apps/explorer/node_modules/@microsoft/rayfin-*` (and `rayfin/functions/node_modules/@microsoft/fabric-user-data-functions`).
+- The wire contract written up by micro-fabric: `micro-fabric/docs/compatibility.md`.
   It is a reference only; this project is a clean-room implementation, so never copy micro-fabric code.
-- Rayfin's source (1.37 alpha; may differ from 1.36.2): `C:\Users\sapatney\code\project-rayfin\packages\*`.
+- Rayfin's source (1.37 alpha; may differ from 1.36.2): `project-rayfin/packages/*`.
 - The docs: `https://rayfin.ai/docs/...`; append `.md` to any page for Markdown.
 
-The reference app for end-to-end checks is `C:\Users\sapatney\code\fabric-apps\apps\explorer`.
+The reference app for end-to-end checks is `fabric-apps/apps/explorer`.
 Never modify files in it, except generated artifacts that `rayfin dev` would also regenerate.
 
 ## Conventions

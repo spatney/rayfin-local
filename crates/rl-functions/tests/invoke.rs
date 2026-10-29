@@ -27,10 +27,18 @@ const API_ORIGIN: &str = "http://127.0.0.1:9";
 /// The fixture is built once by [`fixture`]; services on it skip the build.
 const NO_BUILD: &str = "exit 0";
 const SECRET: &str = "s3cr€t-from-config";
-const DEFAULT_EXPLORER: &str = r"C:\Users\sapatney\code\fabric-apps\apps\explorer\rayfin\functions";
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+}
+
+/// `RAYFIN_LOCAL_EXPLORER_FUNCTIONS`, else explorer's functions in `fabric-apps` beside this
+/// repository.
+fn explorer_functions() -> PathBuf {
+    std::env::var_os("RAYFIN_LOCAL_EXPLORER_FUNCTIONS").map_or_else(
+        || repo_root().join("../fabric-apps/apps/explorer/rayfin/functions"),
+        PathBuf::from,
+    )
 }
 
 /// The fixture package, `npm ci`-installed and built once per run.
@@ -621,8 +629,7 @@ async fn a_broken_build_answers_503_until_it_is_fixed() {
 #[tokio::test]
 #[ignore = "manual: needs the explorer app, network access and `az login`"]
 async fn explorer_functions_reach_ado_with_az_tokens() {
-    let source = std::env::var_os("RAYFIN_LOCAL_EXPLORER_FUNCTIONS")
-        .map_or_else(|| PathBuf::from(DEFAULT_EXPLORER), PathBuf::from);
+    let source = explorer_functions();
     if !source.join("node_modules").is_dir() {
         eprintln!(
             "skipped: no installed explorer functions at {}",

@@ -73,8 +73,11 @@ These variables point the tests at what they need:
 | --- | --- |
 | `RAYFIN_SDK_NODE_MODULES` | `../fabric-apps/apps/explorer/node_modules`: a `node_modules` with the Rayfin SDK 1.36.2. |
 | `RAYFIN_LOCAL_EXPLORER` | `../fabric-apps/apps/explorer`: the reference app, for `rl-frontend`. |
-| `RAYFIN_LOCAL_EXPLORER_FUNCTIONS` | The reference app's functions, for `rl-functions`. |
+| `RAYFIN_LOCAL_EXPLORER_FUNCTIONS` | `../fabric-apps/apps/explorer/rayfin/functions`: the reference app's functions, for `rl-functions`. |
+| `RAYFIN_APPS_DIR` | `../fabric-apps/apps`: every app's `rayfin.yml`, for `rl-project`'s ignored test. |
 | `RAYFIN_LOCAL_NODE` | `node` on `PATH`. |
+
+The defaults are relative to this repository's folder: they expect `fabric-apps` checked out beside it.
 
 ### Ignored tests
 

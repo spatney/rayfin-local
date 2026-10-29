@@ -223,7 +223,7 @@ fn unknown_keys() {
 fn parses_every_fabric_app() {
     let apps = std::env::var_os("RAYFIN_APPS_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"C:\Users\sapatney\code\fabric-apps\apps"));
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../fabric-apps/apps"));
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(&apps)
         .unwrap_or_else(|err| panic!("cannot read {}: {err}", apps.display()))
         .flatten()

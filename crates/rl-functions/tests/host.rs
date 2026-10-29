@@ -19,10 +19,18 @@ use rl_tokens::Audience;
 use serde_json::{Value, json};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
-const DEFAULT_EXPLORER: &str = r"C:\Users\sapatney\code\fabric-apps\apps\explorer\rayfin\functions";
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+}
+
+/// `RAYFIN_LOCAL_EXPLORER_FUNCTIONS`, else explorer's functions in `fabric-apps` beside this
+/// repository.
+fn explorer_functions() -> PathBuf {
+    std::env::var_os("RAYFIN_LOCAL_EXPLORER_FUNCTIONS").map_or_else(
+        || repo_root().join("../fabric-apps/apps/explorer/rayfin/functions"),
+        PathBuf::from,
+    )
 }
 
 /// The fixture package, `npm ci`-installed and built once per run.
@@ -710,8 +718,7 @@ async fn manager_keeps_a_load_failure_until_reloaded() {
 
 #[tokio::test]
 async fn loads_the_explorer_functions() {
-    let dir = std::env::var_os("RAYFIN_LOCAL_EXPLORER_FUNCTIONS")
-        .map_or_else(|| PathBuf::from(DEFAULT_EXPLORER), PathBuf::from);
+    let dir = explorer_functions();
     if !dir.join("dist/src/function_app.js").is_file() {
         eprintln!("skipped: no built explorer functions at {}", dir.display());
         return;

@@ -20,6 +20,9 @@
 //!
 //! [functions]
 //! inspect_port = 9229
+//!
+//! [auth]
+//! auto_create_users = true  # a password sign-in to an unknown email creates the account
 //! ```
 //!
 //! Every setting is optional. Unknown keys are errors, since the file is rayfin-local's own.
