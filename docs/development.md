@@ -68,6 +68,7 @@ They print a `skipped: …` note and pass when Node.js or the packages they need
 | `rl-functions` `tests/host.rs`, `tests/invoke.rs` | The function host and the invoke routes on `tests/fixtures/functions/basic`, which they install and build on first use; also the reference app's functions when present. | Node.js and npm |
 | `rl-frontend` `tests/vite.rs` | The Vite dev server and the static build, on copies of the reference app and small Vite apps. | The reference app |
 | `rayfin-local` `tests/host_contract.rs` | `serve --json` of the fixture app ([embedding.md](embedding.md)): its events from `starting` to `ready`, the app and the backend answering, and a clean stop when stdin closes. | `npm ci` in `tests/fixtures/apps/basic` |
+| `rayfin-local` `tests/live_reload.rs` | `serve --json` of a copy of the fixture app (its `node_modules` linked): `rayfin.yml` edits applied on the same ports, `secret set` restarting only the function host, and Vite started again after it is killed. | `npm ci` in `tests/fixtures/apps/basic` and its `rayfin/functions` |
 
 These variables point the tests at what they need:
 

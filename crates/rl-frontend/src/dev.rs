@@ -75,6 +75,8 @@ impl fmt::Debug for DevServerConfig {
 /// The running Vite dev server. Dropping it kills Vite's process tree.
 pub struct DevServer {
     child: ManagedChild,
+    /// The port it listens on (a free one when it was asked for port 0).
+    port: u16,
     /// Never empty: the local URLs first, as Vite prints them.
     urls: Vec<String>,
     vite_version: String,
@@ -85,6 +87,7 @@ impl fmt::Debug for DevServer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DevServer")
             .field("pid", &self.child.pid())
+            .field("port", &self.port)
             .field("urls", &self.urls)
             .field("vite_version", &self.vite_version)
             .field("rayfin_plugin", &self.rayfin_plugin)
@@ -243,6 +246,7 @@ impl DevServer {
         );
         Ok(Self {
             child,
+            port: config.port,
             urls,
             vite_version,
             rayfin_plugin: ready.rayfin_plugin,
@@ -252,6 +256,12 @@ impl DevServer {
     /// The app's URL, as Vite prints it (such as `http://localhost:5175/`).
     pub fn url(&self) -> &str {
         &self.urls[0]
+    }
+
+    /// The port Vite listens on: the one asked for, or the free one chosen for port 0. Start it
+    /// again on this port to keep its URLs.
+    pub fn port(&self) -> u16 {
+        self.port
     }
 
     /// Every URL Vite answers on: the local ones, then the network ones.

@@ -47,7 +47,9 @@ pub struct FunctionsService {
     pub(super) config: FunctionsConfig,
     /// `RAYFIN_API_URL` and `rayFinEndpoint`: the origin with a trailing `/`.
     pub(super) api_url: String,
-    pub(super) secrets_header: String,
+    /// The declared secrets' values (`config.secrets` at first), which
+    /// [`restart_host`](Self::restart_host) replaces.
+    secrets: Mutex<Secrets>,
     pub(super) callers: Arc<dyn CallerResolver>,
     pub(super) tokens: Arc<dyn TokenSource>,
     pub(super) token_fetches: TokenFetches,
@@ -69,6 +71,23 @@ pub struct FunctionsService {
 struct WatchTask {
     stop: oneshot::Sender<()>,
     handle: JoinHandle<()>,
+}
+
+/// The declared secrets' values, and the `x-ms-rayfin-secrets` header they make.
+struct Secrets {
+    values: Vec<(String, String)>,
+    header: String,
+}
+
+impl Secrets {
+    fn new(values: Vec<(String, String)>) -> Self {
+        let header = secrets_header(
+            values
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str())),
+        );
+        Self { values, header }
+    }
 }
 
 impl FunctionsService {
@@ -132,20 +151,15 @@ impl FunctionsService {
         };
 
         let api_url = format!("{}/", config.api_origin.trim().trim_end_matches('/'));
-        let host_config =
-            host_config(&config, &api_url, entry).map_err(FunctionsError::Settings)?;
-        let secrets_header = secrets_header(
-            config
-                .secrets
-                .iter()
-                .map(|(name, value)| (name.as_str(), value.as_str())),
-        );
+        let secrets = Secrets::new(std::mem::take(&mut config.secrets));
+        let host_config = host_config(&config, &secrets.values, &api_url, entry)
+            .map_err(FunctionsError::Settings)?;
         let service = Arc::new(Self {
             manager: HostManager::with_options(host_config, manager_options(&config)),
             build_command: build.command().to_owned(),
             config,
             api_url,
-            secrets_header,
+            secrets: Mutex::new(secrets),
             callers,
             tokens,
             token_fetches: TokenFetches::default(),
@@ -224,9 +238,30 @@ impl FunctionsService {
         }
     }
 
+    /// Replaces only the host, with `secrets` as the declared secrets' values and
+    /// `local.settings.json` read again (the secret values changed); the build and the watcher
+    /// keep running. Invocations meanwhile wait for the new host, as after a rebuild, and the
+    /// outcome is reported ([`FunctionsConfig::on_state`]). While the functions are not built,
+    /// the values are kept for the host a fixed build starts.
+    pub async fn restart_host(&self, secrets: Vec<(String, String)>) {
+        *lock(&self.secrets) = Secrets::new(secrets);
+        if self.unavailable().is_none() {
+            self.reload(true).await;
+        }
+    }
+
+    /// The `x-ms-rayfin-secrets` header of invocations.
+    pub(super) fn secrets_header(&self) -> String {
+        lock(&self.secrets).header.clone()
+    }
+
     /// Why invocations can't run, while the functions are not built.
     pub(super) fn unavailable(&self) -> Option<String> {
         lock(&self.unavailable).clone()
+    }
+
+    fn secret_values(&self) -> Vec<(String, String)> {
+        lock(&self.secrets).values.clone()
     }
 
     /// New build output: refreshes the metadata and replaces the host (the UDF package reads
@@ -246,7 +281,8 @@ impl FunctionsService {
                 return;
             }
         };
-        let result = match host_config(&self.config, &self.api_url, entry) {
+        let config = host_config(&self.config, &self.secret_values(), &self.api_url, entry);
+        let result = match config {
             Ok(config) => self.manager.reload_with(config).await,
             Err(error) => {
                 tracing::error!(
@@ -523,6 +559,7 @@ async fn refresh_metadata(config: &FunctionsConfig) {
 /// backend's settings (see the module docs).
 fn host_config(
     config: &FunctionsConfig,
+    secrets: &[(String, String)],
     api_url: &str,
     entry: std::path::PathBuf,
 ) -> std::io::Result<HostConfig> {
@@ -530,7 +567,7 @@ fn host_config(
     let has_environment = env
         .iter()
         .any(|(name, _)| name == "AZURE_FUNCTIONS_ENVIRONMENT");
-    env.extend(config.secrets.iter().cloned());
+    env.extend(secrets.iter().cloned());
     if !has_environment {
         env.push(("AZURE_FUNCTIONS_ENVIRONMENT".into(), "Development".into()));
     }

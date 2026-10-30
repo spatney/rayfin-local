@@ -28,6 +28,7 @@ use std::{
     },
 };
 
+use parking_lot::RwLock;
 use rl_db::Db;
 
 pub use error::AuthError;
@@ -43,8 +44,10 @@ pub const PUBLISHABLE_KEY_EXEMPT_PATHS: &[&str] = &[JWKS_PATH, RUNTIME_SETTINGS_
 /// The app's auth service: users, sessions and tokens over the project database.
 pub struct AuthService {
     pub(crate) db: Db,
-    pub(crate) settings: AuthSettings,
-    pub(crate) jwt: Arc<jwt::Jwt>,
+    /// The settings in effect; [`AuthService::set_settings`] replaces them.
+    settings: RwLock<Arc<AuthSettings>>,
+    /// Mints and verifies access tokens with the signing key and the settings in effect.
+    jwt: RwLock<Arc<jwt::Jwt>>,
     pub(crate) revoked: Arc<sessions::RevokedSessions>,
     pub(crate) portal: portal::Portal,
     pub(crate) entra: entra::Entra,
@@ -61,26 +64,15 @@ impl AuthService {
     /// install a rustls crypto provider first (the binary installs ring at startup).
     pub async fn new(db: Db, keys_dir: PathBuf, settings: AuthSettings) -> Result<Self, AuthError> {
         let settings = settings.normalized()?;
-        if settings.magic_link_enabled {
-            tracing::warn!(
-                "services.auth.passwordless.magicLink is enabled, but rayfin-local sends no email: \
-                 magic links answer as if they were disabled"
-            );
-        }
-        if settings.email_enabled {
-            tracing::warn!(
-                "services.auth.email is enabled, but rayfin-local sends no email: users are \
-                 verified on sign-up and the email routes answer as if email were disabled"
-            );
-        }
+        warn_about_email(&settings, None);
         db.migrate_component(schema::COMPONENT, schema::STEPS)
             .await?;
         let key = tokio::task::spawn_blocking(move || keys::SigningKey::load_or_create(&keys_dir))
             .await??;
         let jwt = Arc::new(jwt::Jwt::new(key, &settings));
         let service = Self {
-            settings,
-            jwt,
+            settings: RwLock::new(Arc::new(settings)),
+            jwt: RwLock::new(jwt),
             revoked: Arc::new(sessions::RevokedSessions::new(db.clone())),
             db,
             portal: portal::Portal::new()?,
@@ -101,13 +93,30 @@ impl AuthService {
     }
 
     /// The settings in effect (lifetimes clamped).
-    pub fn settings(&self) -> &AuthSettings {
-        &self.settings
+    pub fn settings(&self) -> Arc<AuthSettings> {
+        Arc::clone(&self.settings.read())
+    }
+
+    /// Applies new settings while the service runs (`services.auth` of `rayfin.yml` changed).
+    /// Users, sessions and the signing key stay; access tokens minted from now on get the new
+    /// lifetime, claims and scopes, and the routes answer with the new modes at once.
+    pub fn set_settings(&self, settings: AuthSettings) -> Result<(), AuthError> {
+        let settings = settings.normalized()?;
+        warn_about_email(&settings, Some(&self.settings()));
+        let jwt = Arc::new(self.jwt().with_settings(&settings));
+        *self.jwt.write() = jwt;
+        *self.settings.write() = Arc::new(settings);
+        Ok(())
+    }
+
+    /// Mints and verifies access tokens.
+    pub(crate) fn jwt(&self) -> Arc<jwt::Jwt> {
+        Arc::clone(&self.jwt.read())
     }
 
     /// The JSON Web Key Set with the public signing key (`GET /.well-known/jwks.json`).
     pub fn jwks(&self) -> serde_json::Value {
-        self.jwt.jwks()
+        self.jwt().jwks()
     }
 
     pub(crate) fn now_ms(&self) -> i64 {
@@ -117,6 +126,23 @@ impl AuthService {
     #[cfg(test)]
     pub(crate) fn advance_clock(&self, ms: i64) {
         self.clock_offset_ms.fetch_add(ms, Ordering::Relaxed);
+    }
+}
+
+/// Says that the email features `settings` turn on (and `previous` didn't) don't work locally.
+fn warn_about_email(settings: &AuthSettings, previous: Option<&AuthSettings>) {
+    if settings.magic_link_enabled && !previous.is_some_and(|previous| previous.magic_link_enabled)
+    {
+        tracing::warn!(
+            "services.auth.passwordless.magicLink is enabled, but rayfin-local sends no email: \
+             magic links answer as if they were disabled"
+        );
+    }
+    if settings.email_enabled && !previous.is_some_and(|previous| previous.email_enabled) {
+        tracing::warn!(
+            "services.auth.email is enabled, but rayfin-local sends no email: users are \
+             verified on sign-up and the email routes answer as if email were disabled"
+        );
     }
 }
 

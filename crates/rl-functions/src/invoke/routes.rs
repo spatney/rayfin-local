@@ -135,7 +135,7 @@ async fn answer(service: &FunctionsService, name: &str, request: Request) -> Ans
     ));
     invocation
         .headers
-        .push(("x-ms-rayfin-secrets".into(), service.secrets_header.clone()));
+        .push(("x-ms-rayfin-secrets".into(), service.secrets_header()));
     tracing::debug!(
         invocation_id = %invocation.invocation_id,
         tokens = tokens.len(),

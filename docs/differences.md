@@ -60,7 +60,7 @@ It generates the schema DAB generates for your entities and answers with DAB's d
 | Text comparisons | Differs | Case-insensitive like Fabric SQL's default collation, but SQLite's `NOCASE` folds ASCII letters only: `'É' = 'é'` is false locally and true on Fabric. On the `postgresql` dialect, text compares case-sensitively. |
 | Decimals | Differs | Stored as doubles (`REAL`), with output rounded to the column's scale. About 15 significant digits are exact, so a `DECIMAL(18,2)` above about 10^13 loses cents; Fabric is exact to the declared precision. |
 | Dates | Differs | Stored as UTC ISO-8601 text with 100 ns precision. Responses use Fabric's format (`YYYY-MM-DDTHH:MM:SS.fffZ`), so the difference shows only in the SQLite file. |
-| Schema changes | Differs | `serve` applies them from `rayfin/data` when it starts, not a deployment. Changes that would lose data are refused until you pass `--force-schema`. A data package (`services.data.path`) is built with `services.data.buildCommand` first, as `rayfin up` and `rayfin dev` do, at every start and when its sources change. |
+| Schema changes | Differs | `serve` applies them from `rayfin/data` when it starts and as you edit the entities, not on a deployment. Changes that would lose data are refused until you pass `--force-schema`. A data package (`services.data.path`) is built with `services.data.buildCommand` first, as `rayfin up` and `rayfin dev` do, at every start and when its sources change. |
 | Introspection (`__schema`, `__type`) | Not supported | Refused unless `services.data.allowIntrospection` is true, as on Fabric; when allowed, rayfin-local still answers an error (no introspection resolver yet). `__typename` always works. |
 | Data from a deployed app | Not supported | The local database starts empty; nothing is copied from Fabric. |
 
@@ -90,7 +90,7 @@ rayfin-local builds your functions package and runs it on your Node.js, with the
 | Category A `@role` grants, field lists and policies | Supported | Enforced by rayfin-local in every statement, against the signed-in local user, as for data entities. Grants beyond the connector's `operations:` (which `rayfin up` refuses) are dropped with a warning. |
 | Category A values and errors | Differs | DAB's formats and error codes. Scalars follow the entity decorators (`@int` is `Int` even on a `bigint` column, where Fabric's DAB says `Long`). Statements the database refuses answer DAB's `DatabaseOperationFailed` with the server's message as `extensions.detail`, which Fabric hides; a database that can't be reached or refuses your sign-in answers a GraphQL error that says what to do. |
 | Category A aggregations (`groupBy`, `aggregate`) | Not supported | Answer an error that names them. |
-| Category A setup checks | Differs | Entity names that are reserved or collide across connectors are not refused as `rayfin up` refuses them. Changes to the connector's entities need a restart of `serve`. |
+| Category A setup checks | Differs | Entity names that are reserved or collide across connectors are not refused as `rayfin up` refuses them. |
 | `kusto` and other connector types | Not supported | Answer 501 `not_supported`. |
 
 ## Storage (`/api/storage/*`)
@@ -124,6 +124,8 @@ rayfin-local builds your functions package and runs it on your Node.js, with the
 These exist only in rayfin-local:
 
 - Hot reload of functions: `build:watch` rebuilds them, and the host restarts when the compiled output changes.
+- Live reload of the configuration: changes to `rayfin.yml`, the SQL connectors' entities and the secret values apply while `serve` runs, on the same ports; on Fabric they need `rayfin up`.
+- The Vite dev server is started again when it stops by itself.
 - `serve --inspect[=PORT]`: the Node.js inspector on the function host.
 - `RAYFIN_LOCAL_TOKEN_<AUDIENCE>`: fixed tokens for tests and CI.
 - `[connectors] powerbi_base_url` in `rayfin-local.toml`: a mock or sovereign-cloud Power BI.

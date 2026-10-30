@@ -79,6 +79,9 @@ rayfin-local builds the schema DAB generates from the DAB config `rayfin up` wou
 3. `metadata.json` completes the columns (`AppModel::apply_source_metadata`): the database's SQL type, whether the database generates the column (identity, computed, `rowversion`, temporal period columns) and whether it has a default.
 4. The grants are limited to the connector's operations (`rl_connectors::sql::restrict_to_operations`).
 
+While `serve` runs, a change to the connector's entity classes, its `metadata.json` or the connectors in `rayfin.yml` runs these steps again and rebuilds the connectors' routes in place, on the same port.
+Hosts see a `config-changed` event with `"what": ["connectors"]`, then a new `ready`.
+
 The schema then follows the data API's ([`rl-graphql`'s `schema.rs`](../crates/rl-graphql/src/schema.rs)), with these differences:
 
 - **Names**: `E` is the entity name and `P` the analyzer's plural (the same `pluralize` the SDK uses): `appointments` and `appointments_by_pk` for an entity `Appointments`, `products` and `product_by_pk` for `Product`.
@@ -155,7 +158,7 @@ Failures answer HTTP 200 with a GraphQL error whose message says what to do, and
 | The database is busy, paused or unavailable (40613, 40501, …) | Try again; a paused Fabric capacity must be resumed first. |
 | The server can't be reached (network, DNS, TCP 1433 blocked) | Check the network, VPN and firewall. |
 | A statement fails in the database (an entity out of step with its table, a constraint) | DAB's `DatabaseOperationFailed` error, with the server's message as `extensions.detail` (for example `Invalid column name 'zip'`). |
-| The entities can't be analyzed (a TypeScript error) | 500 `CONNECTOR_MISCONFIGURED` with the analyzer's message, and a warning at startup. |
+| The entities can't be analyzed (a TypeScript error) | 500 `CONNECTOR_MISCONFIGURED` with the analyzer's message, and a warning when they are analyzed (at startup, and after each change). |
 
 ## Identity
 
@@ -175,7 +178,6 @@ Keep `serve` on loopback (the default): anyone who can reach the backend acts on
 - **A create on a keyless entity** of a SQL database answers `null` (there is no key to read the row back by), so the SDK reports `MUTATION_NO_RESULT`; the row is written.
 - **Scalars** follow the decorators, so a `bigint` column decorated `@int` refuses values beyond 32 bits, where DAB on Fabric exposes `Long`.
 - **`rayfin up`'s checks** of connector configs (reserved and duplicate entity names across connectors) are not repeated.
-- **Changes** to the connector's entities, `metadata.json` or `rayfin.yml` need a restart of `serve`.
 
 ## Code and tests
 
@@ -185,7 +187,7 @@ Keep `serve` on loopback (the default): anyone who can reach the backend acts on
 | `crates/rl-model/src/convert.rs`, `connector.rs` | The connector model and `metadata.json`. |
 | `crates/rl-graphql/src/tsql/` | The T-SQL executor, emitter and mutations, and the `SqlBackend` trait. |
 | `crates/rl-connectors/src/sql/` | The route, operations, location (`location.rs`) and the TDS pool (`tds.rs`). |
-| `crates/rayfin-local/src/connectors.rs` | The analysis at startup, its cache and warnings. |
+| `crates/rayfin-local/src/connectors.rs` | The analysis at startup and after changes, its cache and warnings. |
 
 - `crates/rl-model/tests/connector_model.rs` and `analyze_js.rs`: the model of the `inventory` connector of `tests/fixtures/apps/connectors`, and the helper against its golden analysis.
 - `crates/rl-graphql/tests/tsql.rs`: the schema of that connector per type, and the statements its documents become, on a fake database.

@@ -3,6 +3,7 @@
 //! With `--json` it is run by a host (docs/embedding.md): it reports what happens as events, and
 //! stops when stdin ends as on Ctrl+C.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -14,11 +15,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context as _, anyhow, bail};
 use axum::Router;
 use rl_auth::{AuthService, AuthSettings};
+use rl_connectors::SqlConnectorModel;
 use rl_db::Db;
-use rl_functions::FunctionsService;
 use rl_model::AppModel;
 use rl_project::{LocalState, Project, ServeInfo, ServeLock};
-use rl_server::{ServerConfig, StaticSite};
+use rl_server::{RouterHandle, ServerConfig, StaticSite};
 use rl_tokens::{TokenBroker, TokenMode};
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -32,7 +33,7 @@ use crate::events::{
     ProjectInfo, Ready, Schema, Sdk, SignInAs, Starting, StopReason, Stopped, StorageFeature,
     WarningCode,
 };
-use crate::integrations::{self, ServeContext};
+use crate::integrations::{self, FunctionsSlot, SecretValues, ServeContext};
 use crate::ports::{self, DEFAULT_API_PORT, PortRequest};
 use crate::reload;
 use crate::shutdown::{self, StopHooks, StopListener, StopRequest};
@@ -203,6 +204,10 @@ async fn start(
     let bound = bind_ports(&project, &mut state, options, &host).await?;
     let api_origin = format!("http://{}:{}", origin_host(&host), bound.api_port);
     let data_api = integrations::data_api(&project, &db, &model, auth.clone());
+    // Live reload applies `rayfin.yml`, the entities, the connectors and the secret values on
+    // demand through `reload` (the control API's `POST /reload`), once `reload_requests` is
+    // served after the backend starts.
+    let (reload, reload_requests) = reload::channel();
 
     let ctx = ServeContext {
         project: &project,
@@ -218,8 +223,16 @@ async fn start(
         host: &host,
         api_origin: &api_origin,
         frontend_port: bound.frontend_port,
+        reload,
     };
-    serve_until_stopped(&ctx, bound.listeners, &auth_settings, running).await
+    serve_until_stopped(
+        &ctx,
+        bound.listeners,
+        &auth_settings,
+        running,
+        reload_requests,
+    )
+    .await
 }
 
 /// `RAYFIN_LOCAL_CONTROL_TOKEN`, when set, must be long enough to be a secret.
@@ -521,22 +534,31 @@ impl Running {
     }
 }
 
-/// Starts the backend and the frontend, shows the banner (`ready` with `--json`), and serves
-/// until Ctrl+C (without `--json`) or until the backend stops on its own. Returns an error if
-/// anything fails to start.
+/// Starts the backend and the frontend, shows the banner (`ready` with `--json`), starts live
+/// reload (serving `reload_requests`), and serves until Ctrl+C (without `--json`) or until the
+/// backend stops on its own. Returns an error if anything fails to start.
 async fn serve_until_stopped(
     ctx: &ServeContext<'_>,
     listeners: Vec<TcpListener>,
     auth_settings: &AuthSettings,
     running: &mut Running,
+    reload_requests: reload::Requests,
 ) -> anyhow::Result<Outcome> {
     let static_site = integrations::static_site(ctx).await?;
     let serves_static = static_site.is_some();
-    let (routers, features) = start_features(ctx, &mut running.hooks).await?;
-    let router = rl_server::build_router(server_config(ctx, static_site), routers);
+    let features = start_features(ctx).await?;
+    let functions = features.functions.clone();
+    running.hooks.add("the function host", move || async move {
+        functions.stop().await;
+    });
+    // Live reload replaces the router; the listeners stay.
+    let router = RouterHandle::new(rl_server::build_router(
+        server_config(ctx, static_site.clone()),
+        features.routers(ctx),
+    ));
     let mut stop = running.stop.subscribe();
     let server = running.server.insert(tokio::spawn(rl_server::serve(
-        router,
+        router.router(),
         listeners,
         async move {
             // An error means `Running` is gone, which also means stop.
@@ -553,11 +575,6 @@ async fn serve_until_stopped(
     ui::step(format_args!("Backend listening on {}", ctx.api_origin));
 
     let frontend_url = integrations::start_frontend(ctx, &mut running.hooks).await?;
-    if let Err(err) = reload::watch(ctx, &mut running.hooks) {
-        ui::warn(format_args!(
-            "Live reload is off ({err:#}); restart rayfin-local after changing the entities."
-        ));
-    }
     let app_url = if serves_static {
         Some(ctx.api_origin.to_owned())
     } else {
@@ -580,12 +597,20 @@ async fn serve_until_stopped(
             tracing::debug!("{err}");
         }
     }
-    events::emit(Event::Ready(Box::new(ready_event(
+    let ready = ready_event(ctx, &features, app_url.clone(), auth_settings);
+    // Its first changes come after `ready`: they wait for the edits to settle.
+    reload::start(
         ctx,
-        &features,
-        app_url.clone(),
-        auth_settings,
-    ))));
+        reload::Serving {
+            features,
+            router,
+            static_site,
+            app_url: app_url.clone(),
+        },
+        reload_requests,
+        &mut running.hooks,
+    );
+    events::emit(Event::Ready(Box::new(ready)));
     if ctx.options.open && !ctx.options.json {
         match &app_url {
             Some(url) => {
@@ -631,61 +656,69 @@ fn server_stopped(result: Result<io::Result<()>, tokio::task::JoinError>) -> any
     }
 }
 
-/// The feature services that started, for the banner.
-struct Features {
-    functions: Option<Arc<FunctionsService>>,
-    storage: bool,
+/// The feature services that run, for the router, the banner and `ready`; live reload replaces
+/// those whose settings change.
+pub(crate) struct Features {
+    /// `/connector-invoke/*` and `/connectors/*/graphql`.
+    pub connectors: Router,
+    /// The SQL connectors' entities `connectors` serves.
+    pub connector_models: HashMap<String, SqlConnectorModel>,
+    /// `/api/storage/*`, when `services.storage` is on and `rayfin/storage` declares folders.
+    pub storage: Option<Router>,
+    pub functions: FunctionsSlot,
+    /// The secret values the functions run with.
+    pub secrets: SecretValues,
 }
 
-/// The feature routers (auth and connectors, then the services configured in `integrations`),
-/// and what started. With `[fabric] anonymous_data_access = false`, the routes Fabric's
-/// authentication middleware guards answer requests without a token with its 401.
-async fn start_features(
-    ctx: &ServeContext<'_>,
-    hooks: &mut StopHooks,
-) -> anyhow::Result<(Vec<Router>, Features)> {
-    let reject_anonymous = ctx.project.local_config().fabric.anonymous_data_access == Some(false);
-    let guarded = |router: Router| {
-        if reject_anonymous {
-            router.layer(axum::middleware::from_fn(rl_server::reject_anonymous))
-        } else {
-            router
-        }
-    };
-    let mut routers = vec![
-        Arc::clone(ctx.auth).router(),
-        guarded(integrations::connectors_router(ctx).await),
-    ];
-    for connector in &ctx.project.config().connectors {
-        let kind = connector.connector_type.as_str();
-        if !integrations::connector_runs_locally(kind) {
-            events::warning(
-                WarningCode::ConnectorUnsupported,
-                format!(
-                    "Connector {} is a {kind} connector, which runs only on Fabric: its calls \
-                     answer 501 locally.",
-                    connector.name
-                ),
-                None,
-                json!({ "name": connector.name, "type": kind }),
-            );
-        }
+impl Features {
+    /// Every feature's router: auth and connectors, then the services configured in
+    /// `integrations`. With `[fabric] anonymous_data_access = false`, the routes Fabric's
+    /// authentication middleware guards answer requests without a token with its 401.
+    pub(crate) fn routers(&self, ctx: &ServeContext<'_>) -> Vec<Router> {
+        let reject_anonymous =
+            ctx.project.local_config().fabric.anonymous_data_access == Some(false);
+        let guarded = |router: Router| {
+            if reject_anonymous {
+                router.layer(axum::middleware::from_fn(rl_server::reject_anonymous))
+            } else {
+                router
+            }
+        };
+        let mut routers = vec![
+            Arc::clone(ctx.auth).router(),
+            guarded(self.connectors.clone()),
+        ];
+        routers.extend(integrations::graphql_router(ctx).map(guarded));
+        routers.extend(self.storage.clone().map(guarded));
+        routers.extend(
+            self.functions
+                .get()
+                .map(|service| guarded(service.router())),
+        );
+        routers
     }
-    routers.extend(integrations::graphql_router(ctx).map(guarded));
+}
+
+/// Starts the feature services: the connectors (telling which run only on Fabric), storage and
+/// the functions.
+async fn start_features(ctx: &ServeContext<'_>) -> anyhow::Result<Features> {
+    let connector_models = integrations::connector_models(ctx).await;
+    let connectors = integrations::connectors_router(ctx, connector_models.clone());
+    integrations::warn_unsupported_connectors(&ctx.project.config().connectors);
     let storage = integrations::storage_router(ctx).await?;
-    let has_storage = storage.is_some();
-    routers.extend(storage.map(guarded));
-    let functions = integrations::start_functions(ctx, hooks).await?;
-    routers.extend(functions.as_ref().map(|service| guarded(service.router())));
-    let features = Features {
-        functions,
-        storage: has_storage,
-    };
-    Ok((routers, features))
+    let secrets = SecretValues::read(ctx);
+    let functions = integrations::start_functions(ctx, &secrets).await?;
+    Ok(Features {
+        connectors,
+        connector_models,
+        storage,
+        functions: FunctionsSlot::new(functions),
+        secrets,
+    })
 }
 
 /// The `ready` event: where the app and the API are and what runs.
-fn ready_event(
+pub(crate) fn ready_event(
     ctx: &ServeContext<'_>,
     features: &Features,
     app_url: Option<String>,
@@ -693,7 +726,8 @@ fn ready_event(
 ) -> Ready {
     let config = ctx.project.config();
     let fabric_sign_in = auth_settings.enabled && auth_settings.fabric_enabled;
-    let entities = if config.services.data.enabled {
+    let data_enabled = ctx.data_api.is_some();
+    let entities = if data_enabled {
         ctx.model
             .entities
             .iter()
@@ -702,7 +736,7 @@ fn ready_event(
     } else {
         Vec::new()
     };
-    let folders = if features.storage {
+    let folders = if features.storage.is_some() {
         integrations::storage_folders(ctx.model)
             .into_iter()
             .map(str::to_owned)
@@ -710,6 +744,7 @@ fn ready_event(
     } else {
         Vec::new()
     };
+    let functions = features.functions.get();
     Ready {
         embed_url: (app_url.is_some() && fabric_sign_in)
             .then(|| format!("{}{}", ctx.api_origin, rl_auth::EMBED_HOST_PATH)),
@@ -721,19 +756,18 @@ fn ready_event(
         sdk: Sdk::of(ctx.project),
         features: events::Features {
             data: DataFeature {
-                enabled: config.services.data.enabled,
+                enabled: data_enabled,
                 entities,
             },
             functions: FunctionsFeature {
-                enabled: features.functions.is_some(),
-                names: features
-                    .functions
+                enabled: functions.is_some(),
+                names: functions
                     .as_ref()
                     .map(|service| service.functions())
                     .unwrap_or_default(),
             },
             storage: StorageFeature {
-                enabled: features.storage,
+                enabled: features.storage.is_some(),
                 folders,
             },
             auth: AuthFeature {
@@ -755,7 +789,7 @@ fn ready_event(
 }
 
 /// The banner's rows: where the app and the API are, what runs, and how to sign in.
-fn banner_rows(
+pub(crate) fn banner_rows(
     ctx: &ServeContext<'_>,
     features: &Features,
     app_url: Option<&str>,
@@ -767,12 +801,14 @@ fn banner_rows(
         Some(url) => url.to_owned(),
         None => "not started (--no-frontend)".to_owned(),
     };
-    let entities = if config.services.data.enabled {
+    let entities = if ctx.data_api.is_some() {
         count(ctx.model.entities.len(), "entity", "entities")
+    } else if config.services.data.enabled {
+        "off (the schema change was not applied: see above)".to_owned()
     } else {
         "off (services.data is disabled in rayfin.yml)".to_owned()
     };
-    let functions = match &features.functions {
+    let functions = match features.functions.get() {
         Some(service) => match service.functions() {
             names if names.is_empty() => "none loaded (see the function output above)".to_owned(),
             names => format!(
@@ -782,11 +818,14 @@ fn banner_rows(
             ),
         },
         None if ctx.options.no_functions => "off (--no-functions)".to_owned(),
+        None if config.services.functions.enabled => {
+            "off (they could not start: see above)".to_owned()
+        }
         None => "off (services.functions is disabled in rayfin.yml)".to_owned(),
     };
     let connectors = integrations::connectors_summary(&config.connectors);
     let folders = integrations::storage_folders(ctx.model);
-    let storage = if features.storage {
+    let storage = if features.storage.is_some() {
         format!(
             "{} ({})",
             count(folders.len(), "folder", "folders"),
@@ -837,7 +876,7 @@ fn anonymous_entities(model: &AppModel) -> Vec<&str> {
 /// Fabric accepts the `anonymous` role only when a tenant administrator allows anonymous data
 /// access, which is off by default. `[fabric] anonymous_data_access = false` refuses such
 /// entities, as `rayfin up` does on such a tenant; leaving it unset warns about them.
-fn check_anonymous_access(project: &Project, model: &AppModel) -> anyhow::Result<()> {
+pub(crate) fn check_anonymous_access(project: &Project, model: &AppModel) -> anyhow::Result<()> {
     let entities = anonymous_entities(model);
     let (subject, verb) = match entities.as_slice() {
         [] => return Ok(()),
@@ -891,7 +930,10 @@ fn name_list(names: &[String]) -> String {
     }
 }
 
-fn server_config(ctx: &ServeContext<'_>, static_site: Option<StaticSite>) -> ServerConfig {
+pub(crate) fn server_config(
+    ctx: &ServeContext<'_>,
+    static_site: Option<StaticSite>,
+) -> ServerConfig {
     let data = ctx.state.data();
     ServerConfig {
         api_origin: ctx.api_origin.to_owned(),

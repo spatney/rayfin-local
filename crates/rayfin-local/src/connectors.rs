@@ -69,8 +69,8 @@ pub async fn analyze(
         Ok(analysis) => analysis,
         Err(problem) => {
             ui::warn(format_args!(
-                "Could not analyze the connector entities in rayfin/connectors: {problem} Fix it, \
-                 then restart rayfin-local; until then those connectors answer this error."
+                "Could not analyze the connector entities in rayfin/connectors: {problem} Fix it \
+                 and save; until then those connectors answer this error."
             ));
             return sql
                 .iter()

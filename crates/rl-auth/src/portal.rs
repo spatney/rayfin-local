@@ -211,7 +211,8 @@ impl AuthService {
     fn portal_page(&self) -> Result<Response, AuthError> {
         let nonce = b64url(&random_bytes::<16>()?);
         let csrf = self.portal.csrf_token(self.now_ms(), CSRF_LIFETIME_MS)?;
-        let app_name = self.settings.app_name.as_deref();
+        let settings = self.settings();
+        let app_name = settings.app_name.as_deref();
         let title = escape_html(
             &app_name.map_or_else(|| "Sign in".to_owned(), |name| format!("Sign in to {name}")),
         );
@@ -219,8 +220,8 @@ impl AuthService {
             "csrf": csrf,
             "api": API_PATH,
             "appName": app_name,
-            "authEnabled": self.settings.enabled,
-            "signUp": self.settings.signup_enabled,
+            "authEnabled": settings.enabled,
+            "signUp": settings.signup_enabled,
             "entra": self.entra_portal_enabled(),
         });
         let html = fill(
@@ -325,7 +326,7 @@ impl AuthService {
                 .any(|own| own == origin)
         });
         let listed = self
-            .settings
+            .settings()
             .allowed_redirect_uris
             .iter()
             .filter_map(|uri| web_origin(uri))
@@ -390,7 +391,7 @@ impl AuthService {
     }
 
     fn require_sign_up(&self) -> Result<(), ApiError> {
-        if self.settings.signup_enabled {
+        if self.settings().signup_enabled {
             return Ok(());
         }
         Err(error(

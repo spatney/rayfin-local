@@ -270,13 +270,13 @@ async fn jwks(State(auth): AppState) -> Response {
 }
 
 async fn runtime_settings(State(auth): AppState) -> Json<Value> {
-    Json(auth.settings.runtime_settings())
+    Json(auth.settings().runtime_settings())
 }
 
 impl AuthService {
     /// Every auth route answers 404 when `services.auth.enabled` is off.
     pub(crate) fn require_enabled(&self) -> Result<(), ApiError> {
-        if self.settings.enabled {
+        if self.settings().enabled {
             Ok(())
         } else {
             Err(ApiError::not_found())
@@ -285,7 +285,7 @@ impl AuthService {
 
     fn require_password_mode(&self) -> Result<(), ApiError> {
         self.require_enabled()?;
-        if self.settings.password_enabled {
+        if self.settings().password_enabled {
             Ok(())
         } else {
             Err(ApiError::mode_disabled(PASSWORD_DISABLED))
@@ -303,7 +303,7 @@ impl AuthService {
 
     async fn signup(&self, body: &[u8]) -> Result<Value, ApiError> {
         self.require_password_mode()?;
-        if !self.settings.signup_enabled {
+        if !self.settings().signup_enabled {
             return Err(ApiError::new(
                 StatusCode::FORBIDDEN,
                 "signup_disabled",
@@ -390,7 +390,8 @@ impl AuthService {
     /// only closes sign-up and password reset): apps that offer only Fabric sign-in in production
     /// often sign in locally with a fixed dev account.
     async fn auto_create(&self, email: &str, password: &str) -> Result<Option<User>, ApiError> {
-        if !(self.settings.auto_create_users && self.settings.signup_enabled) {
+        let settings = self.settings();
+        if !(settings.auto_create_users && settings.signup_enabled) {
             return Ok(None);
         }
         let exists = self
@@ -446,7 +447,7 @@ impl AuthService {
         let (Some(caller), Some(token)) = (caller, token) else {
             return Ok(());
         };
-        let Ok(claims) = self.jwt.verify(token, self.now_ms() / 1000) else {
+        let Ok(claims) = self.jwt().verify(token, self.now_ms() / 1000) else {
             return Ok(());
         };
         if claims.sub == caller.sub
@@ -1123,6 +1124,38 @@ pub(crate) mod tests {
             .await;
         assert_eq!(unknown.status, StatusCode::UNAUTHORIZED);
         assert_eq!(unknown.body["error"], "INVALID_CODE");
+    }
+
+    #[tokio::test]
+    async fn new_settings_apply_at_once_and_keep_the_sessions() {
+        let app = app().await;
+        app.sign_up("alice", "secret1").await;
+        let signed_in = app.sign_in("alice", "secret1").await;
+        let access_token = text(&signed_in, "accessToken").to_owned();
+
+        let mut settings = AuthSettings::new(APP_ID);
+        settings.password_enabled = false;
+        settings.access_token_minutes = 120;
+        settings.scopes = vec!["notes.read".into()];
+        app.auth.set_settings(settings).unwrap();
+
+        let signed_up = app.sign_up("bob", "secret1").await;
+        assert_eq!(signed_up.body["error"], "auth_mode_disabled");
+        let runtime = app.get(RUNTIME_SETTINGS_PATH).await;
+        assert_eq!(
+            runtime.body["serviceSettings"]["auth"]["password"],
+            json!({ "enabled": false })
+        );
+        assert!(app.auth.resolve(Some(&access_token)).is_ok());
+        let refreshed = app.refresh(text(&signed_in, "refreshToken")).await;
+        assert_eq!(refreshed.status, StatusCode::OK);
+        assert_eq!(refreshed.body["expiresIn"], 7200);
+        assert_eq!(refreshed.body["scope"], "notes.read");
+        assert!(
+            app.auth
+                .resolve(Some(text(&refreshed, "accessToken")))
+                .is_ok()
+        );
     }
 
     #[tokio::test]

@@ -18,8 +18,8 @@ use serde_json::json;
 use super::users::{read_hidden, render_table};
 use crate::ui::{self, Painter};
 
-const RESTART_NOTE: &str = "A running `rayfin-local serve` reads secrets when it starts: restart \
-                            it to apply this change.";
+const RUNNING_NOTE: &str = "A running `rayfin-local serve` applies this by itself: it restarts \
+                            its function host with the new values.";
 
 #[derive(Debug, Subcommand)]
 pub enum SecretCommand {
@@ -128,7 +128,7 @@ fn set(project: &Project, state: &LocalState, name: &str, value: String) -> anyh
              this value."
         ));
     }
-    ui::status(RESTART_NOTE);
+    ui::status(RUNNING_NOTE);
     Ok(())
 }
 
@@ -220,7 +220,7 @@ fn delete(project: &Project, state: &LocalState, name: &str) -> anyhow::Result<(
     }
     state.save_secrets(&secrets)?;
     ui::step(format_args!("Deleted the value of {name} from {path}"));
-    ui::status(RESTART_NOTE);
+    ui::status(RUNNING_NOTE);
     Ok(())
 }
 

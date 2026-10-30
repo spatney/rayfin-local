@@ -26,10 +26,12 @@
 //! - Request logs at debug level: method, path (no query), status and latency; never headers or
 //!   bodies.
 //!
-//! [`bind`] and [`serve`] run the router. "compat" is micro-fabric's `docs/compatibility.md`.
+//! [`bind`] and [`serve`] run the router; a [`RouterHandle`] replaces it while it serves, on the
+//! same listeners. "compat" is micro-fabric's `docs/compatibility.md`.
 
 mod cors;
 mod guards;
+mod handle;
 mod listen;
 mod routes;
 mod static_site;
@@ -50,6 +52,7 @@ use tower_http::trace::TraceLayer;
 use tracing::Span;
 
 pub use guards::{ANONYMOUS_ACCESS_DISABLED, reject_anonymous};
+pub use handle::RouterHandle;
 pub use listen::{bind, is_port_free, serve};
 
 /// The readiness endpoint; answers `{"ok":true}`.
