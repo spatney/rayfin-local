@@ -9,7 +9,7 @@ use crate::env::{EnvFile, FRONTEND_PORT_VAR};
 use crate::local_config::LocalConfig;
 use crate::package::{
     CLIENT_PACKAGE, CORE_PACKAGE, PackageJson, RayfinPackage, collect_rayfin_packages,
-    is_supported_sdk_version,
+    is_supported_sdk_version, supported_sdk_line,
 };
 use crate::paths::{PathProblem, resolve_contained};
 use crate::state::STATE_DIR;
@@ -258,6 +258,15 @@ impl Project {
         self.sdk_package().and_then(RayfinPackage::version)
     }
 
+    /// The installed Rayfin SDK version: `@microsoft/rayfin-client`'s, else
+    /// `@microsoft/rayfin-core`'s; `None` when neither is installed.
+    pub fn installed_sdk_version(&self) -> Option<&str> {
+        [CLIENT_PACKAGE, CORE_PACKAGE]
+            .into_iter()
+            .filter_map(|name| self.rayfin_package(name))
+            .find_map(|package| package.installed.as_deref())
+    }
+
     fn sdk_package(&self) -> Option<&RayfinPackage> {
         [CLIENT_PACKAGE, CORE_PACKAGE]
             .into_iter()
@@ -269,10 +278,11 @@ impl Project {
     pub fn sdk_version_warning(&self) -> Option<String> {
         let package = self.sdk_package()?;
         let version = package.version()?;
+        let line = supported_sdk_line();
         (!is_supported_sdk_version(version)).then(|| {
             format!(
-                "{} {version} is not the 1.36 SDK rayfin-local implements; some behavior may \
-                 differ from Fabric. Use @microsoft/rayfin-* 1.36.x for full fidelity.",
+                "{} {version} is not the {line} SDK rayfin-local implements; some behavior may \
+                 differ from Fabric. Use @microsoft/rayfin-* {line}.x for full fidelity.",
                 package.name
             )
         })

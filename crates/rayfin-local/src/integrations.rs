@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::net::IpAddr;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{Context as _, anyhow};
 use axum::Router;
@@ -16,7 +16,7 @@ use rl_auth::{AuthService, AuthSettings};
 use rl_connectors::{ConnectorDef, ConnectorsConfig, DEFAULT_POWERBI_BASE_URL};
 use rl_db::Db;
 use rl_frontend::{DevServer, DevServerConfig, RayfinEnv, StaticBuildConfig};
-use rl_functions::{FunctionsConfig, FunctionsService};
+use rl_functions::{FunctionsConfig, FunctionsService, FunctionsState};
 use rl_graphql::{DataApi, DataApiSettings};
 use rl_model::{AppModel, CallerResolver};
 use rl_node::NodeRuntime;
@@ -31,7 +31,12 @@ use tokio::sync::oneshot;
 
 use crate::analysis::SourcesStamp;
 use crate::commands::serve::ServeOptions;
+use crate::events::{
+    self, EntityChanges, ErrorCode, Event, Functions, FunctionsStatus, Schema, Vite, ViteState,
+    WarningCode,
+};
 use crate::shutdown::StopHooks;
+use crate::tokens;
 use crate::ui;
 
 /// The file in `.rayfin-local/keys` with the key that signs storage URLs (hex), kept so that
@@ -68,16 +73,21 @@ impl ServeContext<'_> {
 
     /// The developer's Azure tokens.
     pub fn tokens(&self) -> Arc<dyn TokenSource> {
-        self.broker.clone()
+        tokens::reporting(Arc::clone(self.broker))
     }
 }
 
 /// Brings the entity tables up to date with the model. Changes that would lose data fail unless
 /// `force` (`--force-schema`).
 pub async fn apply_schema(db: &Db, model: &AppModel, force: bool) -> anyhow::Result<()> {
-    let report = rl_db::apply(db, model, force)
-        .await
-        .context("Could not update the database to the app's entities")?;
+    let report = match rl_db::apply(db, model, force).await {
+        Ok(report) => report,
+        Err(err) => {
+            events::emit(Event::Schema(Schema::rejected(&err, false)));
+            return Err(anyhow::Error::new(err)
+                .context("Could not update the database to the app's entities"));
+        }
+    };
     for warning in &report.warnings {
         ui::warn(warning);
     }
@@ -94,6 +104,8 @@ pub async fn apply_schema(db: &Db, model: &AppModel, force: bool) -> anyhow::Res
             if count == 1 { "change" } else { "changes" }
         ));
     }
+    let changes = EntityChanges::of_steps(&report.steps, model).items(report.steps.len());
+    events::emit(Event::Schema(Schema::applied(changes, &report, false)));
     Ok(())
 }
 
@@ -248,6 +260,12 @@ pub fn connector_defs(entries: &[ConnectorEntry]) -> Vec<ConnectorDef> {
         .collect()
 }
 
+/// Whether rayfin-local runs connectors of type `kind` (`rayfin.yml` `connectors[].type`); the
+/// others answer 501, and hosts are told (`connector-unsupported`, `ready`'s `connectors`).
+pub fn connector_runs_locally(kind: &str) -> bool {
+    matches!(kind, "fabric-semanticmodel")
+}
+
 /// The GraphQL data API over the project database (`None` when `services.data` is off).
 pub fn data_api(
     project: &Project,
@@ -358,7 +376,25 @@ pub async fn start_functions(
         .options
         .inspect
         .or(ctx.project.local_config().functions.inspect_port);
-    config.sink = ui::child_sink();
+    config.sink = ui::functions_sink();
+    let warned = Mutex::new(None);
+    config.on_state = Some(Arc::new(move |state: &FunctionsState| {
+        report_functions_state(state, &warned);
+    }));
+    if let Some(missing) = missing_packages(functions_dir) {
+        let dir = functions_dir.display().to_string();
+        events::emit(Event::Error(events::ErrorEvent {
+            code: ErrorCode::PackagesMissing,
+            message: format!(
+                "The functions' npm packages are not installed ({} missing), so they can't be \
+                 built.",
+                missing.join(", ")
+            ),
+            hint: Some(format!("Run `npm install` in {dir}.")),
+            fatal: false,
+            details: serde_json::json!({ "dir": dir }),
+        }));
+    }
     let service = FunctionsService::start(config, ctx.callers(), ctx.tokens())
         .await
         .with_context(|| {
@@ -373,6 +409,67 @@ pub async fn start_functions(
         move || async move { host.stop().await },
     );
     Ok(Some(service))
+}
+
+/// The functions' state as a `functions` event; a failed build is also a
+/// `functions-build-failed` warning, once per failure (`warned` is the last one warned about).
+fn report_functions_state(state: &FunctionsState, warned: &Mutex<Option<(String, Vec<String>)>>) {
+    let mut warned = warned.lock().unwrap_or_else(PoisonError::into_inner);
+    let event = match state {
+        FunctionsState::Building => Functions {
+            state: FunctionsStatus::Building,
+            names: Vec::new(),
+            errors: Vec::new(),
+            message: None,
+        },
+        FunctionsState::Ready { names } => {
+            *warned = None;
+            Functions {
+                state: FunctionsStatus::Ready,
+                names: names.clone(),
+                errors: Vec::new(),
+                message: None,
+            }
+        }
+        FunctionsState::Failed {
+            message,
+            errors,
+            build,
+            names,
+        } => {
+            let failure = Some((message.clone(), errors.clone()));
+            if *build && *warned != failure {
+                events::warning(
+                    WarningCode::FunctionsBuildFailed,
+                    format!("{}.", message.trim_end_matches('.')),
+                    None,
+                    events::no_details(),
+                );
+                *warned = failure;
+            }
+            Functions {
+                state: FunctionsStatus::Failed,
+                names: names.clone(),
+                errors: errors.clone(),
+                message: Some(message.clone()),
+            }
+        }
+    };
+    events::emit(Event::Functions(event));
+}
+
+/// The packages the functions' `package.json` declares that Node.js can't find from their
+/// folder; `None` when every one is there (or there is no `package.json` to read).
+fn missing_packages(functions_dir: &Path) -> Option<Vec<String>> {
+    let package = rl_project::PackageJson::load_dir(functions_dir).ok()??;
+    let missing: Vec<String> = package
+        .dependencies
+        .keys()
+        .chain(package.dev_dependencies.keys())
+        .filter(|name| rl_project::resolve_node_package(functions_dir, name).is_none())
+        .cloned()
+        .collect();
+    (!missing.is_empty()).then_some(missing)
 }
 
 /// The values of the secrets `rayfin.yml` declares: from the environment, else from
@@ -410,10 +507,14 @@ fn function_secrets(ctx: &ServeContext<'_>) -> Vec<(String, String)> {
         .to_string_lossy()
         .replace('\\', "/");
     for name in missing {
-        ui::warn(format_args!(
-            "secret {name} has no local value: add it to {settings_file} Values or run \
-             `rayfin-local secret set {name}`"
-        ));
+        ui::warning(
+            WarningCode::SecretMissing,
+            format_args!(
+                "secret {name} has no local value: add it to {settings_file} Values or run \
+                 `rayfin-local secret set {name}`"
+            ),
+            serde_json::json!({ "name": name }),
+        );
     }
     values
 }
@@ -509,18 +610,34 @@ pub async fn start_frontend(
         sink: ui::child_sink(),
     })
     .await
-    .context("Could not start the app's Vite dev server")?;
+    .context("Could not start the app's Vite dev server")
+    .inspect_err(|err| {
+        events::emit(Event::Vite(Vite {
+            state: ViteState::Failed,
+            url: None,
+            version: None,
+            message: Some(ui::error_lines(err).join("\n")),
+        }));
+    })?;
     ui::step(format_args!(
         "Vite {} dev server on {}",
         server.vite_version(),
         server.url()
     ));
     let url = server.url().to_owned();
+    let ready = Vite {
+        state: ViteState::Ready,
+        url: Some(url.clone()),
+        version: Some(server.vite_version().to_owned()).filter(|version| !version.is_empty()),
+        message: None,
+    };
+    events::emit(Event::Vite(ready.clone()));
     let (stop, stopped) = oneshot::channel();
     let supervisor = tokio::spawn(supervise_dev_server(
         server,
         stopped,
         ctx.api_origin.to_owned(),
+        ready,
     ));
     hooks.add("the Vite dev server", move || async move {
         let _ = stop.send(());
@@ -529,11 +646,13 @@ pub async fn start_frontend(
     Ok(Some(url))
 }
 
-/// Stops the dev server when `stop` fires, or reports that it exited by itself.
+/// Stops the dev server when `stop` fires, or reports that it exited by itself (`running` is the
+/// `vite` event it started with).
 async fn supervise_dev_server(
     mut server: DevServer,
     stop: oneshot::Receiver<()>,
     api_origin: String,
+    running: Vite,
 ) {
     tokio::select! {
         exit = server.wait_exit() => {
@@ -541,6 +660,11 @@ async fn supervise_dev_server(
                 Ok(status) => status.to_string(),
                 Err(err) => err.to_string(),
             };
+            events::emit(Event::Vite(Vite {
+                state: ViteState::Exited,
+                message: Some(format!("The Vite dev server stopped ({how}).")),
+                ..running
+            }));
             ui::warn(format_args!(
                 "The Vite dev server stopped ({how}). The backend keeps running on {api_origin}; \
                  to start the app again, stop rayfin-local with Ctrl+C and run \

@@ -8,5 +8,7 @@ pub mod host;
 pub mod invoke;
 /// `runtimemetadata.json`: freshness checks and generation (`js/udf-metadata.mjs`).
 pub mod metadata;
+mod state;
 
 pub use invoke::{FunctionsConfig, FunctionsError, FunctionsService};
+pub use state::{FunctionsState, StateObserver};

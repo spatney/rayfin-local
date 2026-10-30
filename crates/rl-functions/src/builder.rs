@@ -27,7 +27,7 @@ pub const DEFAULT_BUILD_COMMAND: &str = "npm run build";
 pub const BUILD_WATCH_SCRIPT: &str = "build:watch";
 
 /// The log label of build output.
-const LABEL: &str = "build";
+pub(crate) const LABEL: &str = "build";
 
 /// How to build the functions package.
 #[derive(Clone)]

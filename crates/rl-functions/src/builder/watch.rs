@@ -39,6 +39,9 @@ pub enum WatchEvent {
     /// A TypeScript source, `package.json` or `tsconfig*.json` changed: `runtimemetadata.json`
     /// may be stale.
     SourceChanged,
+    /// The build command, run again after source changes ([`WatchMode::Rebuild`]), finished:
+    /// `ok` when it succeeded.
+    Rebuilt { ok: bool },
     /// `npm run build:watch` exited (with this status, when known), so the output is no longer
     /// recompiled.
     BuildWatchExited(Option<ExitStatus>),
@@ -202,7 +205,11 @@ pub fn watch(config: &BuildConfig) -> Result<FunctionsWatch, BuildError> {
             functions_dir: root.clone(),
             ..config.clone()
         };
-        tasks.push(tokio::spawn(rebuild_on_request(config, requests_rx)));
+        tasks.push(tokio::spawn(rebuild_on_request(
+            config,
+            requests_rx,
+            events_tx.clone(),
+        )));
         requests
     });
     tasks.push(tokio::spawn(debounce(
@@ -410,13 +417,22 @@ async fn sleep_until(deadline: Option<Instant>) {
     }
 }
 
-/// Runs the build once per batch of requests, never two at a time.
-async fn rebuild_on_request(config: BuildConfig, mut requests: mpsc::UnboundedReceiver<()>) {
+/// Runs the build once per batch of requests, never two at a time, and reports each outcome.
+async fn rebuild_on_request(
+    config: BuildConfig,
+    mut requests: mpsc::UnboundedReceiver<()>,
+    events: mpsc::Sender<WatchEvent>,
+) {
     while requests.recv().await.is_some() {
         while requests.try_recv().is_ok() {}
-        if let Err(error) = build(&config).await {
-            tracing::warn!("{error}");
-        }
+        let ok = match build(&config).await {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!("{error}");
+                false
+            }
+        };
+        let _ = events.send(WatchEvent::Rebuilt { ok }).await;
     }
 }
 

@@ -1,8 +1,12 @@
-//! Stopping `serve`: the stop signals, and the hooks that stop what `serve` started.
+//! Stopping `serve`: the stop signals, the end of stdin (`--json`), and the hooks that stop what
+//! `serve` started.
 
 use std::future::Future;
+use std::io::{self, Read};
 use std::pin::Pin;
 use std::time::Duration;
+
+use tokio::sync::oneshot;
 
 type HookFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 type Hook = Box<dyn FnOnce() -> HookFuture + Send>;
@@ -64,6 +68,69 @@ pub async fn signal() -> std::io::Result<()> {
     }
 }
 
+/// What asked `serve` to stop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopRequest {
+    /// Ctrl+C (or another signal of [`signal`]).
+    Signal,
+    /// stdin ended: the host closed it, or ended.
+    StdinClosed,
+}
+
+/// Listens for what asks `serve` to stop: the signals of [`signal`] and the end of an input
+/// (stdin, for hosts).
+pub struct StopListener {
+    eof: oneshot::Receiver<()>,
+}
+
+impl StopListener {
+    /// Starts reading `input` (on a thread of its own) to see it end.
+    pub fn with_input(input: impl Read + Send + 'static) -> Self {
+        Self {
+            eof: watch_eof(input),
+        }
+    }
+
+    /// The next stop request.
+    pub async fn requested(&mut self) -> io::Result<StopRequest> {
+        let eof = async {
+            // A reader that could not run never ends.
+            if (&mut self.eof).await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        };
+        tokio::select! {
+            signal = signal() => signal.map(|()| StopRequest::Signal),
+            () = eof => Ok(StopRequest::StdinClosed),
+        }
+    }
+}
+
+/// Reads `input` until it ends or fails, on a thread of its own (a blocking read can't be
+/// cancelled); the receiver completes then. What is read is ignored.
+pub fn watch_eof(mut input: impl Read + Send + 'static) -> oneshot::Receiver<()> {
+    let (ended, receiver) = oneshot::channel();
+    let reader = move || {
+        let mut buffer = [0; 512];
+        loop {
+            match input.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        let _ = ended.send(());
+    };
+    if let Err(err) = std::thread::Builder::new()
+        .name("stdin".into())
+        .spawn(reader)
+    {
+        tracing::warn!("could not watch stdin, so closing it does not stop rayfin-local: {err}");
+    }
+    receiver
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -85,5 +152,37 @@ mod tests {
         }
         hooks.run(Duration::from_millis(50)).await;
         assert_eq!(*order.lock().unwrap(), ["vite", "backend"]);
+    }
+
+    /// A pipe whose writer is a channel: reads block until data comes or the sender is dropped.
+    struct Pipe(std::sync::mpsc::Receiver<Vec<u8>>);
+
+    impl Read for Pipe {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            match self.0.recv() {
+                Ok(bytes) => {
+                    let n = bytes.len().min(buffer.len());
+                    buffer[..n].copy_from_slice(&bytes[..n]);
+                    Ok(n)
+                }
+                Err(_) => Ok(0),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_end_of_stdin_asks_to_stop() {
+        let (writer, reader) = std::sync::mpsc::channel();
+        let mut listener = StopListener::with_input(Pipe(reader));
+        writer.send(b"anything a host writes".to_vec()).unwrap();
+        let early = tokio::time::timeout(Duration::from_millis(200), listener.requested()).await;
+        assert!(early.is_err(), "stopped while stdin was open");
+
+        drop(writer);
+        let request = tokio::time::timeout(Duration::from_secs(5), listener.requested())
+            .await
+            .expect("no stop request after stdin ended")
+            .unwrap();
+        assert_eq!(request, StopRequest::StdinClosed);
     }
 }

@@ -73,6 +73,8 @@ use std::{path::PathBuf, time::Duration};
 
 use rl_node::{LineSink, NodeRuntime};
 
+use crate::state::StateObserver;
+
 pub use service::FunctionsService;
 
 /// The UDF invocation ceiling, which the SDK's own timeout matches.
@@ -104,6 +106,8 @@ pub struct FunctionsConfig {
     pub invoke_timeout: Duration,
     /// Receives the output of the build (`build`), the metadata helper and the host (`fn`).
     pub sink: LineSink,
+    /// Told what the functions are doing: building, ready or failed.
+    pub on_state: Option<StateObserver>,
 }
 
 impl FunctionsConfig {
@@ -128,6 +132,7 @@ impl FunctionsConfig {
             inspect_port: None,
             invoke_timeout: DEFAULT_INVOKE_TIMEOUT,
             sink: rl_node::default_sink(),
+            on_state: None,
         }
     }
 }

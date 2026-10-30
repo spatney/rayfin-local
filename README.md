@@ -197,7 +197,10 @@ rayfin-local serve --static        # build the app once and serve it from the ba
 rayfin-local serve --no-frontend   # only the backend, for your own dev server or tests
 rayfin-local serve -C path/to/app  # a project other than the current directory
 rayfin-local serve --reset         # start from an empty database
+rayfin-local serve --json          # for programs: JSON events on stdout, stops when stdin closes
 ```
+
+Programs that run rayfin-local for the developer, such as [Fabricator](https://github.com/spatney/rayfin-fabricator), use `serve --json`; [docs/embedding.md](docs/embedding.md) is their contract.
 
 ### The backend's routes
 
@@ -362,11 +365,12 @@ With `anonymous_data_access = false`, `serve` refuses such entities, as `rayfin 
 | Command | What it does |
 | --- | --- |
 | `rayfin-local serve` | Start the local backend and the app. |
-| `rayfin-local doctor` | Check Node.js, installed packages, Azure and Rayfin sign-in, and ports. |
+| `rayfin-local doctor [--json]` | Check Node.js, installed packages, Azure and Rayfin sign-in, and ports. |
 | `rayfin-local schema` | Print the app model and the SQLite schema derived from `rayfin/data`. |
 | `rayfin-local reset [--yes]` | Delete `.rayfin-local/`: database, users, keys, stored files and secrets. |
 | `rayfin-local users list\|add\|delete\|reset-password` | Manage local users. |
-| `rayfin-local secret set\|list\|delete` | Manage local secret values (`.rayfin-local/secrets.json`). |
+| `rayfin-local secret set\|list\|delete` | Manage local secret values (`.rayfin-local/secrets.json`); `secret list --json` prints them as JSON (never the values). |
+| `rayfin-local version [--json]` | Print the version; with `--json`, also the version of the host contract and the Rayfin SDK versions it supports. |
 
 `rayfin-local <command> --help` shows each command's arguments.
 Every command takes these options:
@@ -392,6 +396,7 @@ Every command takes these options:
 | `--reset` | Start from an empty database: delete the database and stored files (keeps ports, keys and secrets). |
 | `--inspect[=PORT]` | Start the function host with the Node.js inspector, on port 9229 by default. |
 | `--open` | Open the app in the browser once it is ready. |
+| `--json` | For programs that run rayfin-local: events as JSON lines on stdout instead of the human output, and a graceful stop when stdin closes. [docs/embedding.md](docs/embedding.md) is the contract. |
 
 ### Environment variables
 
@@ -445,6 +450,7 @@ Run `rayfin-local doctor` first: it checks what `serve` needs and says what to f
 
 - [Architecture](docs/architecture.md): how rayfin-local works, its design principles, crates and request flows.
 - [Differences from Fabric](docs/differences.md): what is supported, what differs and what is missing, per SDK surface.
+- [Embedding](docs/embedding.md): the contract for programs that run rayfin-local, such as Fabricator: `serve --json` events, error codes, exit codes and the control API.
 - [Development](docs/development.md): building, testing and releasing rayfin-local.
 
 ## License

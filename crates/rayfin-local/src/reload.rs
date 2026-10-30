@@ -3,7 +3,8 @@
 //! and the data API switched to the new model. Changes to the sources of a data package with a
 //! build command (or of the workspace packages whose build output it imports) run the build
 //! command first. A failed build or analysis, or a change that would lose data (without
-//! `--force-schema`), leaves the previous model in use.
+//! `--force-schema`), leaves the previous model in use. Each analysis and its schema change are
+//! reported to hosts (`analysis` and `schema` events).
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
@@ -15,12 +16,13 @@ use notify::event::ModifyKind;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use rl_db::Db;
 use rl_graphql::DataApi;
-use rl_model::{AppModel, Entity, Storage};
+use rl_model::Storage;
 use rl_node::NodeRuntime;
 use rl_project::{LocalState, Project, RayfinConfig};
 use tokio::sync::mpsc;
 
 use crate::analysis;
+use crate::events::{self, Analysis, EntityChanges, Event, Schema};
 use crate::integrations::ServeContext;
 use crate::shutdown::StopHooks;
 use crate::ui;
@@ -433,6 +435,10 @@ impl Reloader {
         }
         let reanalyzed =
             analysis::reanalyze(&self.project, &self.state, &self.node, self.verbose, build).await;
+        events::emit(Event::Analysis(Analysis::of(
+            &self.project,
+            reanalyzed.as_ref(),
+        )));
         let model = match reanalyzed {
             Ok(model) => model,
             Err(err) => {
@@ -450,6 +456,7 @@ impl Reloader {
         };
         let served = data_api.model();
         if served.entities == model.entities && served.dialect == model.dialect {
+            events::emit(Event::Schema(Schema::unchanged(true)));
             return;
         }
         match rl_db::apply(&self.db, &model, self.force).await {
@@ -460,7 +467,8 @@ impl Reloader {
                 for loss in &report.forced {
                     ui::warn(format_args!("--force-schema: {loss}"));
                 }
-                let mut summary = describe_change(&served, &model);
+                let changes = EntityChanges::between(&served, &model);
+                let mut summary = changes.summary();
                 let steps = report.steps.len();
                 if steps > 0 {
                     summary.push_str(&format!(
@@ -469,9 +477,15 @@ impl Reloader {
                     ));
                 }
                 data_api.set_model(Arc::new(model));
+                events::emit(Event::Schema(Schema::applied(
+                    changes.items(steps),
+                    &report,
+                    true,
+                )));
                 ui::step(format_args!("Schema updated ({summary})"));
             }
             Err(err) => {
+                events::emit(Event::Schema(Schema::rejected(&err, true)));
                 ui::error(&anyhow::Error::new(err).context(
                     "The entity changes were not applied; the previous schema stays in use",
                 ))
@@ -501,43 +515,6 @@ impl ConfigChange {
             other: without_dialect(served) != without_dialect(new),
         }
     }
-}
-
-/// The entities added, removed and changed, such as `added Tag; changed Todo`.
-fn describe_change(served: &AppModel, new: &AppModel) -> String {
-    fn by_name(model: &AppModel) -> BTreeMap<&str, &Entity> {
-        model
-            .entities
-            .iter()
-            .map(|entity| (entity.name.as_str(), entity))
-            .collect()
-    }
-    let (served_entities, new_entities) = (by_name(served), by_name(new));
-    let added: Vec<&str> = new_entities
-        .keys()
-        .filter(|name| !served_entities.contains_key(*name))
-        .copied()
-        .collect();
-    let removed: Vec<&str> = served_entities
-        .keys()
-        .filter(|name| !new_entities.contains_key(*name))
-        .copied()
-        .collect();
-    let changed: Vec<&str> = new_entities
-        .iter()
-        .filter(|(name, entity)| served_entities.get(*name).is_some_and(|old| old != *entity))
-        .map(|(name, _)| *name)
-        .collect();
-    let mut parts = Vec::new();
-    for (verb, names) in [("added", added), ("removed", removed), ("changed", changed)] {
-        if !names.is_empty() {
-            parts.push(format!("{verb} {}", names.join(", ")));
-        }
-    }
-    if parts.is_empty() {
-        parts.push(format!("dialect {}", new.dialect.as_str()));
-    }
-    parts.join("; ")
 }
 
 #[cfg(test)]

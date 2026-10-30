@@ -1,12 +1,17 @@
 //! Terminal output: status lines, warnings, errors, child-process output and the startup banner.
 //!
 //! Colors are plain ANSI codes, used only when the stream is a terminal and `NO_COLOR` is unset.
+//! With `--json` ([`events::is_json`]) the same calls emit `log` and `warning` events instead,
+//! and nothing else is printed.
 
 use std::fmt::Display;
 use std::io::{self, IsTerminal, Write};
 use std::sync::{Arc, OnceLock};
 
 use rl_node::{LineSink, Stream};
+use serde_json::Value;
+
+use crate::events::{self, LogLevel, LogSource, WarningCode};
 
 #[derive(Clone, Copy)]
 struct ColorSupport {
@@ -132,35 +137,48 @@ impl Painter {
 
 /// A finished startup step: `✓ message`.
 pub fn step(message: impl Display) {
+    if events::is_json() {
+        return events::log(LogSource::RayfinLocal, LogLevel::Info, message.to_string());
+    }
     let painter = Painter::stderr();
     eprintln!("{} {message}", painter.paint(Color::Green, "✓"));
 }
 
 /// A plain status line.
 pub fn status(message: impl Display) {
+    if events::is_json() {
+        return events::log(LogSource::RayfinLocal, LogLevel::Info, message.to_string());
+    }
     eprintln!("{message}");
 }
 
 /// `warning: message`.
 pub fn warn(message: impl Display) {
+    if events::is_json() {
+        return events::log(LogSource::RayfinLocal, LogLevel::Warn, message.to_string());
+    }
     let painter = Painter::stderr();
     eprintln!("{} {message}", painter.paint(Color::Yellow, "warning:"));
+}
+
+/// A warning hosts can act on: with `--json` a `warning` event with `code` and `details`, else
+/// `warning: message`.
+pub fn warning(code: WarningCode, message: impl Display, details: Value) {
+    if events::is_json() {
+        return events::warning(code, message.to_string(), None, details);
+    }
+    warn(message);
 }
 
 /// `error: message`, then each cause on its own line (causes whose text the previous messages
 /// already include are left out).
 pub fn error(err: &anyhow::Error) {
-    let painter = Painter::stderr();
-    let mut shown: Vec<String> = Vec::new();
-    for cause in err.chain() {
-        let text = cause.to_string();
-        let text = text.trim();
-        if text.is_empty() || shown.iter().any(|earlier| earlier.contains(text)) {
-            continue;
-        }
-        shown.push(text.to_owned());
+    let lines = error_lines(err);
+    if events::is_json() {
+        return events::log(LogSource::RayfinLocal, LogLevel::Error, lines.join("\n"));
     }
-    let mut lines = shown.iter();
+    let painter = Painter::stderr();
+    let mut lines = lines.iter();
     let first = lines.next().map_or("unknown error", String::as_str);
     let mut out = format!("{} {first}\n", painter.paint(Color::Red, "error:"));
     for cause in lines {
@@ -173,9 +191,47 @@ pub fn error(err: &anyhow::Error) {
     let _ = io::stderr().lock().write_all(out.as_bytes());
 }
 
+/// The message of `err` and of each of its causes, leaving out those whose text the messages
+/// before already include.
+pub fn error_lines(err: &anyhow::Error) -> Vec<String> {
+    let mut shown: Vec<String> = Vec::new();
+    for cause in err.chain() {
+        let text = cause.to_string();
+        let text = text.trim();
+        if text.is_empty() || shown.iter().any(|earlier| earlier.contains(text)) {
+            continue;
+        }
+        shown.push(text.to_owned());
+    }
+    if shown.is_empty() {
+        shown.push("unknown error".to_owned());
+    }
+    shown
+}
+
 /// The sink for child processes and helpers: `[label] line` on stderr, each label in its own
-/// stable color.
+/// stable color. With `--json`, `log` events whose source the label gives.
 pub fn child_sink() -> LineSink {
+    sink_for(None)
+}
+
+/// [`child_sink`] for the functions: the function host, their build and their metadata helper
+/// (`log` events with source `functions`).
+pub fn functions_sink() -> LineSink {
+    sink_for(Some(LogSource::Functions))
+}
+
+fn sink_for(source: Option<LogSource>) -> LineSink {
+    if events::is_json() {
+        return Arc::new(move |label: &str, stream: Stream, line: &str| {
+            let level = match stream {
+                Stream::Stdout => LogLevel::Info,
+                Stream::Stderr => LogLevel::Warn,
+            };
+            let source = source.unwrap_or_else(|| LogSource::of_label(label));
+            events::log(source, level, rl_node::strip_ansi(line));
+        });
+    }
     Arc::new(|label: &str, _stream: Stream, line: &str| {
         let tag = Painter::stderr().paint(label_color(label), format_args!("[{label}]"));
         let _ = writeln!(io::stderr().lock(), "{tag} {line}");
@@ -204,6 +260,9 @@ pub struct Banner<'a> {
 }
 
 pub fn banner(banner: &Banner<'_>) {
+    if events::is_json() {
+        return;
+    }
     let painter = Painter::stderr();
     let width = banner
         .rows

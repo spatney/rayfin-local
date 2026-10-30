@@ -44,7 +44,7 @@ pub use local_config::{
 };
 pub use package::{
     CLIENT_PACKAGE, CORE_PACKAGE, PackageJson, RayfinPackage, SUPPORTED_SDK_VERSION,
-    is_supported_sdk_version,
+    TESTED_SDK_VERSION, is_supported_sdk_version, supported_sdk_line, supported_sdk_range,
 };
 pub use paths::resolve_node_package;
 pub use project::{DEFAULT_FRONTEND_PORT, LoadOptions, Project};

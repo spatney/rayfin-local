@@ -246,6 +246,46 @@ pub fn default_sink() -> LineSink {
     })
 }
 
+/// `line` without terminal escape sequences (colors, cursor moves, hyperlinks), which children
+/// print when they think they write to a terminal.
+pub fn strip_ansi(line: &str) -> std::borrow::Cow<'_, str> {
+    if !line.contains('\x1b') {
+        return std::borrow::Cow::Borrowed(line);
+    }
+    let mut out = String::with_capacity(line.len());
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            // CSI: parameters and intermediates, up to a final byte in `@`..=`~`.
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC (such as a hyperlink): up to BEL or ST (`ESC \`).
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\x07' {
+                        break;
+                    }
+                    if c == '\x1b' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
 /// What to run, where, and with which environment.
 #[derive(Clone)]
 pub struct ProcessSpec {
@@ -827,5 +867,23 @@ mod tests {
     fn content_hash_depends_on_boundaries() {
         assert_ne!(content_hash(&["ab", "c"]), content_hash(&["a", "bc"]));
         assert_eq!(content_hash(&["x"]).len(), 12);
+    }
+
+    #[test]
+    fn escape_sequences_are_stripped() {
+        assert!(matches!(
+            strip_ansi("plain"),
+            std::borrow::Cow::Borrowed("plain")
+        ));
+        assert_eq!(
+            strip_ansi(
+                "\x1b[32m  ➜\x1b[39m  \x1b[1mLocal\x1b[22m: \x1b[36mhttp://localhost:5173/\x1b[39m"
+            ),
+            "  ➜  Local: http://localhost:5173/"
+        );
+        assert_eq!(
+            strip_ansi("\x1b]8;;https://vite.dev\x07docs\x1b]8;;\x1b\\ \x1b[2K\x1b[1Gdone"),
+            "docs done"
+        );
     }
 }

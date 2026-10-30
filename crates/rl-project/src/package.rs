@@ -12,6 +12,8 @@ pub const CLIENT_PACKAGE: &str = "@microsoft/rayfin-client";
 pub const CORE_PACKAGE: &str = "@microsoft/rayfin-core";
 /// The SDK minor version rayfin-local implements (`major`, `minor`).
 pub const SUPPORTED_SDK_VERSION: (u64, u64) = (1, 36);
+/// The SDK version the conformance tests and the fixture app use.
+pub const TESTED_SDK_VERSION: &str = "1.36.2";
 
 const RAYFIN_PACKAGE_PREFIX: &str = "@microsoft/rayfin-";
 
@@ -189,6 +191,18 @@ pub fn is_supported_sdk_version(version: &str) -> bool {
     major_minor(version) == Some(SUPPORTED_SDK_VERSION)
 }
 
+/// The SDK line rayfin-local implements as a semver range, such as `>=1.36.0 <1.37.0`.
+pub fn supported_sdk_range() -> String {
+    let (major, minor) = SUPPORTED_SDK_VERSION;
+    format!(">={major}.{minor}.0 <{major}.{}.0", minor + 1)
+}
+
+/// The SDK line rayfin-local implements, such as `1.36`.
+pub fn supported_sdk_line() -> String {
+    let (major, minor) = SUPPORTED_SDK_VERSION;
+    format!("{major}.{minor}")
+}
+
 fn major_minor(version: &str) -> Option<(u64, u64)> {
     let version = version.trim_start_matches(|c: char| !c.is_ascii_digit());
     let mut parts = version.split('.').map(|part| {
@@ -242,5 +256,11 @@ mod tests {
         for version in ["1.37.0", "1.3.6", "2.36.0", "latest", "workspace:*"] {
             assert!(!is_supported_sdk_version(version), "{version}");
         }
+    }
+
+    #[test]
+    fn the_supported_range_covers_the_sdk_line_and_the_tested_version() {
+        assert_eq!(supported_sdk_range(), ">=1.36.0 <1.37.0");
+        assert!(is_supported_sdk_version(TESTED_SDK_VERSION));
     }
 }

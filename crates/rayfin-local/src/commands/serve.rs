@@ -1,4 +1,7 @@
 //! `rayfin-local serve`: every backend service of the project on this machine, and its frontend.
+//!
+//! With `--json` it is run by a host (docs/embedding.md): it reports what happens as events, and
+//! stops when stdin ends as on Ctrl+C.
 
 use std::fs;
 use std::io;
@@ -16,16 +19,24 @@ use rl_functions::FunctionsService;
 use rl_model::AppModel;
 use rl_project::{LocalState, Project, ServeInfo, ServeLock};
 use rl_server::{ServerConfig, StaticSite};
-use rl_tokens::{TokenBroker, TokenMode, TokenSource};
+use rl_tokens::{TokenBroker, TokenMode};
+use serde_json::json;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::analysis;
+use crate::errors::{HostError, WithCode, coded};
+use crate::events::{
+    self, Analysis, AuthFeature, ConnectorFeature, DataFeature, ErrorCode, Event, FunctionsFeature,
+    ProjectInfo, Ready, Schema, Sdk, SignInAs, Starting, StopReason, Stopped, StorageFeature,
+    WarningCode,
+};
 use crate::integrations::{self, ServeContext};
 use crate::ports::{self, DEFAULT_API_PORT, PortRequest};
 use crate::reload;
-use crate::shutdown::{self, StopHooks};
+use crate::shutdown::{self, StopHooks, StopListener, StopRequest};
+use crate::tokens;
 use crate::ui;
 
 /// The interface to listen on when neither `--host` nor `[server] host` is set.
@@ -38,10 +49,16 @@ const STOP_GRACE: Duration = Duration::from_secs(5);
 const SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(7);
 /// The exit code after Ctrl+C (128 + SIGINT, as shells report it).
 const INTERRUPTED: u8 = 130;
+/// The variable that turns on the control API for hosts.
+const CONTROL_TOKEN_VAR: &str = "RAYFIN_LOCAL_CONTROL_TOKEN";
+/// The shortest control token accepted.
+const MIN_CONTROL_TOKEN_CHARS: usize = 32;
 
 /// `serve`'s command-line settings.
 #[derive(Clone, Debug, Default)]
 pub struct ServeOptions {
+    /// Events on stdout, and a graceful stop when stdin ends.
+    pub json: bool,
     pub port: Option<u16>,
     pub frontend_port: Option<u16>,
     pub static_build: bool,
@@ -57,24 +74,133 @@ pub struct ServeOptions {
     pub verbose: bool,
 }
 
+/// How serving ended.
+enum Outcome {
+    /// Something asked it to stop.
+    Stop(StopRequest),
+    /// Starting failed.
+    Failed(anyhow::Error),
+    /// The backend stopped by itself.
+    BackendExited(anyhow::Error),
+}
+
 pub async fn run(dir: &Path, options: ServeOptions) -> anyhow::Result<ExitCode> {
-    let project = super::load_project(dir)?;
+    let mut running = Running::new();
+    let outcome = if options.json {
+        // From the start: a host may give up on a start that takes long.
+        let mut stop = StopListener::with_input(io::stdin());
+        tokio::select! {
+            outcome = serve(dir, &options, &mut running) => outcome,
+            request = stop.requested() => match request {
+                Ok(request) => Outcome::Stop(request),
+                Err(err) => Outcome::Failed(anyhow!(err).context("Could not listen for Ctrl+C")),
+            },
+        }
+    } else {
+        serve(dir, &options, &mut running).await
+    };
+    finish(outcome, running, options.json).await
+}
+
+/// Stops what runs, and reports how serving ended: with `--json` as events (the `error` first,
+/// `stopped` last) and the exit code 0 after a stop request, else with the human output and 130
+/// after Ctrl+C. Failures exit with 1.
+async fn finish(outcome: Outcome, running: Running, json: bool) -> anyhow::Result<ExitCode> {
+    match &outcome {
+        Outcome::Stop(_) => {
+            ui::status("Stopping…");
+            tokio::spawn(async move {
+                if shutdown::signal().await.is_ok() {
+                    if json {
+                        events::finish(Stopped {
+                            reason: StopReason::Signal,
+                            exit_code: INTERRUPTED,
+                        });
+                    } else {
+                        eprintln!();
+                    }
+                    std::process::exit(i32::from(INTERRUPTED));
+                }
+            });
+        }
+        Outcome::Failed(err) | Outcome::BackendExited(err) if json => {
+            events::emit(HostError::classify(err).event(true));
+        }
+        Outcome::Failed(_) | Outcome::BackendExited(_) => {}
+    }
+    running.shut_down().await;
+    let (reason, code) = match outcome {
+        Outcome::Stop(request) => {
+            ui::status("Stopped.");
+            let reason = match request {
+                StopRequest::Signal => StopReason::Signal,
+                StopRequest::StdinClosed => StopReason::StdinClosed,
+            };
+            (reason, if json { 0 } else { INTERRUPTED })
+        }
+        Outcome::Failed(err) | Outcome::BackendExited(err) if !json => return Err(err),
+        Outcome::Failed(_) => (StopReason::Error, 1),
+        Outcome::BackendExited(_) => (StopReason::BackendExited, 1),
+    };
+    if json {
+        events::finish(Stopped {
+            reason,
+            exit_code: code,
+        });
+    }
+    Ok(ExitCode::from(code))
+}
+
+/// Starts everything and serves until a stop request (without `--json`; with it, [`run`] listens
+/// for them) or until the backend stops.
+async fn serve(dir: &Path, options: &ServeOptions, running: &mut Running) -> Outcome {
+    match start(dir, options, running).await {
+        Ok(outcome) => outcome,
+        Err(err) => Outcome::Failed(err),
+    }
+}
+
+async fn start(
+    dir: &Path,
+    options: &ServeOptions,
+    running: &mut Running,
+) -> anyhow::Result<Outcome> {
+    let project = Project::discover(dir)?;
+    events::emit(Event::Starting(Starting {
+        pid: std::process::id(),
+        version: env!("CARGO_PKG_VERSION").to_owned(),
+        project: ProjectInfo {
+            root: project.root().display().to_string(),
+            name: project.display_name().to_owned(),
+        },
+    }));
+    check_control_token()?;
+    super::check_project(&project)?;
     let (mut state, serve_lock) = open_state(&project, options.reset)?;
+    running.lock = Some(serve_lock);
     let node = super::find_node().await?;
-    let (model, model_stamp) = analysis::analyze(&project, &state, &node, options.verbose).await?;
-    check_anonymous_access(&project, &model)?;
+    let analyzed = analysis::analyze(&project, &state, &node, options.verbose).await;
+    events::emit(Event::Analysis(Analysis::of(
+        &project,
+        analyzed.as_ref().map(|(model, _)| model),
+    )));
+    let (model, model_stamp) = analyzed.with_code(ErrorCode::AnalysisFailed)?;
+    check_anonymous_access(&project, &model).with_code(ErrorCode::AnalysisFailed)?;
     let model = Arc::new(model);
     let db = open_database(&project, &state, &model, options.force_schema).await?;
-    let broker = Arc::new(integrations::token_broker(
-        &project,
-        &state,
-        Some(&node),
-        options.token_source,
-        options.tenant.clone(),
-    )?);
-    let host = listen_host(&project, &options);
+    let broker = Arc::new(
+        integrations::token_broker(
+            &project,
+            &state,
+            Some(&node),
+            options.token_source,
+            options.tenant.clone(),
+        )
+        .with_code(ErrorCode::ConfigInvalid)?,
+    );
+    let host = listen_host(&project, options);
     let (auth, auth_settings) = start_auth(&project, &state, &db, &host, &broker).await?;
-    let bound = bind_ports(&project, &mut state, &options, &host).await?;
+    let bound = bind_ports(&project, &mut state, options, &host).await?;
     let api_origin = format!("http://{}:{}", origin_host(&host), bound.api_port);
     let data_api = integrations::data_api(&project, &db, &model, auth.clone());
 
@@ -88,33 +214,32 @@ pub async fn run(dir: &Path, options: ServeOptions) -> anyhow::Result<ExitCode> 
         auth: &auth,
         broker: &broker,
         data_api,
-        options: &options,
+        options,
         host: &host,
         api_origin: &api_origin,
         frontend_port: bound.frontend_port,
     };
-    let mut running = Running::new();
-    let outcome = serve_until_signal(
-        &ctx,
-        bound.listeners,
-        &auth_settings,
-        &serve_lock,
-        &mut running,
-    )
-    .await;
-    if outcome.is_ok() {
-        ui::status("Stopping…");
-        tokio::spawn(async {
-            if shutdown::signal().await.is_ok() {
-                eprintln!();
-                std::process::exit(i32::from(INTERRUPTED));
-            }
-        });
+    serve_until_stopped(&ctx, bound.listeners, &auth_settings, running).await
+}
+
+/// `RAYFIN_LOCAL_CONTROL_TOKEN`, when set, must be long enough to be a secret.
+fn check_control_token() -> anyhow::Result<()> {
+    let Some(token) = std::env::var_os(CONTROL_TOKEN_VAR).filter(|token| !token.is_empty()) else {
+        return Ok(());
+    };
+    let length = token.to_string_lossy().chars().count();
+    if length < MIN_CONTROL_TOKEN_CHARS {
+        return Err(coded(
+            ErrorCode::ConfigInvalid,
+            events::no_details(),
+            anyhow!(
+                "{CONTROL_TOKEN_VAR} is {length} characters long; the control API needs a secret \
+                 of at least {MIN_CONTROL_TOKEN_CHARS}. Set it to a long random value, or unset \
+                 it."
+            ),
+        ));
     }
-    running.shut_down().await;
-    outcome?;
-    ui::status("Stopped.");
-    Ok(ExitCode::from(INTERRUPTED))
+    Ok(())
 }
 
 /// The project's `.rayfin-local/` (created on first use), locked against a second `serve`.
@@ -192,16 +317,20 @@ async fn open_database(
     force: bool,
 ) -> anyhow::Result<Db> {
     let path = state.db_path();
-    let db = Db::open(&path).with_context(|| {
-        format!(
-            "Could not open the database {}. Close any program that has it open, or start from \
-             an empty one with `rayfin-local serve --reset`.",
-            path.display()
-        )
-    })?;
+    let db = Db::open(&path)
+        .with_context(|| {
+            format!(
+                "Could not open the database {}. Close any program that has it open, or start \
+                 from an empty one with `rayfin-local serve --reset`.",
+                path.display()
+            )
+        })
+        .inspect_err(|err| events::emit(Event::Schema(Schema::failed(err, false))))?;
     // With the data service off, the existing tables are left alone rather than dropped.
     if project.config().services.data.enabled {
         integrations::apply_schema(&db, model, force).await?;
+    } else {
+        events::emit(Event::Schema(Schema::unchanged(false)));
     }
     Ok(db)
 }
@@ -256,7 +385,7 @@ async fn start_auth(
     let auth = AuthService::new(db.clone(), state.keys_dir(), settings.clone())
         .await
         .context("Could not start the local auth service")?
-        .with_entra(Arc::clone(broker) as Arc<dyn TokenSource>);
+        .with_entra(tokens::reporting(Arc::clone(broker)));
     Ok((Arc::new(auth), settings))
 }
 
@@ -297,7 +426,16 @@ async fn bind_ports(
         request.yields_to(frontend_request.as_ref()),
         is_free,
     )?;
-    let listeners = rl_server::bind(host, port).await?;
+    let listeners = rl_server::bind(host, port).await.map_err(|err| {
+        if matches!(
+            err.kind(),
+            io::ErrorKind::AddrInUse | io::ErrorKind::PermissionDenied
+        ) {
+            coded(ErrorCode::PortInUse, json!({ "port": port }), err)
+        } else {
+            anyhow::Error::new(err)
+        }
+    })?;
     // Port 0 asks the system for one.
     let api_port = listeners
         .first()
@@ -354,6 +492,8 @@ struct Running {
     stop: watch::Sender<bool>,
     server: Option<JoinHandle<io::Result<()>>>,
     hooks: StopHooks,
+    /// Released last, once everything stopped.
+    lock: Option<ServeLock>,
 }
 
 impl Running {
@@ -362,6 +502,7 @@ impl Running {
             stop: watch::channel(false).0,
             server: None,
             hooks: StopHooks::default(),
+            lock: None,
         }
     }
 
@@ -380,15 +521,15 @@ impl Running {
     }
 }
 
-/// Starts the backend and the frontend, shows the banner, and waits for Ctrl+C. Returns an
-/// error if anything fails to start or the backend stops on its own.
-async fn serve_until_signal(
+/// Starts the backend and the frontend, shows the banner (`ready` with `--json`), and serves
+/// until Ctrl+C (without `--json`) or until the backend stops on its own. Returns an error if
+/// anything fails to start.
+async fn serve_until_stopped(
     ctx: &ServeContext<'_>,
     listeners: Vec<TcpListener>,
     auth_settings: &AuthSettings,
-    serve_lock: &ServeLock,
     running: &mut Running,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Outcome> {
     let static_site = integrations::static_site(ctx).await?;
     let serves_static = static_site.is_some();
     let (routers, features) = start_features(ctx, &mut running.hooks).await?;
@@ -404,7 +545,10 @@ async fn serve_until_signal(
     )));
     tokio::select! {
         ready = wait_until_ready(ctx.api_origin) => ready?,
-        result = &mut *server => return Err(server_stopped(result)),
+        result = &mut *server => {
+            running.server = None;
+            return Err(server_stopped(result));
+        }
     }
     ui::step(format_args!("Backend listening on {}", ctx.api_origin));
 
@@ -426,15 +570,23 @@ async fn serve_until_signal(
         rows: banner_rows(ctx, &features, app_url.as_deref(), auth_settings),
     });
     // For the error a second `serve` on this project reports.
-    let published = serve_lock.publish(&ServeInfo {
-        pid: std::process::id(),
-        app_url: app_url.clone(),
-        api_url: Some(ctx.api_origin.to_owned()),
-    });
-    if let Err(err) = published {
-        tracing::debug!("{err}");
+    if let Some(lock) = &running.lock {
+        let published = lock.publish(&ServeInfo {
+            pid: std::process::id(),
+            app_url: app_url.clone(),
+            api_url: Some(ctx.api_origin.to_owned()),
+        });
+        if let Err(err) = published {
+            tracing::debug!("{err}");
+        }
     }
-    if ctx.options.open {
+    events::emit(Event::Ready(Box::new(ready_event(
+        ctx,
+        &features,
+        app_url.clone(),
+        auth_settings,
+    ))));
+    if ctx.options.open && !ctx.options.json {
         match &app_url {
             Some(url) => {
                 if let Err(err) = open::that_detached(url) {
@@ -451,14 +603,22 @@ async fn serve_until_signal(
         .server
         .as_mut()
         .expect("the backend was started above");
+    // With `--json`, `run` listens for the stop requests from the start.
+    let signal = async {
+        if ctx.options.json {
+            std::future::pending().await
+        } else {
+            shutdown::signal().await
+        }
+    };
     tokio::select! {
-        signal = shutdown::signal() => {
+        signal = signal => {
             signal.context("Could not listen for Ctrl+C")?;
-            Ok(())
+            Ok(Outcome::Stop(StopRequest::Signal))
         }
         result = server => {
             running.server = None;
-            Err(server_stopped(result))
+            Ok(Outcome::BackendExited(server_stopped(result)))
         }
     }
 }
@@ -496,6 +656,21 @@ async fn start_features(
         Arc::clone(ctx.auth).router(),
         guarded(integrations::connectors_router(ctx)),
     ];
+    for connector in &ctx.project.config().connectors {
+        let kind = connector.connector_type.as_str();
+        if !integrations::connector_runs_locally(kind) {
+            events::warning(
+                WarningCode::ConnectorUnsupported,
+                format!(
+                    "Connector {} is a {kind} connector, which runs only on Fabric: its calls \
+                     answer 501 locally.",
+                    connector.name
+                ),
+                None,
+                json!({ "name": connector.name, "type": kind }),
+            );
+        }
+    }
     routers.extend(integrations::graphql_router(ctx).map(guarded));
     let storage = integrations::storage_router(ctx).await?;
     let has_storage = storage.is_some();
@@ -507,6 +682,76 @@ async fn start_features(
         storage: has_storage,
     };
     Ok((routers, features))
+}
+
+/// The `ready` event: where the app and the API are and what runs.
+fn ready_event(
+    ctx: &ServeContext<'_>,
+    features: &Features,
+    app_url: Option<String>,
+    auth_settings: &AuthSettings,
+) -> Ready {
+    let config = ctx.project.config();
+    let fabric_sign_in = auth_settings.enabled && auth_settings.fabric_enabled;
+    let entities = if config.services.data.enabled {
+        ctx.model
+            .entities
+            .iter()
+            .map(|entity| entity.name.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let folders = if features.storage {
+        integrations::storage_folders(ctx.model)
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Ready {
+        embed_url: (app_url.is_some() && fabric_sign_in)
+            .then(|| format!("{}{}", ctx.api_origin, rl_auth::EMBED_HOST_PATH)),
+        app_url,
+        api_url: ctx.api_origin.to_owned(),
+        portal_url: format!("{}{}", ctx.api_origin, rl_auth::PORTAL_PATH),
+        data_dir: ctx.state.dir().display().to_string(),
+        sign_in_as: SignInAs::Developer,
+        sdk: Sdk::of(ctx.project),
+        features: events::Features {
+            data: DataFeature {
+                enabled: config.services.data.enabled,
+                entities,
+            },
+            functions: FunctionsFeature {
+                enabled: features.functions.is_some(),
+                names: features
+                    .functions
+                    .as_ref()
+                    .map(|service| service.functions())
+                    .unwrap_or_default(),
+            },
+            storage: StorageFeature {
+                enabled: features.storage,
+                folders,
+            },
+            auth: AuthFeature {
+                enabled: auth_settings.enabled,
+                fabric: fabric_sign_in,
+                password: auth_settings.enabled && auth_settings.password_enabled,
+            },
+            connectors: config
+                .connectors
+                .iter()
+                .map(|connector| ConnectorFeature {
+                    name: connector.name.clone(),
+                    kind: connector.connector_type.clone(),
+                    supported: integrations::connector_runs_locally(&connector.connector_type),
+                })
+                .collect(),
+        },
+    }
 }
 
 /// The banner's rows: where the app and the API are, what runs, and how to sign in.
@@ -619,13 +864,17 @@ fn check_anonymous_access(project: &Project, model: &AppModel) -> anyhow::Result
              the setting."
         ),
         None => {
-            ui::warn(format_args!(
-                "{subject} {verb} the anonymous role. Fabric accepts it only when a tenant \
-                 administrator turns on {setting}, which is off by default; otherwise `rayfin up` \
-                 refuses the schema. In rayfin-local.toml, set [fabric] anonymous_data_access to \
-                 true if your tenant allows it (hides this warning), or to false to act like a \
-                 tenant that doesn't."
-            ));
+            ui::warning(
+                WarningCode::AnonymousRole,
+                format_args!(
+                    "{subject} {verb} the anonymous role. Fabric accepts it only when a tenant \
+                     administrator turns on {setting}, which is off by default; otherwise \
+                     `rayfin up` refuses the schema. In rayfin-local.toml, set [fabric] \
+                     anonymous_data_access to true if your tenant allows it (hides this \
+                     warning), or to false to act like a tenant that doesn't."
+                ),
+                json!({ "entities": entities }),
+            );
             Ok(())
         }
     }

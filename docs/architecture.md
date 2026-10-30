@@ -114,14 +114,14 @@ crates/
 js/                helpers embedded in the binary and run with the project's Node.js
 tests/fixtures/    a fixture Rayfin app and functions package used by the tests
 tests/e2e/         Playwright tests: the fixture app and the explorer app in a browser
-docs/              this document, differences.md, development.md
+docs/              this document, differences.md, development.md, embedding.md
 ```
 
 ## Crates
 
 | Crate | Role | Depends on |
 | --- | --- | --- |
-| `rayfin-local` | The binary: CLI (`clap`), `serve` orchestration and supervision, live reload, the other commands. | All the crates below. |
+| `rayfin-local` | The binary: CLI (`clap`), `serve` orchestration and supervision, live reload, the host contract (`--json`), the other commands. | All the crates below. |
 | `rl-project` | Project discovery; `rayfin.yml`, `rayfin/.env`, `package.json`, `rayfin-local.toml`; the `.rayfin-local/` state folder. | |
 | `rl-node` | Node.js discovery, embedded JS helpers (`Helper`, `run_helper`), supervised process trees (`ManagedChild`). | |
 | `rl-model` | The app model (IR) built from `@microsoft/rayfin-core`'s analysis; `Caller` and `CallerResolver` (request identity). | |
@@ -167,6 +167,20 @@ Two rules keep the feature crates independent of each other:
 
 Ctrl+C stops the server, then every child process tree (Vite, the function host, watchers).
 A second Ctrl+C exits at once.
+With `--json`, the end of stdin stops `serve` the same way (see [Hosts](#hosts-serve---json)).
+
+## Hosts (`serve --json`)
+
+Programs such as Fabricator run `serve --json` as a child process; [embedding.md](embedding.md) is their contract, and its version is `events::CONTRACT_VERSION`.
+
+- **Events.** `crates/rayfin-local/src/events.rs` defines every event and writes them to stdout, one JSON line each, under a lock and flushed; `stopped` is the last, and anything emitted after it is dropped.
+  The same calls that print the human output emit events with `--json`: `ui::step`, `status`, `warn` and `error` become `log` events, tracing goes through `events::LogLayer`, and `ui::child_sink` turns child output into `log` events by label (`[vite]`, `[fn]`, `[build]`, ANSI codes stripped).
+  The banner is replaced by `ready`; nothing else reaches stdout, and the human output is unchanged without `--json`.
+- **Codes.** Warnings hosts act on go through `ui::warning` with a code (`sdk-unsupported`, `secret-missing`, …).
+  Fatal errors are classified in `errors.rs`: an error tagged at the stage that failed (`errors::Coded`, which shows as the error it wraps), else the first error of a known type in the chain (`ProjectError`, `NodeError`, `SchemaError`, `FrontendError`, …), else `internal`.
+- **Stopping.** A thread reads stdin until it ends (`shutdown::StopListener`); `serve` listens to it, and to Ctrl+C, from the start, so a host that gives up during a slow start stops it too.
+- **Feature crates** report through hooks rather than knowing about events: `rl-functions` calls `FunctionsConfig::on_state` (building, ready, failed with the compiler's messages), the token sources handed to the services report the audiences without a token (`azure-sign-in`), and which connector types run locally is decided in one place, `integrations::connector_runs_locally`.
+- **Live state.** `events::live()` keeps the last `ready`, `schema`, `functions` and `vite` events, with or without `--json`, for the control API's `GET /status`.
 
 ## Requests
 
@@ -364,7 +378,7 @@ One-shot helpers (`analyze`, `udf-metadata`, `rayfin-token`) take a JSON input f
 Child processes (Vite, the function host, builds and helpers) run in supervised process trees: a job object on Windows and a process group on Unix.
 Stopping one asks it to close (Ctrl+Break or SIGTERM), then kills what is left of its tree after a few seconds.
 A child that exits by itself releases its tree, so a browser it opened, for example for an interactive sign-in, stays open.
-Their output goes to `serve`'s output, prefixed with a label such as `[vite]`, `[fn]` or `[build]`.
+Their output goes to `serve`'s output, prefixed with a label such as `[vite]`, `[fn]` or `[build]` (with `--json`, as `log` events).
 
 ## Security model
 
@@ -394,6 +408,7 @@ rayfin-local is a development tool for one person, but it holds the keys to that
 
 - **Unit and integration tests** in each crate (`cargo test --workspace`): the GraphQL compiler, policies, migrations, auth flows, storage and the token broker run against SQLite and fakes.
 - **SDK conformance**: the `sdk.rs` tests of `rl-auth`, `rl-graphql` and `rl-storage`, `rl-connectors`' `sdk_decode.rs` and `rl-functions`' `host.rs` drive rayfin-local with the real `@microsoft/rayfin-*` 1.36.2 packages from the fixture app, and skip when Node.js or the packages are missing.
+- **The host contract**: `crates/rayfin-local/tests/host_contract.rs` runs the built binary: `version --json`, fatal errors of `serve --json`, and a `serve --json` of the fixture app from its events to the end of stdin (it skips without the fixture's packages).
 - **End to end**: Playwright drives the fixture app in `tests/e2e` (sign-in popup, data, functions, storage) and, optionally, the explorer app.
 
 [development.md](development.md) has the commands.

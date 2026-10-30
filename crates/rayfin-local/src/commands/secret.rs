@@ -6,13 +6,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, IsTerminal, Read, Write as _};
 use std::path::Path;
 use std::process::ExitCode;
 
 use anyhow::Context as _;
 use clap::Subcommand;
 use rl_project::{LocalState, Project};
+use serde_json::json;
 
 use super::users::{read_hidden, render_table};
 use crate::ui::{self, Painter};
@@ -32,7 +33,11 @@ pub enum SecretCommand {
         value: Option<String>,
     },
     /// List the secrets and where their local values come from (never the values).
-    List,
+    List {
+        /// Print one JSON object.
+        #[arg(long)]
+        json: bool,
+    },
     /// Delete a secret's local value from .rayfin-local/secrets.json.
     Delete {
         /// The secret's name.
@@ -52,7 +57,8 @@ pub fn run(dir: &Path, command: SecretCommand) -> anyhow::Result<ExitCode> {
             };
             set(&project, &state, name, value)?;
         }
-        SecretCommand::List => list(&project, &state)?,
+        SecretCommand::List { json: false } => list(&project, &state)?,
+        SecretCommand::List { json: true } => list_json(&project, &state)?,
         SecretCommand::Delete { name } => delete(&project, &state, &name)?,
     }
     Ok(ExitCode::SUCCESS)
@@ -165,6 +171,43 @@ fn list(project: &Project, state: &LocalState) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `secret list --json`: `{"secrets": [{"name", "declared", "description", "source"}]}`, where
+/// `source` is where `serve` takes the value from: `env`, `local` (`.rayfin-local/secrets.json`),
+/// `settings` (`local.settings.json`) or `none`.
+fn list_json(project: &Project, state: &LocalState) -> anyhow::Result<()> {
+    let secrets = secrets_json(project, state, |name| env_value(name).is_some())?;
+    let _ = writeln!(io::stdout(), "{secrets}");
+    Ok(())
+}
+
+fn secrets_json(
+    project: &Project,
+    state: &LocalState,
+    in_env: impl Fn(&str) -> bool,
+) -> anyhow::Result<serde_json::Value> {
+    let rows = project_rows(project, state, in_env)?;
+    let description = |name: &str| {
+        project
+            .config()
+            .secrets
+            .iter()
+            .find(|secret| secret.name.trim() == name)
+            .and_then(|secret| secret.description.clone())
+    };
+    let secrets: Vec<_> = rows
+        .iter()
+        .map(|row| {
+            json!({
+                "name": row.name,
+                "declared": row.declared,
+                "description": description(&row.name),
+                "source": row.sources.first().map_or("none", |source| source.id()),
+            })
+        })
+        .collect();
+    Ok(json!({ "secrets": secrets }))
+}
+
 fn delete(project: &Project, state: &LocalState, name: &str) -> anyhow::Result<()> {
     let name = name.trim();
     let path = relative(project, &state.secrets_path());
@@ -218,6 +261,15 @@ impl Source {
             Source::Env => "env",
             Source::SecretsJson => "secrets.json",
             Source::LocalSettings => "local.settings.json",
+        }
+    }
+
+    /// The name of `secret list --json`.
+    fn id(self) -> &'static str {
+        match self {
+            Source::Env => "env",
+            Source::SecretsJson => "local",
+            Source::LocalSettings => "settings",
         }
     }
 }
@@ -426,7 +478,7 @@ mod tests {
         // Saved with a warning.
         set("UNDECLARED_KEY", "other").unwrap();
         assert!(set("API_KEY", "").is_err());
-        run(root, SecretCommand::List).unwrap();
+        run(root, SecretCommand::List { json: false }).unwrap();
 
         let project = Project::discover(root).unwrap();
         let state = LocalState::load_or_create(&project).unwrap();
@@ -437,6 +489,26 @@ mod tests {
                 ("UNDECLARED_KEY".to_owned(), "other".to_owned()),
             ])
         );
+        let listed = secrets_json(&project, &state, |name| name == "GREETING").unwrap();
+        assert_eq!(
+            listed,
+            json!({ "secrets": [
+                { "name": "API_KEY", "declared": true, "description": null, "source": "local" },
+                {
+                    "name": "GREETING",
+                    "declared": true,
+                    "description": "in local.settings.json",
+                    "source": "env",
+                },
+                {
+                    "name": "UNDECLARED_KEY",
+                    "declared": false,
+                    "description": null,
+                    "source": "local",
+                },
+            ] })
+        );
+        assert!(!listed.to_string().contains("s3cret-value"));
         let rows = project_rows(&project, &state, |_| false).unwrap();
         assert_eq!(
             summary(&rows),

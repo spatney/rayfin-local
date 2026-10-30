@@ -2,10 +2,13 @@
 
 mod analysis;
 mod commands;
+mod errors;
+mod events;
 mod integrations;
 mod ports;
 mod reload;
 mod shutdown;
+mod tokens;
 mod ui;
 
 use std::fmt;
@@ -19,9 +22,13 @@ use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::Writer;
 use tracing_subscriber::fmt::{FmtContext, FormatEvent, FormatFields, FormattedFields};
+use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 use crate::commands::serve::ServeOptions;
+use crate::errors::HostError;
+use crate::events::{StopReason, Stopped};
 
 #[derive(Parser)]
 #[command(
@@ -55,7 +62,11 @@ enum Command {
         yes: bool,
     },
     /// Check Node.js, installed packages, az/Rayfin sign-in and ports.
-    Doctor,
+    Doctor {
+        /// Print the checks as one JSON object.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the app model and the SQLite schema derived from rayfin/data.
     Schema,
     /// List, add and delete the app's local users, and reset their passwords.
@@ -64,10 +75,20 @@ enum Command {
     /// Set, list and delete the local values of the secrets declared in rayfin.yml.
     #[command(subcommand)]
     Secret(commands::secret::SecretCommand),
+    /// Print the version, with the host contract's version and the Rayfin SDK it supports.
+    Version {
+        /// Print one JSON object.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args)]
 struct ServeArgs {
+    /// For programs that run rayfin-local: events as JSON lines on stdout, and a graceful stop
+    /// when stdin closes (see docs/embedding.md).
+    #[arg(long)]
+    json: bool,
     /// Backend port (default: persisted per project, 7171 when free).
     #[arg(long)]
     port: Option<u16>,
@@ -104,7 +125,7 @@ struct ServeArgs {
     /// Start the function host with the Node inspector (default port 9229).
     #[arg(long, value_name = "PORT", num_args = 0..=1, default_missing_value = "9229")]
     inspect: Option<u16>,
-    /// Open the app in the browser once it is ready.
+    /// Open the app in the browser once it is ready (not with --json).
     #[arg(long)]
     open: bool,
 }
@@ -132,6 +153,7 @@ impl From<TokenSourceArg> for TokenMode {
 impl ServeArgs {
     fn into_options(self, verbose: bool) -> ServeOptions {
         ServeOptions {
+            json: self.json,
             port: self.port,
             frontend_port: self.frontend_port,
             static_build: self.static_build,
@@ -168,12 +190,28 @@ const OWN_CRATES: [&str; 13] = [
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    if let Command::Version { json } = cli.command {
+        return commands::version::run(json);
+    }
+    let json = matches!(&cli.command, Command::Serve(args) if args.json);
+    if json {
+        events::init_json();
+    }
     ui::init();
-    init_tracing(cli.verbose);
+    init_tracing(cli.verbose, json);
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     match run(cli) {
         Ok(code) => code,
+        Err(err) if json => {
+            // `serve` reports its own failures; these happened before it ran.
+            events::emit(HostError::classify(&err).event(true));
+            events::finish(Stopped {
+                reason: StopReason::Error,
+                exit_code: 1,
+            });
+            ExitCode::FAILURE
+        }
         Err(err) => {
             ui::error(&err);
             ExitCode::FAILURE
@@ -193,10 +231,11 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
                 commands::serve::run(&dir, args.into_options(cli.verbose)).await
             }
             Command::Reset { yes } => commands::reset::run(&dir, yes),
-            Command::Doctor => commands::doctor::run(&dir).await,
+            Command::Doctor { json } => commands::doctor::run(&dir, json).await,
             Command::Schema => commands::schema::run(&dir, cli.verbose).await,
             Command::Users(command) => commands::users::run(&dir, command).await,
             Command::Secret(command) => commands::secret::run(&dir, command),
+            Command::Version { json } => Ok(commands::version::run(json)),
         }
     });
     // Don't let a blocking task that is still running (a database call, a child's output
@@ -217,8 +256,8 @@ fn project_dir(project: Option<&Path>) -> anyhow::Result<PathBuf> {
 
 /// Logs go to stderr in the style of the status lines (see [`LogFormat`]): `info` for
 /// rayfin-local, `warn` for libraries; `--verbose` shows rayfin-local's debug logs, and
-/// `RUST_LOG` replaces the defaults.
-fn init_tracing(verbose: bool) {
+/// `RUST_LOG` replaces the defaults. With `--json` (`json`) they are `log` events instead.
+fn init_tracing(verbose: bool, json: bool) {
     let rust_log = std::env::var("RUST_LOG")
         .ok()
         .filter(|value| !value.trim().is_empty());
@@ -235,6 +274,13 @@ fn init_tracing(verbose: bool) {
         ui::warn(format_args!("ignoring RUST_LOG: {err}"));
         EnvFilter::new("warn,rayfin_local=info")
     });
+    if json {
+        tracing_subscriber::registry()
+            .with(filter)
+            .with(events::LogLayer { verbose })
+            .init();
+        return;
+    }
     tracing_subscriber::fmt()
         .with_ansi(ui::stderr_colors())
         .event_format(LogFormat)

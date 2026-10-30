@@ -7,17 +7,23 @@ use std::{
 
 use axum::Router;
 use rl_model::CallerResolver;
+use rl_node::LineSink;
 use rl_tokens::TokenSource;
-use tokio::{sync::oneshot, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+    time::Instant,
+};
 
 use super::{FunctionsConfig, FunctionsError, routes, tokens::TokenFetches};
 use crate::{
-    builder::{self, BuildConfig, BuildError, FunctionsWatch, WatchEvent},
+    builder::{self, BuildConfig, BuildError, FunctionsWatch, WatchEvent, WatchMode},
     host::{
-        HostConfig, HostError, HostManager, ManagerOptions, RegisteredFunction,
+        HostConfig, HostError, HostManager, HostStatus, ManagerOptions, RegisteredFunction,
         local_settings_values, secrets_header,
     },
     metadata,
+    state::{CompilerOutput, FunctionsState, Milestone, Reporter},
 };
 
 /// How long [`FunctionsService::stop`] waits for the watcher (and `npm run build:watch`).
@@ -25,6 +31,10 @@ const WATCH_STOP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// How long loading the package may take with the inspector on.
 const INSPECT_READY_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// How long after a clean compilation its output may take to be seen; a compilation that
+/// changed nothing has no output to reload, and is reported without a reload after this.
+const SETTLE: Duration = Duration::from_secs(3);
 
 /// The app's functions, served locally: built with the package's build command, described by a
 /// current `runtimemetadata.json`, run on a supervised [`HostManager`], and rebuilt and reloaded
@@ -45,6 +55,15 @@ pub struct FunctionsService {
     /// Why the functions can't run (the build failed); invocations answer 503 with it.
     unavailable: Mutex<Option<String>>,
     watcher: Mutex<Option<WatchTask>>,
+    /// Tells [`FunctionsConfig::on_state`] what the functions are doing.
+    reporter: Reporter,
+    /// The compiler's messages in the build's output.
+    compiler: Arc<Mutex<CompilerOutput>>,
+    /// The last compilation's failure (message and compiler messages), until one succeeds: a
+    /// compiler that emits despite errors (`tsc`) gets the output loaded, still failed.
+    compile_failure: Mutex<Option<(String, Vec<String>)>>,
+    /// The command line of the build, for messages.
+    build_command: String,
 }
 
 struct WatchTask {
@@ -70,14 +89,26 @@ impl FunctionsService {
         config.functions_dir = dir;
         // Checks that package.json names the entry point: without it nothing can be watched.
         builder::output_dirs(&config.functions_dir)?;
+        let reporter = Reporter::new(config.on_state.clone());
+        let compiler = Arc::new(Mutex::new(CompilerOutput::default()));
+        let (milestones, mut milestones_rx) = mpsc::unbounded_channel();
         let build = BuildConfig {
             functions_dir: config.functions_dir.clone(),
             build_command: config.build_command.clone(),
-            sink: config.sink.clone(),
+            sink: compiler_sink(config.sink.clone(), Arc::clone(&compiler), milestones),
         };
 
+        reporter.report(FunctionsState::Building);
         let mut unavailable = None;
-        match builder::build(&build).await {
+        let built = builder::build(&build).await;
+        let mut errors = Vec::new();
+        while let Ok(milestone) = milestones_rx.try_recv() {
+            if let Milestone::Finished { errors: found, .. } = milestone {
+                errors.extend(found);
+            }
+        }
+        errors.extend(lock(&compiler).take());
+        match built {
             Ok(()) => refresh_metadata(&config).await,
             Err(error) => {
                 tracing::error!("{error}");
@@ -111,6 +142,7 @@ impl FunctionsService {
         );
         let service = Arc::new(Self {
             manager: HostManager::with_options(host_config, manager_options(&config)),
+            build_command: build.command().to_owned(),
             config,
             api_url,
             secrets_header,
@@ -119,21 +151,34 @@ impl FunctionsService {
             token_fetches: TokenFetches::default(),
             unavailable: Mutex::new(unavailable),
             watcher: Mutex::new(None),
+            reporter,
+            compiler,
+            compile_failure: Mutex::new(None),
         });
 
-        if service.unavailable().is_none() {
-            // A load failure is logged by the manager, and invocations answer it.
-            if let Ok(functions) = service.manager.start().await {
-                tracing::info!(
-                    "Functions ready ({} functions)",
-                    invocable(&functions).count()
-                );
+        match service.unavailable() {
+            Some(message) => service.report_build_failure(message, errors),
+            None => {
+                // A load failure is logged by the manager, and invocations answer it.
+                let loaded = service.manager.start().await;
+                if let Ok(functions) = &loaded {
+                    tracing::info!(
+                        "Functions ready ({} functions)",
+                        invocable(functions).count()
+                    );
+                }
+                service.report_loaded(&loaded);
             }
         }
         match builder::watch(&build) {
             Ok(watch) => {
                 let (stop, stop_rx) = oneshot::channel();
-                let handle = tokio::spawn(watch_loop(Arc::downgrade(&service), watch, stop_rx));
+                let handle = tokio::spawn(watch_loop(
+                    Arc::downgrade(&service),
+                    watch,
+                    stop_rx,
+                    milestones_rx,
+                ));
                 *lock(&service.watcher) = Some(WatchTask { stop, handle });
             }
             Err(error) => tracing::error!(
@@ -186,13 +231,18 @@ impl FunctionsService {
 
     /// New build output: refreshes the metadata and replaces the host (the UDF package reads
     /// `runtimemetadata.json` when it loads). The current host keeps running if the output has
-    /// no entry point.
-    async fn reload(&self) {
+    /// no entry point. `report`: tell the observer the outcome (not while a compilation that
+    /// will report it runs).
+    async fn reload(&self, report: bool) {
         refresh_metadata(&self.config).await;
         let entry = match builder::entry_point(&self.config.functions_dir) {
             Ok(entry) => entry,
             Err(error) => {
                 tracing::error!("{error}. The functions were not reloaded.");
+                self.report_build_failure(
+                    format!("{error}. The functions were not reloaded."),
+                    Vec::new(),
+                );
                 return;
             }
         };
@@ -206,17 +256,79 @@ impl FunctionsService {
                 self.manager.reload().await
             }
         };
-        match result {
+        match &result {
             Ok(functions) => {
                 *lock(&self.unavailable) = None;
                 tracing::info!(
                     "Functions reloaded ({} functions)",
-                    invocable(&functions).count()
+                    invocable(functions).count()
                 );
             }
             Err(HostError::Stopped) => {}
             // The manager logged the load failure; invocations now answer it instead.
             Err(_) => *lock(&self.unavailable) = None,
+        }
+        if report {
+            self.report_loaded(&result);
+        }
+    }
+
+    /// What loading the package (a start or a reload) came to; output loaded despite a failed
+    /// compilation is still failed.
+    fn report_loaded(&self, loaded: &Result<Vec<RegisteredFunction>, HostError>) {
+        match loaded {
+            Ok(functions) => {
+                let names = invocable(functions)
+                    .map(|function| function.name.clone())
+                    .collect();
+                let state = match lock(&self.compile_failure).clone() {
+                    Some((message, errors)) => FunctionsState::Failed {
+                        message,
+                        errors,
+                        build: true,
+                        names,
+                    },
+                    None => FunctionsState::Ready { names },
+                };
+                self.reporter.report(state);
+            }
+            Err(HostError::Stopped) => {}
+            Err(error) => self.reporter.report(FunctionsState::Failed {
+                message: error.to_string(),
+                errors: Vec::new(),
+                build: false,
+                names: Vec::new(),
+            }),
+        }
+    }
+
+    /// A failed build; the previous build's functions (if any) keep running.
+    fn report_build_failure(&self, message: String, errors: Vec<String>) {
+        *lock(&self.compile_failure) = Some((message.clone(), errors.clone()));
+        self.reporter.report(FunctionsState::Failed {
+            message,
+            errors,
+            build: true,
+            names: self.functions(),
+        });
+    }
+
+    /// A compilation without errors.
+    fn compiled(&self) {
+        *lock(&self.compile_failure) = None;
+    }
+
+    /// After a compilation that left the output as it was, or whose output was loaded while it
+    /// ran: the functions that run, or a first host for a package whose earlier build failed.
+    async fn settled(&self) {
+        if self.unavailable().is_some() {
+            self.reload(true).await;
+            return;
+        }
+        match self.manager.status() {
+            HostStatus::Ready { functions } => self.report_loaded(&Ok(functions)),
+            HostStatus::Failed(error) => self.report_loaded(&Err(error)),
+            HostStatus::Idle | HostStatus::Starting | HostStatus::Stopped => {}
         }
     }
 }
@@ -230,34 +342,168 @@ impl std::fmt::Debug for FunctionsService {
     }
 }
 
-/// Reacts to the watcher until the service stops or is dropped.
+/// Passes the build's output on to `sink`, following the compiler's messages in it.
+fn compiler_sink(
+    sink: LineSink,
+    compiler: Arc<Mutex<CompilerOutput>>,
+    milestones: mpsc::UnboundedSender<Milestone>,
+) -> LineSink {
+    Arc::new(move |label, stream, line| {
+        if label == builder::LABEL
+            && let Some(milestone) = lock(&compiler).line(line)
+        {
+            let _ = milestones.send(milestone);
+        }
+        sink(label, stream, line);
+    })
+}
+
+/// What the watch loop waits for.
+enum Next {
+    Watch(Option<WatchEvent>),
+    Milestone(Milestone),
+    Settled,
+}
+
+/// Reacts to the watcher until the service stops or is dropped. `npm run build:watch`
+/// (`tsc --watch`) reports its compilations in its output (`milestones`); without it the watcher
+/// rebuilds after source changes and reports the outcome. A compilation's outcome decides what
+/// is reported: output it emits is loaded while it runs, but reported once it ends.
 async fn watch_loop(
     service: Weak<FunctionsService>,
     mut watch: FunctionsWatch,
     mut stop: oneshot::Receiver<()>,
+    mut milestones: mpsc::UnboundedReceiver<Milestone>,
 ) {
+    let rebuilds = watch.mode() == WatchMode::Rebuild;
+    // The compiler's messages of the rebuild in progress, from a summary line in its output.
+    let mut rebuild_errors = Vec::new();
+    let mut compiling = false;
+    // Whether output was loaded while the compilation ran.
+    let mut reloaded = false;
+    let mut settle_at: Option<Instant> = None;
     loop {
-        let event = tokio::select! {
+        // Milestones first: a compilation prints its outcome before its output settles.
+        let next = tokio::select! {
+            biased;
             _ = &mut stop => break,
-            event = watch.next() => event,
+            Some(milestone) = milestones.recv() => Next::Milestone(milestone),
+            event = watch.next() => Next::Watch(event),
+            () = sleep_until(settle_at) => Next::Settled,
         };
-        let (Some(event), Some(service)) = (event, service.upgrade()) else {
+        let Some(service) = service.upgrade() else {
             break;
         };
-        match event {
-            WatchEvent::OutputChanged => service.reload().await,
-            WatchEvent::SourceChanged => refresh_metadata(&service.config).await,
-            WatchEvent::BuildWatchExited(status) => tracing::error!(
-                "`npm run {}` exited{}, so changes to the functions are no longer compiled. Fix \
-                 the errors in its output (`build`) and restart rayfin-local.",
-                builder::BUILD_WATCH_SCRIPT,
-                status
-                    .map(|status| format!(" ({status})"))
-                    .unwrap_or_default()
-            ),
+        match next {
+            Next::Watch(None) => break,
+            Next::Watch(Some(WatchEvent::OutputChanged)) => {
+                service.reload(!compiling).await;
+                if compiling {
+                    reloaded = true;
+                    // In case the compilation's end is never seen.
+                    settle_at = Some(Instant::now() + SETTLE);
+                } else {
+                    settle_at = None;
+                }
+            }
+            Next::Watch(Some(WatchEvent::SourceChanged)) => {
+                if rebuilds {
+                    (compiling, reloaded, settle_at) = (true, false, None);
+                    service.reporter.report(FunctionsState::Building);
+                }
+                refresh_metadata(&service.config).await;
+            }
+            Next::Watch(Some(WatchEvent::Rebuilt { ok })) => {
+                compiling = false;
+                let mut errors = std::mem::take(&mut rebuild_errors);
+                errors.extend(lock(&service.compiler).take());
+                if ok {
+                    service.compiled();
+                    settle_at = settle(&service, std::mem::take(&mut reloaded), true).await;
+                } else {
+                    settle_at = None;
+                    let message = format!(
+                        "functions build failed: `{}` failed in {}",
+                        service.build_command,
+                        service.config.functions_dir.display()
+                    );
+                    service.report_build_failure(message, errors);
+                }
+            }
+            Next::Watch(Some(WatchEvent::BuildWatchExited(status))) => {
+                compiling = false;
+                let message = format!(
+                    "`npm run {}` exited{}, so changes to the functions are no longer compiled. \
+                     Fix the errors in its output (`build`) and restart rayfin-local.",
+                    builder::BUILD_WATCH_SCRIPT,
+                    status
+                        .map(|status| format!(" ({status})"))
+                        .unwrap_or_default()
+                );
+                tracing::error!("{message}");
+                service.report_build_failure(message, Vec::new());
+            }
+            Next::Milestone(Milestone::Finished { errors, .. }) if rebuilds => {
+                rebuild_errors.extend(errors);
+            }
+            Next::Milestone(Milestone::Started { announce }) => {
+                (compiling, reloaded, settle_at) = (true, false, None);
+                if announce {
+                    service.reporter.report(FunctionsState::Building);
+                }
+            }
+            Next::Milestone(Milestone::Finished { count: 0, .. }) => {
+                compiling = false;
+                service.compiled();
+                let waiting = matches!(
+                    service.reporter.last(),
+                    Some(FunctionsState::Building | FunctionsState::Failed { build: true, .. })
+                );
+                settle_at = settle(&service, std::mem::take(&mut reloaded), waiting).await;
+            }
+            Next::Milestone(Milestone::Finished { count, errors }) => {
+                (compiling, reloaded, settle_at) = (false, false, None);
+                // The first compilation of `tsc --watch` repeats a failed build's errors.
+                let repeated = matches!(
+                    service.reporter.last(),
+                    Some(FunctionsState::Failed { build: true, errors: reported, .. })
+                        if reported == errors
+                );
+                if !repeated {
+                    let message = format!(
+                        "functions build failed: `npm run {}` found {count} {}",
+                        builder::BUILD_WATCH_SCRIPT,
+                        if count == 1 { "error" } else { "errors" }
+                    );
+                    service.report_build_failure(message, errors);
+                }
+            }
+            Next::Settled => {
+                (compiling, reloaded, settle_at) = (false, false, None);
+                service.settled().await;
+            }
         }
     }
     watch.stop().await;
+}
+
+/// After a clean compilation: reports what runs now when its output was loaded while it ran;
+/// else, when a report is `waiting` for it, when to report without its output (it may have left
+/// the output as it was).
+async fn settle(service: &FunctionsService, reloaded: bool, waiting: bool) -> Option<Instant> {
+    if reloaded {
+        service.settled().await;
+        None
+    } else {
+        waiting.then(|| Instant::now() + SETTLE)
+    }
+}
+
+async fn sleep_until(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending().await,
+    }
 }
 
 async fn refresh_metadata(config: &FunctionsConfig) {
