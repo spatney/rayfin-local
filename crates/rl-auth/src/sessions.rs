@@ -55,12 +55,12 @@ impl fmt::Debug for TokenResponse {
     }
 }
 
-fn token_response(jwt: &Jwt, access_token: String, refresh_token: String) -> TokenResponse {
+fn token_response(jwt: &Jwt, access_token: String, refresh_token: Option<String>) -> TokenResponse {
     TokenResponse {
         access_token,
         token_type: "Bearer".into(),
         expires_in: u64::try_from(jwt.access_ttl_seconds()).unwrap_or_default(),
-        refresh_token: Some(refresh_token),
+        refresh_token,
         scope: jwt.scope().map(str::to_owned),
     }
 }
@@ -116,10 +116,26 @@ impl AuthService {
     /// Signs `user` in: a new session with a refresh token and an access token. The sign-in
     /// portal and the Entra exchange use this after establishing who the user is.
     pub async fn issue_session(&self, user: &User) -> Result<TokenResponse, AuthError> {
+        let expires_at = self.now_ms() + self.refresh_lifetime_ms();
+        self.new_session(user, expires_at, true).await
+    }
+
+    /// An access token for `user` in a session of its own without a refresh token, for calls a
+    /// host makes as the user; the session ends with the token.
+    pub async fn issue_access_token(&self, user: &User) -> Result<TokenResponse, AuthError> {
+        let expires_at = self.now_ms() + self.jwt.access_ttl_seconds() * 1000;
+        self.new_session(user, expires_at, false).await
+    }
+
+    async fn new_session(
+        &self,
+        user: &User,
+        expires_at: i64,
+        refreshable: bool,
+    ) -> Result<TokenResponse, AuthError> {
         let jwt = Arc::clone(&self.jwt);
         let user_id = user.id.clone();
         let now = self.now_ms();
-        let expires_at = now + self.refresh_lifetime_ms();
         self.db
             .call(move |conn| -> Result<TokenResponse, AuthError> {
                 let tx = conn.transaction()?;
@@ -132,7 +148,9 @@ impl AuthService {
                      VALUES (?1, ?2, ?3, ?4, ?3)",
                     params![session_id, user.id, now, expires_at],
                 )?;
-                let refresh_token = insert_refresh_token(&tx, &session_id, now)?;
+                let refresh_token = refreshable
+                    .then(|| insert_refresh_token(&tx, &session_id, now))
+                    .transpose()?;
                 let access_token = jwt.mint(&user, &session_id, now / 1000)?;
                 tx.commit()?;
                 Ok(token_response(&jwt, access_token, refresh_token))
@@ -224,7 +242,7 @@ impl AuthService {
                     insert_refresh_token(&tx, &session_id, now)?
                 };
                 tx.commit()?;
-                Ok(token_response(&jwt, access_token, refresh_token))
+                Ok(token_response(&jwt, access_token, Some(refresh_token)))
             })
             .await?
     }
@@ -260,6 +278,18 @@ impl AuthService {
         let revoked = self
             .db
             .call(move |conn| revoke_user_sessions(conn, &uid, now))
+            .await??;
+        let count = revoked.len();
+        self.forget_sessions(revoked, now);
+        Ok(count)
+    }
+
+    /// Signs out every active session of every user and returns how many there were.
+    pub async fn revoke_every_session(&self) -> Result<usize, AuthError> {
+        let now = self.now_ms();
+        let revoked = self
+            .db
+            .call(move |conn| revoke_every_session(conn, now))
             .await??;
         let count = revoked.len();
         self.forget_sessions(revoked, now);
@@ -350,6 +380,17 @@ pub(crate) fn revoke_user_sessions(
     )?;
     let ids = statement
         .query_map(params![now, user_id], |row| row.get(0))?
+        .collect::<Result<Vec<String>, _>>()?;
+    Ok(ids)
+}
+
+/// Signs out every active session, returning their ids.
+pub(crate) fn revoke_every_session(conn: &Connection, now: i64) -> Result<Vec<String>, AuthError> {
+    let mut statement = conn.prepare(
+        "UPDATE _rl_auth_sessions SET revoked_at = ?1 WHERE revoked_at IS NULL RETURNING id",
+    )?;
+    let ids = statement
+        .query_map([now], |row| row.get(0))?
         .collect::<Result<Vec<String>, _>>()?;
     Ok(ids)
 }

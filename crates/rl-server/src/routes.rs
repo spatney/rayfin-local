@@ -17,6 +17,10 @@ const KEYED_ROOTS: [&str; 5] = [
 /// URLs and health check.
 const PUBLIC_ROOTS: [&str; 2] = ["/.well-known", "/.rayfin-local"];
 
+/// rayfin-local's routes for programs on this machine, which browsers never call: a host's
+/// control API and the dev server's automatic sign-in.
+const PRIVATE_ROOTS: [&str; 2] = ["/.rayfin-local/control", "/.rayfin-local/dev"];
+
 /// The JWKS alias under `/api` is public like `/.well-known/jwks.json` (compat §3.6).
 const PUBLIC_UNDER_API: &str = "/api/auth/v1/.well-known";
 
@@ -28,6 +32,11 @@ fn is_under(path: &str, root: &str) -> bool {
 
 pub(crate) fn requires_publishable_key(path: &str) -> bool {
     KEYED_ROOTS.iter().any(|root| is_under(path, root)) && !is_under(path, PUBLIC_UNDER_API)
+}
+
+/// Whether `path` is one of the routes browsers never call, which CORS never allows.
+pub(crate) fn is_private(path: &str) -> bool {
+    PRIVATE_ROOTS.iter().any(|root| is_under(path, root))
 }
 
 /// Paths the static site never serves and never answers with the SPA's index document.

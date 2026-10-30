@@ -25,6 +25,16 @@ const MIN_REMAINING: Duration = Duration::from_secs(5 * 60);
 /// How long an env override that isn't a JWT is assumed to stay valid.
 const ENV_TOKEN_LIFETIME: Duration = Duration::from_secs(60 * 60);
 
+/// Whether getting a token may ask the developer to sign in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Prompt {
+    /// The Rayfin CLI may open a browser window (or print a device code) and wait.
+    Allowed,
+    /// Only what needs no interaction: env overrides, the cache, the Azure CLI, and the Rayfin
+    /// CLI's cached sign-in.
+    Never,
+}
+
 /// Where tokens come from (`--token-source`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum TokenMode {
@@ -220,15 +230,7 @@ impl TokenBroker {
     }
 
     async fn get(&self, requested: &str) -> Result<AccessToken, TokenError> {
-        let requested = requested.trim();
-        if requested.is_empty() {
-            return Err(TokenError {
-                scope: String::new(),
-                message: "a token was requested without a scope".to_owned(),
-                hint: None,
-            });
-        }
-        let (scope, audience) = self.inner.resolve(requested);
+        let (scope, audience) = self.inner.resolve(requested_scope(requested)?);
         if let Some(audience) = audience
             && let Some(token) = self.inner.env_token(audience)
         {
@@ -261,18 +263,45 @@ impl TokenBroker {
             // A task of its own, so a fetch that is under way (maybe an interactive sign-in)
             // completes and is cached even when the request that started it is cancelled.
             tokio::spawn(async move {
-                let result = inflight.inner.fetch(&inflight.scope).await;
+                let result = inflight.inner.fetch(&inflight.scope, Prompt::Allowed).await;
                 inflight.complete(result.as_ref().ok());
                 done.send_replace(Some(result));
             });
         }
         wait(fetch, &scope).await
     }
+
+    /// [`TokenSource::token_silently`]: an env override or a cached token, else a fetch of its
+    /// own that never prompts. It doesn't join a fetch in progress, which may be waiting for the
+    /// developer to sign in.
+    async fn get_silently(&self, requested: &str) -> Result<AccessToken, TokenError> {
+        let (scope, audience) = self.inner.resolve(requested_scope(requested)?);
+        if let Some(audience) = audience
+            && let Some(token) = self.inner.env_token(audience)
+        {
+            return Ok(token);
+        }
+        if let Some(token) = self.inner.cached(&scope) {
+            return Ok(token);
+        }
+        let result = self.inner.fetch(&scope, Prompt::Never).await;
+        if let Ok(token) = &result {
+            lock(&self.inner.cache).entry(scope).or_default().token = Some(token.clone());
+        }
+        result
+    }
 }
 
 impl TokenSource for TokenBroker {
     fn token<'a>(&'a self, scope: &'a str) -> BoxFuture<'a, Result<AccessToken, TokenError>> {
         Box::pin(self.get(scope))
+    }
+
+    fn token_silently<'a>(
+        &'a self,
+        scope: &'a str,
+    ) -> BoxFuture<'a, Result<AccessToken, TokenError>> {
+        Box::pin(self.get_silently(scope))
     }
 }
 
@@ -326,12 +355,21 @@ impl Inner {
         })
     }
 
-    async fn fetch(&self, scope: &str) -> Result<AccessToken, TokenError> {
+    /// The cached token for `scope`, while it has more than a few minutes left.
+    fn cached(&self, scope: &str) -> Option<AccessToken> {
+        let cache = lock(&self.cache);
+        cache
+            .get(scope)
+            .and_then(|slot| slot.token.clone())
+            .filter(is_fresh)
+    }
+
+    async fn fetch(&self, scope: &str, prompt: Prompt) -> Result<AccessToken, TokenError> {
         let tenant = self.tenant.as_deref();
-        tracing::debug!(scope, mode = %self.mode, tenant, "fetching a token");
+        tracing::debug!(scope, mode = %self.mode, tenant, ?prompt, "fetching a token");
         let (provider, result) = match self.mode {
             TokenMode::Az => ("az", self.az.token(scope, tenant).await),
-            TokenMode::Rayfin => ("rayfin", self.rayfin_token(scope).await),
+            TokenMode::Rayfin => ("rayfin", self.rayfin_token(scope, prompt).await),
             TokenMode::Auto => match self.az.token(scope, tenant).await {
                 Ok(token) => ("az", Ok(token)),
                 Err(az_error) => match &self.rayfin {
@@ -342,7 +380,7 @@ impl Inner {
                              Rayfin CLI's login",
                             az_error.message
                         );
-                        let result = rayfin.token(scope, tenant).await;
+                        let result = rayfin.token(scope, tenant, prompt).await;
                         (
                             "rayfin",
                             result.map_err(|error| combine(scope, az_error, error)),
@@ -366,9 +404,9 @@ impl Inner {
         result
     }
 
-    async fn rayfin_token(&self, scope: &str) -> Result<AccessToken, TokenError> {
+    async fn rayfin_token(&self, scope: &str, prompt: Prompt) -> Result<AccessToken, TokenError> {
         match &self.rayfin {
-            Some(rayfin) => rayfin.token(scope, self.tenant.as_deref()).await,
+            Some(rayfin) => rayfin.token(scope, self.tenant.as_deref(), prompt).await,
             None => Err(TokenError {
                 scope: scope.to_owned(),
                 message: "the Rayfin CLI's login is not available: it needs Node.js and the \
@@ -443,6 +481,19 @@ fn is_fresh(token: &AccessToken) -> bool {
         .expires_at
         .duration_since(SystemTime::now())
         .is_ok_and(|left| left > MIN_REMAINING)
+}
+
+/// `requested` trimmed; an error when it is blank.
+fn requested_scope(requested: &str) -> Result<&str, TokenError> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return Err(TokenError {
+            scope: String::new(),
+            message: "a token was requested without a scope".to_owned(),
+            hint: None,
+        });
+    }
+    Ok(requested)
 }
 
 /// An env override's token, without blanks or a `Bearer ` prefix.

@@ -1,6 +1,7 @@
 //! Rayfin auth, locally: users with username/password, sessions as ES256 JWTs with rotating
 //! refresh tokens, JWKS, the Fabric sign-in popup emulation (`ensureSignedInWithFabric`), a
-//! local Fabric host for embedded apps (`initEmbeddedAuth`), and the Entra token exchange.
+//! local Fabric host for embedded apps (`initEmbeddedAuth`), the Entra token exchange, and
+//! automatic sign-in for rayfin-local's dev server (the [`SignInAs`] identity).
 //! Implements [`rl_model::CallerResolver`] for the other routes.
 //!
 //! The wire contract is the real Rayfin auth service's, as the SDK 1.36.2 sees it: see
@@ -9,6 +10,7 @@
 mod entra;
 mod error;
 mod handoff;
+mod identity;
 mod jwt;
 mod keys;
 mod portal;
@@ -31,6 +33,7 @@ use std::{
 use rl_db::Db;
 
 pub use error::AuthError;
+pub use identity::{DEV_SESSION_TOKEN_PATH, DEV_SIGN_IN_SECRET_HEADER, LOCAL_DEVELOPER, SignInAs};
 pub use portal::{EMBED_HOST_PATH, PORTAL_PATH};
 pub use routes::{JWKS_PATH, RUNTIME_SETTINGS_PATH};
 pub use sessions::TokenResponse;
@@ -48,6 +51,7 @@ pub struct AuthService {
     pub(crate) revoked: Arc<sessions::RevokedSessions>,
     pub(crate) portal: portal::Portal,
     pub(crate) entra: entra::Entra,
+    pub(crate) auto_sign_in: identity::AutoSignIn,
     /// Shifts the service's clock; tests use it to travel in time.
     clock_offset_ms: AtomicI64,
 }
@@ -85,6 +89,7 @@ impl AuthService {
             db,
             portal: portal::Portal::new()?,
             entra: entra::Entra::new(),
+            auto_sign_in: identity::AutoSignIn::default(),
             clock_offset_ms: AtomicI64::new(0),
         };
         service.load_revoked_sessions().await?;

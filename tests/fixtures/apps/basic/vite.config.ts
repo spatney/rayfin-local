@@ -2,7 +2,7 @@ import { rayfinLocalDev } from '@microsoft/rayfin-local-dev/vite';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-  plugins: [rayfinLocalDev()],
+  plugins: [rayfinLocalDev({ autoLogin: true })],
   build: {
     target: 'es2022',
   },

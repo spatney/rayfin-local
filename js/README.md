@@ -10,7 +10,7 @@ They run on the developer's own Node.js (20 or later), in a folder of the projec
 | `rayfin-token.mjs` | `rl-tokens` | One-shot | Mint a token with the developer's Rayfin CLI login (`@microsoft/rayfin-cli/auth`). |
 | `udf-metadata.mjs` | `rl-functions` | One-shot | Generate `runtimemetadata.json` from the `udf.func(...)` declarations, byte for byte as the Rayfin CLI does. |
 | `function-host.mjs` | `rl-functions` | Long-running: stdout announcements, then TCP JSON lines | Host the app's functions on the real UDF package, without Azure Functions Core Tools. |
-| `vite-dev.mjs` | `rl-frontend` | Long-running: stdout announcements and signals | Run the app's own Vite dev server, with the `rayfin-local:shim` plugin that wires it to the local backend. |
+| `vite-dev.mjs` | `rl-frontend` | Long-running: stdout announcements and signals | Run the app's own Vite dev server, with the `rayfin-local:shim` plugin that wires it to the local backend, and the `rayfin-local:sign-in` plugin that signs the app in automatically. |
 
 ## Rules
 
@@ -30,7 +30,7 @@ Both files live in `.rayfin-local/cache/tmp/` and are deleted after the run.
 | --- | --- | --- |
 | `analyze.mjs` | `projectRoot`, `dataDir`, `storageDir?`, `tsconfigPath`, `outDir`, `dialect`, `storage`, `verbose?` | `coreVersion`, `typescriptVersion`, `dialect`, `featureFlags`, `entities`, `config`, `policies`, `storage`, `sources`, `diagnostics` |
 | `analyze.mjs` with `mode: "connectors"` | `projectRoot`, `tsconfigPath`, `outDir`, `connectors` (`name`, `dir`, `dialect`), `verbose?` | `coreVersion`, `typescriptVersion`, `featureFlags`, `connectors` (`name`, `dialect`, then `entities`, `config` and `policies`, or `error`), `sources`, `diagnostics` |
-| `rayfin-token.mjs` | `scopes`, `tenantId?` | `token`, `expiresOnTimestamp` (ms since the epoch), `tenantId?` |
+| `rayfin-token.mjs` | `scopes`, `tenantId?`, `silent?` (fail rather than sign in interactively) | `token`, `expiresOnTimestamp` (ms since the epoch), `tenantId?` |
 | `udf-metadata.mjs` | `functionsDir`, `resolvePaths?`, `outputPath?` | `json`, `metadata`, `written`, `diagnostics`, `typescript` (`version`, `path`), `typeChecked`, `sourceFiles` |
 
 ## Long-running helpers
@@ -59,10 +59,12 @@ The owner is `crates/rl-frontend/src/dev.rs`.
 
 - `node vite-dev.mjs --root <frontend dir> --host <host> --port <port> --backend <origin>`, in the frontend directory.
 - The Rayfin environment (`RAYFIN_PUBLIC_*`, `VITE_*`) comes in the process environment, which wins over the app's `.env` files in Vite's `loadEnv` and in `rayfinLocalDev()`.
+- `RAYFIN_LOCAL_SIGN_IN_SECRET` in the environment is the backend's automatic sign-in secret; the helper removes it from `process.env` before Vite loads the app's config.
 - Stdout `@@rayfin-local:vite-ready {"urls","local","network","version","rayfinPlugin"}` once the server listens (Vite's own URL banner follows), or `@@rayfin-local:vite-error {"code","message","stack"}` when it can't start, after which the helper exits 1.
 - SIGINT, SIGTERM and SIGBREAK (Ctrl+Break on Windows) close the server, and the helper exits 0.
 - The `rayfin-local:shim` plugin always proxies `/.well-known/*` and `/.rayfin-local/*` to the backend.
   When the app doesn't use `rayfinLocalDev()` from `@microsoft/rayfin-local-dev`, the shim also does what that plugin does for a local backend: it serves `/rayfin.config.json` (with this dev server's origin as `apiUrl`) and proxies `/api`, `/graphql`, `/connector-invoke`, `/connectors` and `/functions` to the backend.
+- With the secret, the `rayfin-local:sign-in` plugin (`enforce: 'pre'`) answers `GET /.rayfin/dev/session-token` before `rayfinLocalDev()`'s middleware can: for loopback peers and same-origin requests only, with the backend's `GET /.rayfin-local/dev/session-token`, which it asks with the secret in the `x-rayfin-local-sign-in` header.
 
 ## Tests
 

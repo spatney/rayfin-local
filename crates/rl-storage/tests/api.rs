@@ -74,6 +74,7 @@ fn model() -> AppModel {
 struct Harness {
     router: Router,
     root: PathBuf,
+    db: Db,
     _dir: TempDir,
 }
 
@@ -109,12 +110,13 @@ async fn harness_with(model: AppModel, adjust: impl FnOnce(&mut StorageConfig)) 
     let mut config = StorageConfig::new(&root, ORIGIN);
     adjust(&mut config);
     let db = Db::open_in_memory().unwrap();
-    let router = rl_storage::router(config, db, Arc::new(model), Arc::new(Tokens))
+    let router = rl_storage::router(config, db.clone(), Arc::new(model), Arc::new(Tokens))
         .await
         .unwrap();
     Harness {
         router,
         root,
+        db,
         _dir: dir,
     }
 }
@@ -257,6 +259,31 @@ impl Harness {
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect()
     }
+}
+
+#[tokio::test]
+async fn clearing_deletes_every_object_and_upload_while_serving() {
+    let h = harness().await;
+    let alice = Some("alice");
+    h.upload(alice, note("kept.txt", None), b"hello")
+        .await
+        .unwrap();
+    let (_, url) = h.start(alice, note("staged.txt", None)).await.unwrap();
+    let put = h.signed("PUT", &url, "text/plain", b"staged").await;
+    assert_eq!(put.status, StatusCode::CREATED);
+    assert_eq!((h.files("objects").len(), h.files("staging").len()), (1, 1));
+
+    assert_eq!(rl_storage::clear(&h.db, &h.root).await.unwrap(), 1);
+    assert!(h.paths(None, "folder=public-notes").await.is_empty());
+    assert!(h.files("objects").is_empty() && h.files("staging").is_empty());
+    h.upload(alice, note("again.txt", None), b"again")
+        .await
+        .unwrap();
+    assert_eq!(h.paths(None, "folder=public-notes").await, ["again.txt"]);
+
+    let nothing = tempfile::tempdir().unwrap();
+    let cleared = rl_storage::clear(&Db::open_in_memory().unwrap(), nothing.path()).await;
+    assert_eq!(cleared.unwrap(), 0);
 }
 
 #[tokio::test]

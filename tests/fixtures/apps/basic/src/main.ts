@@ -1,4 +1,5 @@
-import { ensureSignedInWithFabric } from '@microsoft/rayfin-auth-provider-fabric';
+import { ensureSignedInWithFabric, signInWithBrokeredToken } from '@microsoft/rayfin-auth-provider-fabric';
+import { fetchRayfinLocalSessionToken } from '@microsoft/rayfin-local-dev';
 
 import type { BasicSchema } from '../rayfin/data/schema';
 import { bootstrap, type AppServices } from './services/bootstrap';
@@ -30,6 +31,7 @@ const DAX_QUERY = 'EVALUATE ROW("answer", 42)';
 const scenarios: Record<string, () => Promise<unknown>> = {
   config: async () => ({ apiUrl: import.meta.env.VITE_RAYFIN_API_URL, ...fabricOptions }),
   'sign-in': async () => sessionInfo(await ensureSignedInWithFabric(client.auth, fabricOptions)),
+  'auto-sign-in': autoSignIn,
   'sign-out': async () => {
     await client.auth.signOut();
     return sessionInfo(client.auth.getSession());
@@ -54,6 +56,13 @@ const scenarios: Record<string, () => Promise<unknown>> = {
   }),
   'storage-roundtrip': storageRoundTrip,
 };
+
+/** What apps from Rayfin's templates do when they load: a session from the dev server, no popup. */
+async function autoSignIn() {
+  const token = await fetchRayfinLocalSessionToken();
+  if (!token) throw new Error('Automatic sign-in is off: use rayfinLocalDev({ autoLogin: true }).');
+  return sessionInfo(await signInWithBrokeredToken(client.auth, token));
+}
 
 /** Create, list, update and delete one Todo. */
 async function todoCrud() {

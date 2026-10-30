@@ -29,7 +29,12 @@ mod rules;
 mod signing;
 mod store;
 
-use std::{fmt, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::Duration,
+};
 
 use axum::Router;
 use ring::rand::{SecureRandom, SystemRandom};
@@ -90,6 +95,24 @@ impl fmt::Debug for StorageConfig {
             .field("url_ttl", &self.url_ttl)
             .finish_non_exhaustive()
     }
+}
+
+/// Deletes every stored object and upload in progress: their files under `root` (the storage
+/// folder of [`StorageConfig::root`]) and their rows, while the routes keep serving. Returns how
+/// many objects there were; a database without storage tables has none.
+pub async fn clear(db: &Db, root: &Path) -> Result<u64, StorageError> {
+    let deleted = db.call(store::clear).await??;
+    for dir in [root.join("objects"), root.join("staging")] {
+        match tokio::fs::remove_dir_all(&dir).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => return Err(StorageError::Folder { path: dir, source }),
+        }
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|source| StorageError::Folder { path: dir, source })?;
+    }
+    Ok(deleted)
 }
 
 /// The storage routes (state applied): `/api/storage/*` and the signed URLs under

@@ -3,17 +3,19 @@
 //! With `--json` it is run by a host (docs/embedding.md): it reports what happens as events, and
 //! stops when stdin ends as on Ctrl+C.
 
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, anyhow, bail};
 use axum::Router;
-use rl_auth::{AuthService, AuthSettings};
+use ring::rand::{SecureRandom as _, SystemRandom};
+use rl_auth::{AuthService, AuthSettings, SignInAs as Identity};
 use rl_db::Db;
 use rl_functions::FunctionsService;
 use rl_model::AppModel;
@@ -26,6 +28,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::analysis;
+use crate::control;
 use crate::errors::{HostError, WithCode, coded};
 use crate::events::{
     self, Analysis, AuthFeature, ConnectorFeature, DataFeature, ErrorCode, Event, FunctionsFeature,
@@ -70,6 +73,8 @@ pub struct ServeOptions {
     pub force_schema: bool,
     pub reset: bool,
     pub inspect: Option<u16>,
+    /// `--sign-in-as`: who apps are signed in as automatically.
+    pub sign_in_as: Option<rl_project::SignInAs>,
     pub open: bool,
     pub verbose: bool,
 }
@@ -174,7 +179,7 @@ async fn start(
             name: project.display_name().to_owned(),
         },
     }));
-    check_control_token()?;
+    let control_token = check_control_token()?;
     super::check_project(&project)?;
     let (mut state, serve_lock) = open_state(&project, options.reset)?;
     running.lock = Some(serve_lock);
@@ -199,7 +204,10 @@ async fn start(
         .with_code(ErrorCode::ConfigInvalid)?,
     );
     let host = listen_host(&project, options);
-    let (auth, auth_settings) = start_auth(&project, &state, &db, &host, &broker).await?;
+    let sign_in_secret = new_secret()?;
+    let (auth, auth_settings) =
+        start_auth(&project, &state, &db, &host, &broker, &sign_in_secret).await?;
+    auth.set_sign_in_as(sign_in_identity(&project, options));
     let bound = bind_ports(&project, &mut state, options, &host).await?;
     let api_origin = format!("http://{}:{}", origin_host(&host), bound.api_port);
     let data_api = integrations::data_api(&project, &db, &model, auth.clone());
@@ -218,16 +226,45 @@ async fn start(
         host: &host,
         api_origin: &api_origin,
         frontend_port: bound.frontend_port,
+        sign_in_secret: &sign_in_secret,
     };
-    serve_until_stopped(&ctx, bound.listeners, &auth_settings, running).await
+    serve_until_stopped(
+        &ctx,
+        bound.listeners,
+        &auth_settings,
+        control_token,
+        running,
+    )
+    .await
 }
 
-/// `RAYFIN_LOCAL_CONTROL_TOKEN`, when set, must be long enough to be a secret.
-fn check_control_token() -> anyhow::Result<()> {
-    let Some(token) = std::env::var_os(CONTROL_TOKEN_VAR).filter(|token| !token.is_empty()) else {
-        return Ok(());
+/// `RAYFIN_LOCAL_CONTROL_TOKEN` as `serve` started ([`take_control_token`]).
+static CONTROL_TOKEN: OnceLock<Option<OsString>> = OnceLock::new();
+
+/// Takes `RAYFIN_LOCAL_CONTROL_TOKEN` out of the environment, so that no child process (Vite,
+/// the function host, the app's code) inherits the host's secret. Call it first in `main`, while
+/// no other thread runs.
+pub fn take_control_token() {
+    let token = std::env::var_os(CONTROL_TOKEN_VAR);
+    if token.is_some() {
+        // SAFETY: `main` calls this before it starts any thread.
+        unsafe { std::env::remove_var(CONTROL_TOKEN_VAR) };
+    }
+    let _ = CONTROL_TOKEN.set(token);
+}
+
+/// `RAYFIN_LOCAL_CONTROL_TOKEN`, which turns on the control API: `None` when unset or empty, an
+/// error when too short to be a secret.
+fn check_control_token() -> anyhow::Result<Option<String>> {
+    let token = CONTROL_TOKEN
+        .get_or_init(|| std::env::var_os(CONTROL_TOKEN_VAR))
+        .as_ref()
+        .filter(|token| !token.is_empty());
+    let Some(token) = token else {
+        return Ok(None);
     };
-    let length = token.to_string_lossy().chars().count();
+    let token = token.to_string_lossy();
+    let length = token.chars().count();
     if length < MIN_CONTROL_TOKEN_CHARS {
         return Err(coded(
             ErrorCode::ConfigInvalid,
@@ -239,7 +276,30 @@ fn check_control_token() -> anyhow::Result<()> {
             ),
         ));
     }
-    Ok(())
+    Ok(Some(token.into_owned()))
+}
+
+/// A new random secret for this run, as hex.
+fn new_secret() -> anyhow::Result<String> {
+    let mut bytes = [0; 32];
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| anyhow!("Could not generate a secret: the system has no randomness."))?;
+    Ok(hex::encode(bytes))
+}
+
+/// `--sign-in-as`, else `[auth] sign_in_as`, else the developer.
+fn sign_in_identity(project: &Project, options: &ServeOptions) -> Identity {
+    let configured = options
+        .sign_in_as
+        .clone()
+        .or_else(|| project.local_config().auth.sign_in_as.clone())
+        .unwrap_or_default();
+    match configured {
+        rl_project::SignInAs::Developer => Identity::Developer,
+        rl_project::SignInAs::User(username) => Identity::User(username),
+        rl_project::SignInAs::None => Identity::None,
+    }
 }
 
 /// The project's `.rayfin-local/` (created on first use), locked against a second `serve`.
@@ -369,13 +429,15 @@ fn is_wildcard(host: &str) -> bool {
 }
 
 /// The auth service. Signing in as the developer's Entra identity ("Continue as <you>" and the
-/// Entra exchange) is on only on loopback, with the developer's tokens from `broker`.
+/// Entra exchange) is on only on loopback, with the developer's tokens from `broker`; automatic
+/// sign-in answers the holder of `sign_in_secret` (the app's dev server).
 async fn start_auth(
     project: &Project,
     state: &LocalState,
     db: &Db,
     host: &str,
     broker: &Arc<TokenBroker>,
+    sign_in_secret: &str,
 ) -> anyhow::Result<(Arc<AuthService>, AuthSettings)> {
     let settings = integrations::auth_settings(
         project,
@@ -385,7 +447,8 @@ async fn start_auth(
     let auth = AuthService::new(db.clone(), state.keys_dir(), settings.clone())
         .await
         .context("Could not start the local auth service")?
-        .with_entra(tokens::reporting(Arc::clone(broker)));
+        .with_entra(tokens::reporting(Arc::clone(broker)))
+        .with_dev_sign_in_secret(sign_in_secret);
     Ok((Arc::new(auth), settings))
 }
 
@@ -523,16 +586,18 @@ impl Running {
 
 /// Starts the backend and the frontend, shows the banner (`ready` with `--json`), and serves
 /// until Ctrl+C (without `--json`) or until the backend stops on its own. Returns an error if
-/// anything fails to start.
+/// anything fails to start. With `control_token`, the backend serves the host's control API.
 async fn serve_until_stopped(
     ctx: &ServeContext<'_>,
     listeners: Vec<TcpListener>,
     auth_settings: &AuthSettings,
+    control_token: Option<String>,
     running: &mut Running,
 ) -> anyhow::Result<Outcome> {
     let static_site = integrations::static_site(ctx).await?;
     let serves_static = static_site.is_some();
-    let (routers, features) = start_features(ctx, &mut running.hooks).await?;
+    let (mut routers, features) = start_features(ctx, &mut running.hooks).await?;
+    routers.extend(control_token.map(|token| control_router(ctx, token)));
     let router = rl_server::build_router(server_config(ctx, static_site), routers);
     let mut stop = running.stop.subscribe();
     let server = running.server.insert(tokio::spawn(rl_server::serve(
@@ -637,6 +702,20 @@ struct Features {
     storage: bool,
 }
 
+/// The host's control API (docs/embedding.md), answering `token`.
+fn control_router(ctx: &ServeContext<'_>, token: String) -> Router {
+    control::Control {
+        token,
+        auth: Arc::clone(ctx.auth),
+        db: ctx.db.clone(),
+        data: ctx.data_api.clone(),
+        storage_dir: ctx.state.storage_dir(),
+        reload: Arc::new(control::NoReload),
+        live: events::live(),
+    }
+    .router()
+}
+
 /// The feature routers (auth and connectors, then the services configured in `integrations`),
 /// and what started. With `[fabric] anonymous_data_access = false`, the routes Fabric's
 /// authentication middleware guards answer requests without a token with its 401.
@@ -717,7 +796,7 @@ fn ready_event(
         api_url: ctx.api_origin.to_owned(),
         portal_url: format!("{}{}", ctx.api_origin, rl_auth::PORTAL_PATH),
         data_dir: ctx.state.dir().display().to_string(),
-        sign_in_as: SignInAs::Developer,
+        sign_in_as: SignInAs::of(&ctx.auth.sign_in_as()),
         sdk: Sdk::of(ctx.project),
         features: events::Features {
             data: DataFeature {

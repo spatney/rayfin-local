@@ -5,11 +5,11 @@
 // `getAuthenticatedToken(scopes, { tenantId })` from `@microsoft/rayfin-cli/auth` serves the token
 // from the CLI's MSAL cache (`rayfin login`). When the cache can't serve the scope silently, the
 // CLI signs in interactively: a browser window, or a device code printed to the log in headless
-// environments. rl-tokens waits up to 180 s for that.
+// environments. rl-tokens waits up to 180 s for that. With `silent`, the helper fails instead.
 //
 // Protocol (`rl_node::run_helper`): `node rayfin-token.mjs --input <in.json> --output <out.json>`,
 // run with the project root as the working directory.
-// Input: `{ scopes: string[], tenantId?: string }`.
+// Input: `{ scopes: string[], tenantId?: string, silent?: boolean }`.
 // Result: `{ token, expiresOnTimestamp, tenantId? }`, `expiresOnTimestamp` in ms since the epoch.
 // The token only goes to the output file; never print it.
 
@@ -72,7 +72,7 @@ async function loadAuth(projectRoot) {
   return auth;
 }
 
-async function mint({ scopes, tenantId }) {
+async function mint({ scopes, tenantId, silent = false }) {
   if (!Array.isArray(scopes) || scopes.length === 0) throw new Error('no scopes were requested');
   const auth = await loadAuth(process.cwd());
   const options = tenantId ? { tenantId } : {};
@@ -91,12 +91,22 @@ async function mint({ scopes, tenantId }) {
     // Silently first, so the log can say when a sign-in is about to start.
     try {
       result = await auth.ensureAuthenticated(scopes, { ...options, silent: true });
-    } catch {
+    } catch (error) {
+      if (silent) {
+        throw new Error(
+          `the Rayfin CLI's cached sign-in can't serve ${wanted} without a prompt ` +
+            `(${error?.message ?? error})`,
+        );
+      }
       console.log(
         `The Rayfin CLI's cached sign-in can't serve ${wanted}: signing in interactively ` +
           '(a browser window opens; rayfin-local waits up to 180 s).',
       );
     }
+  } else if (silent) {
+    throw new Error(
+      `this ${PACKAGE} can't get a token without a prompt (it has no ensureAuthenticated)`,
+    );
   } else {
     console.log(`Getting a token for ${wanted} with the Rayfin CLI (it may open a browser to sign in).`);
   }

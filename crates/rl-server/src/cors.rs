@@ -11,6 +11,7 @@ use tower_http::cors::{AllowHeaders, AllowOrigin, CorsLayer};
 use url::{Host, Url};
 
 use crate::guards::{self, HostAllowlist};
+use crate::routes;
 
 /// Response headers the SDK and apps read: correlation and request ids (storage, connectors),
 /// the functions status, `Retry-After` on 429/503, and the download metadata (compat §9.2.4).
@@ -32,7 +33,8 @@ fn exposed_headers() -> [HeaderName; 7] {
 /// calls the backend at `http://192.168.1.20:7171`. Request headers are mirrored, so every SDK
 /// header (`X-Publishable-Key`, `Authorization`, `x-ms-workload-resource-moniker`,
 /// `X-Correlation-ID`, ...) passes a preflight. No credentials: the SDK sends bearer tokens,
-/// never cookies.
+/// never cookies. Routes for programs rather than browsers (`routes::is_private`) allow no
+/// origin.
 pub(crate) fn layer(extra_origins: &[String], hosts: Option<Arc<HostAllowlist>>) -> CorsLayer {
     let extra: HashSet<String> = extra_origins
         .iter()
@@ -40,13 +42,14 @@ pub(crate) fn layer(extra_origins: &[String], hosts: Option<Arc<HostAllowlist>>)
         .collect();
     CorsLayer::new()
         .allow_origin(AllowOrigin::predicate(move |origin, parts| {
-            origin.to_str().is_ok_and(|origin| {
-                is_loopback_origin(origin)
-                    || extra.contains(origin)
-                    || hosts
-                        .as_deref()
-                        .is_some_and(|hosts| is_allowed_host_origin(origin, parts, hosts))
-            })
+            !routes::is_private(parts.uri.path())
+                && origin.to_str().is_ok_and(|origin| {
+                    is_loopback_origin(origin)
+                        || extra.contains(origin)
+                        || hosts
+                            .as_deref()
+                            .is_some_and(|hosts| is_allowed_host_origin(origin, parts, hosts))
+                })
         }))
         .allow_methods([
             Method::GET,

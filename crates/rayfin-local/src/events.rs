@@ -147,11 +147,26 @@ pub struct Ready {
     pub features: Features,
 }
 
-/// Who the app is signed in as automatically.
+/// Who the app is signed in as automatically: `{"kind": "developer"}`,
+/// `{"kind": "user", "username": "…"}` or `{"kind": "none"}`.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum SignInAs {
     Developer,
+    User { username: String },
+    None,
+}
+
+impl SignInAs {
+    pub fn of(identity: &rl_auth::SignInAs) -> Self {
+        match identity {
+            rl_auth::SignInAs::Developer => Self::Developer,
+            rl_auth::SignInAs::User(username) => Self::User {
+                username: username.clone(),
+            },
+            rl_auth::SignInAs::None => Self::None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -564,7 +579,12 @@ impl Event {
 
 /// The current time as events carry it: RFC 3339 in UTC, with milliseconds.
 pub fn now() -> String {
-    OffsetDateTime::now_utc()
+    timestamp(OffsetDateTime::now_utc())
+}
+
+/// `at` as events write times: RFC 3339 in UTC, with milliseconds.
+pub fn timestamp(at: OffsetDateTime) -> String {
+    at.to_offset(time::UtcOffset::UTC)
         .format(TIME_FORMAT)
         .unwrap_or_default()
 }
@@ -696,7 +716,7 @@ impl LiveState {
         )
     }
 
-    fn record(&self, line: &Value) {
+    pub(crate) fn record(&self, line: &Value) {
         let mut snapshot = lock(&self.0);
         let slot = match line["type"].as_str() {
             Some("ready") => &mut snapshot.ready,
@@ -708,7 +728,6 @@ impl LiveState {
         *slot = Some(line.clone());
     }
 
-    #[allow(dead_code, reason = "read by the control API")]
     pub fn snapshot(&self) -> Snapshot {
         lock(&self.0).clone()
     }
@@ -716,7 +735,6 @@ impl LiveState {
     /// `GET /status` of the control API: the `ready` payload (without `v`, `type` and `time`),
     /// `"state": "running"`, and the last `schema`, `functions` and `vite` events (`null` when
     /// there was none). `None` before `ready`.
-    #[allow(dead_code, reason = "read by the control API")]
     pub fn status(&self) -> Option<Value> {
         let snapshot = self.snapshot();
         let Some(Value::Object(ready)) = snapshot.ready else {
@@ -980,6 +998,16 @@ mod tests {
                   }
                 }"#
             )
+        );
+        let user = SignInAs::of(&rl_auth::SignInAs::User("ana@example.com".into()));
+        assert_eq!(
+            serde_json::to_value(user).unwrap(),
+            json!({ "kind": "user", "username": "ana@example.com" })
+        );
+        let nobody = SignInAs::of(&rl_auth::SignInAs::None);
+        assert_eq!(
+            serde_json::to_value(nobody).unwrap(),
+            json!({ "kind": "none" })
         );
     }
 

@@ -16,8 +16,8 @@ import { signInThroughPopup } from './support/portal.ts';
 
 /*
  * The fixture app (tests/fixtures/apps/basic) against `rayfin-local serve`, scenario by scenario,
- * in this order: config, sign-in, session, data, functions, connector, storage, sign-out. Expected
- * values are in the fixture's README.
+ * in this order: config, sign-in, session, data, functions, connector, storage, sign-out,
+ * auto-sign-in. Expected values are in the fixture's README.
  */
 
 const DAX_QUERY = 'EVALUATE ROW("answer", 42)';
@@ -223,4 +223,27 @@ test('sign-out: the session ends', async ({ app }) => {
   await ensureSignedIn(app);
   expect(await expectOk<SessionInfo>(app.page, 'sign-out')).toEqual({ isAuthenticated: false, user: null });
   expect(await expectOk<SessionInfo>(app.page, 'session')).toEqual({ isAuthenticated: false, user: null });
+});
+
+test('auto-sign-in: the app signs itself in as the developer, with no popup', async ({ app }) => {
+  await openFixtureApp(app);
+  const { page } = app;
+  let popups = 0;
+  const countPopup = () => popups++;
+  page.on('popup', countPopup);
+  try {
+    const answered = page.waitForResponse((response) => response.url().endsWith('/.rayfin/dev/session-token'));
+    const session = await expectOk<SessionInfo>(page, 'auto-sign-in');
+    const answer = await answered;
+    expect(answer.status()).toBe(200);
+    expect(new URL(answer.url()).origin, 'the dev server answered').toBe(new URL(page.url()).origin);
+    // The suite's Power BI token is fake, so the developer is the local developer account.
+    expect(session).toMatchObject({ isAuthenticated: true, user: { email: 'developer@example.com' } });
+    expect(popups, 'sign-in windows opened').toBe(0);
+    expect(await expectOk<SessionInfo>(page, 'session')).toEqual(session);
+    expect(await expectOk(page, 'todo-crud')).toMatchObject({ deleted: true, foundAfterDelete: false });
+  } finally {
+    page.off('popup', countPopup);
+  }
+  await expectOk(page, 'sign-out');
 });

@@ -9,6 +9,7 @@ use serde_json::json;
 use crate::{
     AccessToken, RayfinCliConfig, TokenError,
     az::{aadsts_code, failure, shorten},
+    broker::Prompt,
     jwt,
 };
 
@@ -18,6 +19,11 @@ const HELPER: rl_node::Helper =
 /// How long the helper may take. When the CLI's cache can't serve a scope silently, it signs in
 /// interactively (a browser window, or a device code in the log) and waits for the developer.
 const TIMEOUT: Duration = Duration::from_secs(180);
+/// How long the helper may take when it must not prompt: only the cache and a token refresh.
+const SILENT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a run that must not prompt waits for the one before it, which may be waiting for
+/// the developer to finish signing in.
+const SILENT_TURN_WAIT: Duration = Duration::from_secs(10);
 
 /// How the helper reports a project without the package (`js/rayfin-token.mjs`).
 const NOT_INSTALLED: &str = "@microsoft/rayfin-cli is not installed";
@@ -53,16 +59,37 @@ impl RayfinCli {
         &self,
         scope: &str,
         tenant: Option<&str>,
+        prompt: Prompt,
     ) -> Result<AccessToken, TokenError> {
-        let _turn = self.turn.lock().await;
+        let _turn = match prompt {
+            Prompt::Allowed => self.turn.lock().await,
+            Prompt::Never => tokio::time::timeout(SILENT_TURN_WAIT, self.turn.lock())
+                .await
+                .map_err(|_| {
+                    failure(
+                        scope,
+                        "the Rayfin CLI is busy signing in (a browser window may be open)"
+                            .to_owned(),
+                        "Finish that sign-in, then retry.".to_owned(),
+                    )
+                })?,
+        };
         let mut input = json!({ "scopes": [scope] });
         if let Some(tenant) = tenant {
             input["tenantId"] = json!(tenant);
         }
+        let timeout = match prompt {
+            Prompt::Allowed => TIMEOUT,
+            Prompt::Never => {
+                input["silent"] = json!(true);
+                SILENT_TIMEOUT
+            }
+        };
         tracing::debug!(
             scope,
             project = %self.config.project_root.display(),
-            "getting a token with the Rayfin CLI's login (it may open a browser to sign in)"
+            ?prompt,
+            "getting a token with the Rayfin CLI's login"
         );
         let run = rl_node::run_helper::<HelperToken>(
             &self.config.node,
@@ -72,15 +99,27 @@ impl RayfinCli {
             &input,
             rl_node::default_sink(),
         );
-        let result = match tokio::time::timeout(TIMEOUT, run).await {
+        let result = match tokio::time::timeout(timeout, run).await {
             Ok(Ok(result)) => result,
             Ok(Err(error)) => return Err(helper_failure(scope, error)),
+            Err(_) if prompt == Prompt::Never => {
+                return Err(failure(
+                    scope,
+                    format!(
+                        "the Rayfin CLI's cached sign-in did not answer within {} s",
+                        timeout.as_secs()
+                    ),
+                    "Sign in with `npx rayfin login` in the project, or use the Azure CLI \
+                     (`az login`)."
+                        .to_owned(),
+                ));
+            }
             Err(_) => {
                 return Err(failure(
                     scope,
                     format!(
                         "the Rayfin CLI's sign-in did not finish within {} s",
-                        TIMEOUT.as_secs()
+                        timeout.as_secs()
                     ),
                     "Finish the sign-in in the browser window it opened, or sign in first with \
                      `npx rayfin login` in the project; or use the Azure CLI (`--token-source az`)."

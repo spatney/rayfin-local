@@ -150,6 +150,42 @@ async fn a_project_without_the_rayfin_cli_gets_an_install_hint() {
 }
 
 #[tokio::test]
+async fn silent_tokens_never_sign_in() {
+    let az = FakeAz::new();
+    let project = Project::new(Some(AUTH_MODULE));
+    let broker = project.broker(TokenMode::Auto, Some(&az)).await;
+    let scope = Audience::PowerBi.default_scope();
+    let silent_call = json!({
+        "fn": "ensureAuthenticated",
+        "scopes": [scope],
+        "options": { "tenantId": "contoso.onmicrosoft.com", "silent": true }
+    });
+
+    let error = broker.token_silently(scope).await.unwrap_err();
+    assert!(
+        error.message.contains("without a prompt"),
+        "{}",
+        error.message
+    );
+    assert_eq!(project.calls(), std::slice::from_ref(&silent_call));
+    assert_eq!(az.calls().len(), 1);
+
+    // What a sign-in got is served from the cache, silently.
+    let token = broker.token(scope).await.unwrap();
+    assert_eq!(broker.token_silently(scope).await.unwrap(), token);
+    assert_eq!(project.calls().len(), 3);
+
+    let signed_in = Project::new(Some(&AUTH_MODULE.replace(
+        "throw new Error('Silent token acquisition failed and interactive login was not allowed');",
+        "return { token: `cached-token-for-${scopes[0]}`, expiresOnTimestamp: 1900000000000 };",
+    )));
+    let broker = signed_in.broker(TokenMode::Rayfin, None).await;
+    let token = broker.token_silently(scope).await.unwrap();
+    assert_eq!(token.token, format!("cached-token-for-{scope}"));
+    assert_eq!(signed_in.calls(), [silent_call]);
+}
+
+#[tokio::test]
 async fn auto_mode_falls_back_to_the_rayfin_cli() {
     let az = FakeAz::new();
     let project = Project::new(Some(AUTH_MODULE));

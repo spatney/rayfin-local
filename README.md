@@ -113,6 +113,7 @@ flowchart LR
 | Sign-up and sign-in with email and password | Yes | Local users. |
 | "Sign in with Fabric" (`ensureSignedInWithFabric`) | Emulated | A local sign-in page: create an account, or continue as your Azure identity. |
 | Embedded sign-in (`initEmbeddedAuth`) | Emulated | A local page plays the Fabric host: it frames the app and signs it in. |
+| Automatic sign-in in development (`rayfinLocalDev({ autoLogin: true })`) | Emulated | Signs the app in as you, without an Entra prompt, or as a local user you choose. |
 | Functions, `ctx.getDataClient()`, secrets | Yes | Rebuilt and reloaded when the sources change. |
 | Function connections (`ctx.Tokens.ADO`, `.AzureAI`, `.Fabric`, `.Sql`, `.Storage`) | As you | Tokens for your own Azure account, not the app's identity. |
 | `fabric-semanticmodel` connectors | As you | Real Power BI queries with your token. |
@@ -225,6 +226,8 @@ Its port is remembered per project; when it is busy, rayfin-local takes the next
 | `/.rayfin-local/portal` | The local "Sign in with Fabric" page. |
 | `/.rayfin-local/portal/embed` | The local Fabric host, for apps that sign in embedded. |
 | `/.rayfin-local/health` | `{"ok":true}` once the backend is up. |
+| `/.rayfin-local/dev/session-token` | Automatic sign-in, for rayfin-local's own dev server only. |
+| `/.rayfin-local/control/*` | The control API, for programs that run rayfin-local, with `RAYFIN_LOCAL_CONTROL_TOKEN` (see [docs/embedding.md](docs/embedding.md#control-api)). |
 
 As on Fabric, `/api/*`, `/graphql`, `/functions/*`, `/connector-invoke/*` and `/connectors/*` need an `X-Publishable-Key` header; the local key is in `/rayfin.config.json`.
 
@@ -235,6 +238,11 @@ rayfin-local starts Vite itself, never `npm run dev`, which may call `rayfin up`
 
 Users are local: they live in `.rayfin-local/db.sqlite`, not in Entra ID.
 
+- **Automatic sign-in.** Apps from Rayfin's templates sign themselves in during development (`rayfinLocalDev({ autoLogin: true })` in their Vite config).
+  rayfin-local's dev server answers them itself, without opening any Entra sign-in, as the **sign-in identity** that `--sign-in-as` (or `[auth] sign_in_as` in `rayfin-local.toml`) sets:
+  - `developer` (the default): you, as your own Entra user when `az login` or the Rayfin CLI's login has a token without a prompt and the backend listens on loopback, else a local account, `developer@example.com`.
+  - `user:<username>`: that local user, created without a password when missing.
+  - `none`: nobody, so the app offers its own sign-in, which opens the local sign-in page.
 - **"Sign in with Fabric".** `ensureSignedInWithFabric` opens rayfin-local's sign-in page in the popup instead of the Fabric portal.
   There you can sign in with a local user, create one, or choose **Continue as &lt;you&gt;** to sign in as your own Entra user (the account of your `az` or Rayfin CLI login).
   "Continue as" is offered only when the backend listens on a loopback address.
@@ -355,6 +363,7 @@ inspect_port = 9229     # --inspect
 
 [auth]
 auto_create_users = true   # a password sign-in to an unknown email creates the account
+sign_in_as = "developer"   # --sign-in-as: "developer" | "none" | "user:<username>"
 
 [fabric]
 anonymous_data_access = true   # false: act like a tenant without anonymous data access
@@ -398,6 +407,7 @@ Every command takes these options:
 | `--host <HOST>` | Interface to listen on. Default: `[server] host`, else `127.0.0.1`. **Anything but loopback exposes your Azure identity** to the network, through functions and connectors. With `0.0.0.0` or `::` the app's URLs still point at `localhost`, so to use the app from another device pass this machine's LAN address instead. |
 | `--token-source <auto\|az\|rayfin>` | Where Azure tokens come from. Default: `[tokens] source`, else `auto`. |
 | `--tenant <TENANT>` | Entra tenant for tokens. Default: your login's tenant. |
+| `--sign-in-as <WHO>` | Who apps that sign in automatically sign in as: `developer` (you), `user:<username>` (a local user) or `none`. Default: `[auth] sign_in_as`, else `developer`. See [Signing in](#signing-in). |
 | `--force-schema` | Apply schema changes that lose data. |
 | `--reset` | Start from an empty database: delete the database and stored files (keeps ports, keys and secrets). |
 | `--inspect[=PORT]` | Start the function host with the Node.js inspector, on port 9229 by default. |
@@ -410,6 +420,7 @@ Every command takes these options:
 | --- | --- |
 | `RAYFIN_LOCAL_NODE` | The `node` executable to use instead of the one on `PATH`. |
 | `RAYFIN_LOCAL_TOKEN_<AUDIENCE>` | A fixed token for one audience (see [Identity and Azure tokens](#identity-and-azure-tokens)). |
+| `RAYFIN_LOCAL_CONTROL_TOKEN` | Turns on the control API for programs that run rayfin-local; at least 32 characters (see [docs/embedding.md](docs/embedding.md#control-api)). |
 | `RAYFIN_ENV_FILE` | The env file to read instead of `rayfin/.env`, as for the Rayfin CLI. |
 | `RUST_LOG` | Log filters, such as `rl_graphql=debug`. |
 | `NO_COLOR` | Turn off colored output. |
@@ -431,6 +442,9 @@ Run `rayfin-local doctor` first: it checks what `serve` needs and says what to f
   Ports you didn't set move to the next free one by themselves.
 - **Sign-in does nothing, or fails without a message.**
   Look at `serve`'s output for the failed request, and check that the app was opened from the **App** URL in the banner, not from an old dev server or a deployed URL.
+- **"Couldn't sign you in automatically".**
+  The sign-in identity is `none`, or signing in failed and the message says why.
+  Sign in with the app's button, or restart with `--sign-in-as developer`.
 - **Azure sign-in errors, or "No token available for audience …" from a function.**
   Run `az login` (with `--tenant <tenant>` for another tenant), or sign in with the Rayfin CLI (`npx rayfin login`) and use `--token-source rayfin`.
   A function still runs without a token; reading `ctx.Tokens.<Audience>` throws, and `serve` logs why the token is missing.

@@ -10,7 +10,7 @@ use axum::{
 };
 use serde_json::json;
 
-/// Why the storage router could not start.
+/// Why the storage router could not start, or the stored files could not be cleared.
 #[derive(Debug, thiserror::Error)]
 pub enum StorageError {
     #[error(

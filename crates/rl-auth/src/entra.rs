@@ -290,21 +290,39 @@ impl AuthService {
 
     /// The developer's identity, from a Power BI token minted for them, which must be a user's
     /// (delegated) like an exchanged token. No signature check: the token comes from their own
-    /// Azure sign-in, not from a client.
+    /// Azure sign-in, not from a client. Getting the token may ask them to sign in.
     pub(crate) async fn developer_identity(&self) -> Result<EntraIdentity, DeveloperIdentityError> {
+        self.developer_identity_from(false).await
+    }
+
+    /// [`Self::developer_identity`] when a token for it can be had without asking the developer
+    /// to sign in.
+    pub(crate) async fn developer_identity_silently(
+        &self,
+    ) -> Result<EntraIdentity, DeveloperIdentityError> {
+        self.developer_identity_from(true).await
+    }
+
+    async fn developer_identity_from(
+        &self,
+        silently: bool,
+    ) -> Result<EntraIdentity, DeveloperIdentityError> {
         let Some(tokens) = &self.entra.tokens else {
             return Err(DeveloperIdentityError {
                 message: "rayfin-local was started without access to your Azure sign-in".into(),
                 hint: None,
             });
         };
-        let token = tokens
-            .token(Audience::PowerBi.default_scope())
-            .await
-            .map_err(|error| DeveloperIdentityError {
-                message: error.message,
-                hint: error.hint,
-            })?;
+        let scope = Audience::PowerBi.default_scope();
+        let token = if silently {
+            tokens.token_silently(scope).await
+        } else {
+            tokens.token(scope).await
+        };
+        let token = token.map_err(|error| DeveloperIdentityError {
+            message: error.message,
+            hint: error.hint,
+        })?;
         let not_a_user = || DeveloperIdentityError {
             message: "your Azure sign-in is not a user account".into(),
             hint: Some("Sign in with your user account: `az login`.".into()),

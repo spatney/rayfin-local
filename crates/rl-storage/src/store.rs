@@ -228,6 +228,25 @@ pub(crate) fn delete_object(conn: &Connection, id: &str) -> rusqlite::Result<Opt
     .optional()
 }
 
+/// Deletes every object and operation; returns how many objects there were (none before the
+/// tables exist).
+pub(crate) fn clear(conn: &mut Connection) -> rusqlite::Result<u64> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = \
+         '_rl_storage_objects')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        return Ok(0);
+    }
+    let tx = conn.transaction()?;
+    let deleted = tx.execute("DELETE FROM _rl_storage_objects", [])?;
+    tx.execute("DELETE FROM _rl_storage_operations", [])?;
+    tx.commit()?;
+    Ok(u64::try_from(deleted).unwrap_or_default())
+}
+
 /// The bytes of every stored object.
 pub(crate) fn used_bytes(conn: &Connection) -> rusqlite::Result<u64> {
     let used: i64 = conn.query_row(

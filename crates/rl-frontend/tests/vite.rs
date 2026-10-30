@@ -3,6 +3,11 @@
 //!
 //! Set `RAYFIN_LOCAL_EXPLORER` to explorer's folder; the default is `fabric-apps/apps/explorer`
 //! next to this repository. Tests that need it or Node.js print a note and pass without them.
+//!
+//! The automatic sign-in test runs on the Vite and `@microsoft/rayfin-local-dev` installed in the
+//! basic fixture (`npm ci` in `tests/fixtures/apps/basic`), and in the apps
+//! `RAYFIN_LOCAL_TEST_VITE_APPS` lists (folders separated as in `PATH`), such as an app from a
+//! Rayfin template with another major version of Vite.
 
 use std::ffi::OsString;
 use std::net::TcpListener;
@@ -11,7 +16,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::extract::Path as UrlPath;
-use axum::routing::{any, get};
+use axum::http::{HeaderMap, StatusCode};
+use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use rl_frontend::{
     DevServer, DevServerConfig, FrontendError, RayfinEnv, StaticBuildConfig, build_static,
@@ -24,6 +30,18 @@ use serde_json::{Value, json};
 const KEY: &str = "pk-local-test";
 const WORKSPACE: &str = "11111111-1111-4111-8111-111111111111";
 const ITEM: &str = "22222222-2222-4222-8222-222222222222";
+const SIGN_IN_SECRET: &str = "the-run's-sign-in-secret";
+
+/// A token response, as the backend's sign-in routes answer; `access_token` says which.
+fn session(access_token: &str) -> Value {
+    json!({
+        "accessToken": access_token,
+        "tokenType": "Bearer",
+        "expiresIn": 3600,
+        "refreshToken": null,
+        "scope": null,
+    })
+}
 
 /// Links every package folder of `argv[1]` into `argv[2]`, except Vite's caches.
 const LINK_PACKAGES: &str = r"
@@ -162,6 +180,7 @@ impl Project {
             port,
             backend_origin: backend.to_owned(),
             env: frontend_env(&local_env(backend)),
+            sign_in_secret: None,
             sink,
         }
     }
@@ -265,6 +284,24 @@ impl Backend {
                 any(|UrlPath(name): UrlPath<String>| async move {
                     Json(json!({"route": "host", "function": name}))
                 }),
+            )
+            .route(
+                "/.rayfin-local/dev/session-token",
+                get(|headers: HeaderMap| async move {
+                    if headers
+                        .get("x-rayfin-local-sign-in")
+                        .map(|value| value.as_bytes())
+                        != Some(SIGN_IN_SECRET.as_bytes())
+                    {
+                        return (StatusCode::FORBIDDEN, Json(json!({"error": "no secret"})));
+                    }
+                    (StatusCode::OK, Json(session("from-rayfin-local")))
+                }),
+            )
+            // Where rayfinLocalDev()'s own automatic sign-in exchanges an Entra token.
+            .route(
+                "/api/auth/v1/brokered/token",
+                post(|| async { Json(session("from-the-entra-exchange")) }),
             );
         let router = rl_server::build_router(config, vec![routes]);
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -456,6 +493,107 @@ async fn apps_without_rayfin_local_dev_get_the_same_routes() {
     server.stop().await.unwrap();
     assert!(wait_until_port_is_free(port).await, "Vite still listens");
     backend.stop().await;
+}
+
+/// The apps whose installed Vite and `@microsoft/rayfin-local-dev` the automatic sign-in test
+/// runs on: the basic fixture, and those `RAYFIN_LOCAL_TEST_VITE_APPS` lists.
+fn vite_apps() -> Vec<PathBuf> {
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/apps/basic");
+    let listed = std::env::var_os("RAYFIN_LOCAL_TEST_VITE_APPS")
+        .map(|apps| std::env::split_paths(&apps).collect::<Vec<_>>())
+        .unwrap_or_default();
+    std::iter::once(fixture)
+        .chain(listed)
+        .filter(|app| {
+            ["vite", "@microsoft/rayfin-local-dev"]
+                .iter()
+                .all(|package| {
+                    let manifest = app.join("node_modules").join(package).join("package.json");
+                    manifest.is_file()
+                })
+        })
+        .filter_map(|app| dunce::canonicalize(app).ok())
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_dev_server_signs_the_app_in_before_rayfin_local_dev_does() {
+    let node = match NodeRuntime::discover().await {
+        Ok(node) => node,
+        Err(error) => {
+            eprintln!("skipped: {error}");
+            return;
+        }
+    };
+    let apps = vite_apps();
+    if apps.is_empty() {
+        eprintln!(
+            "skipped: no app has Vite and @microsoft/rayfin-local-dev installed (run `npm ci` in \
+             tests/fixtures/apps/basic)"
+        );
+    }
+    for app in apps {
+        let project = Project::linked(&node, &app).await;
+        project.write(
+            "package.json",
+            r#"{"name": "sign-in-test", "private": true, "type": "module"}"#,
+        );
+        project.write("index.html", "<!doctype html><title>sign-in test</title>");
+        // The template's plugin with its automatic sign-in; the config notes whether it can see
+        // the sign-in secret.
+        project.write(
+            "vite.config.mjs",
+            "import { writeFileSync } from 'node:fs';\n\
+             import { rayfinLocalDev } from '@microsoft/rayfin-local-dev/vite';\n\
+             writeFileSync('secret-seen.txt', process.env.RAYFIN_LOCAL_SIGN_IN_SECRET ?? '');\n\
+             export default { plugins: [rayfinLocalDev({ autoLogin: true })] };\n",
+        );
+        let backend = Backend::start().await;
+        let client = client();
+        let mut answered_by = Vec::new();
+        let mut versions = Vec::new();
+        for secret in [None, Some(SIGN_IN_SECRET)] {
+            let port = free_port();
+            let (sink, lines) = collector();
+            let mut config = project.dev_config(&node, port, &backend.origin, sink);
+            config.sign_in_secret = secret.map(str::to_owned);
+            // What rayfinLocalDev()'s own sign-in uses instead of an Entra sign-in in a browser.
+            config
+                .env
+                .push(("RAYFIN_TOKEN".to_owned(), "ambient-test-token".to_owned()));
+            let server = DevServer::start(config)
+                .await
+                .unwrap_or_else(|e| panic!("{e}\n{}", dump(&lines)));
+            let vite = server.vite_version().to_owned();
+            // As the app's page asks for it: a same-origin GET, so without an Origin.
+            let url = format!("http://127.0.0.1:{port}/.rayfin/dev/session-token");
+            let (status, body) = fetch(&client, "GET", &url, "application/json").await;
+            assert_eq!(status, 200, "Vite {vite}: {body}\n{}", dump(&lines));
+            let token: Value = serde_json::from_str(&body).unwrap();
+            answered_by.push(token["accessToken"].as_str().unwrap_or_default().to_owned());
+            if secret.is_some() {
+                let other_page = client
+                    .get(&url)
+                    .header("origin", "http://localhost:3000")
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(other_page.status(), 403, "Vite {vite}");
+            }
+            server.stop().await.unwrap();
+            versions.push(vite);
+        }
+        eprintln!("signed in through Vite {}: {}", versions[0], app.display());
+        assert_eq!(
+            answered_by,
+            ["from-the-entra-exchange", "from-rayfin-local"],
+            "{}",
+            app.display()
+        );
+        let seen = std::fs::read_to_string(project.path().join("secret-seen.txt")).unwrap();
+        assert_eq!(seen, "", "the app's config saw the sign-in secret");
+        backend.stop().await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

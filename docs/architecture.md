@@ -183,12 +183,16 @@ Programs such as Fabricator run `serve --json` as a child process; [embedding.md
 - **Stopping.** A thread reads stdin until it ends (`shutdown::StopListener`); `serve` listens to it, and to Ctrl+C, from the start, so a host that gives up during a slow start stops it too.
 - **Feature crates** report through hooks rather than knowing about events: `rl-functions` calls `FunctionsConfig::on_state` (building, ready, failed with the compiler's messages), the token sources handed to the services report the audiences without a token (`azure-sign-in`), and which connector types run locally is decided in one place, `integrations::connector_runs_locally`.
 - **Live state.** `events::live()` keeps the last `ready`, `schema`, `functions` and `vite` events, with or without `--json`, for the control API's `GET /status`.
+- **Control API.** `control.rs` serves `/.rayfin-local/control/*` when `RAYFIN_LOCAL_CONTROL_TOKEN` is set: `main` takes the token from the environment before anything else runs, so no child inherits it, and `serve` checks it before starting.
+  A guard layer answers only loopback peers that send no `Origin` and the token as a bearer token (compared as SHA-256 digests in constant time).
+  The handlers use the services' own APIs: `rl-auth` for users, sessions and the sign-in identity, `rl-graphql`'s `admin` module for rows (formatted by the data API's SQL), and `rl_storage::clear`.
+  `POST /reload` goes through `control::ReloadTrigger`; `NoReload` answers 501 `not-available`.
 
 ## Requests
 
 `rl-server` puts these in front of every feature route:
 
-- **CORS** for loopback origins on any port and the app's `allowedRedirectUris`, without credentials.
+- **CORS** for loopback origins on any port and the app's `allowedRedirectUris`, without credentials; never for `/.rayfin-local/control/*` and `/.rayfin-local/dev/*`, which are for programs, not pages.
 - **The publishable key:** `/api/*`, `/graphql`, `/functions/*`, `/connector-invoke/*` and `/connectors/*` need `X-Publishable-Key`.
   A missing or wrong key is 403, never 401, which would make the SDK refresh and then sign the user out.
   The JWKS, `/api/projectRuntimeSettings`, `/rayfin.config.json`, `/.rayfin-local/*` and static files are exempt.
@@ -208,6 +212,18 @@ The data API, storage, functions and connectors all identify the caller this way
 - A password sign-in for an unknown email creates the account when sign-up is allowed (`[auth] auto_create_users`, on by default), because the 1.36.2 SDK's `MockAuthService` pattern can't reach its sign-up fallback.
 - "Continue as &lt;you&gt;" and the Entra exchange (`/api/auth/v1/brokered/token`) verify an Entra token against Microsoft's signing keys and sign in a local user keyed by the token's object id.
   "Continue as" uses the developer's own Power BI token from the token broker, and both are on only when the backend listens on loopback.
+
+### Automatic sign-in
+
+Apps with `rayfinLocalDev({ autoLogin: true })` ask their dev server for `GET /.rayfin/dev/session-token`, whose middleware would sign in with Entra through the Rayfin CLI.
+Under rayfin-local, the sign-in identity answers instead:
+
+- `serve` makes a random secret for the run and gives it only to `js/vite-dev.mjs` (`RAYFIN_LOCAL_SIGN_IN_SECRET`), which takes it out of its environment before the app's Vite config loads.
+- Its `rayfin-local:sign-in` plugin is a `pre` plugin, so its middleware comes before `rayfinLocalDev()`'s; it applies the same checks (a loopback peer, no foreign `Origin`) and asks the backend's `GET /.rayfin-local/dev/session-token` with the secret.
+- `rl_auth::AutoSignIn` holds the identity (`--sign-in-as`, `[auth] sign_in_as`, then the control API's `PUT /identity`), and the route issues a session for it, as a sign-in would.
+- `developer` is the Entra user of a Power BI token that the broker gets without a prompt (`TokenSource::token_silently`: the environment, its cache, the Azure CLI, or the Rayfin CLI's cache), signed in as "Continue as" does; without one, `developer@example.com`.
+  Without an Azure sign-in, asking takes a second or more, so after a failure it asks again only after five minutes or a switch of the identity.
+- Switching the identity revokes every session while it holds the identity's write lock, so no session for the old identity is issued during the switch.
 
 ### "Sign in with Fabric"
 
@@ -268,7 +284,7 @@ Decimals are stored as `REAL`, so they lose precision beyond about 15 significan
 node vite-dev.mjs --root <frontend dir> --host <host> --port <port> --backend <backend origin>
 ```
 
-The helper starts the app's own `vite` package with its config and plugins, on exactly the chosen port, and adds one plugin, `rayfin-local:shim`:
+The helper starts the app's own `vite` package with its config and plugins, on exactly the chosen port, and adds one plugin, `rayfin-local:shim` (and, for [automatic sign-in](#automatic-sign-in), `rayfin-local:sign-in`):
 
 - It always proxies `/.well-known/*` and `/.rayfin-local/*` to the backend.
 - When the app's Vite config doesn't use `rayfinLocalDev()` (`@microsoft/rayfin-local-dev/vite`), it also does what that plugin does: it serves `/rayfin.config.json` with the dev server's origin as `apiUrl`, and proxies `/api`, `/graphql`, `/connector-invoke`, `/connectors` and `/functions` to the backend.
@@ -399,6 +415,8 @@ rayfin-local is a development tool for one person, but it holds the keys to that
 - **DNS rebinding.** The `Host` check stops web pages on other origins from reaching the backend through a rebound DNS name; CORS only allows loopback origins and the app's `allowedRedirectUris`.
 - **"Continue as"** signs in as the developer only when the request comes to a loopback host.
 - **The sign-in page's endpoints** answer only the page itself: they need its CSRF token and an `Origin` equal to the portal's own.
+- **The control API and automatic sign-in** answer only loopback requests that carry a secret: the host's control token, or the run's sign-in secret, which only the Vite runner gets.
+  The control API refuses any request with an `Origin`, and CORS allows neither.
 - **The function host** listens on a random loopback port and refuses requests without its per-process secret.
 - **Secrets and tokens** are never logged; request logs omit headers and bodies, and signed storage URLs are redacted.
   Helper results, which can carry access tokens, are deleted as soon as they are read (and on Unix live in a folder only the user can open).
@@ -420,6 +438,7 @@ rayfin-local is a development tool for one person, but it holds the keys to that
 - **SQL connectors** against a real SQL Server (`rl-connectors`' `sql_server.rs` and `sql_sdk.rs`, with `RAYFIN_LOCAL_TEST_MSSQL`; CI runs them in a SQL Server container), and their T-SQL on a fake database (`rl-graphql`'s `tsql.rs`).
 - **SDK conformance**: the `sdk.rs` tests of `rl-auth`, `rl-graphql` and `rl-storage`, `rl-connectors`' `sdk_decode.rs` and `rl-functions`' `host.rs` drive rayfin-local with the real `@microsoft/rayfin-*` 1.36.2 packages from the fixture app, and skip when Node.js or the packages are missing.
 - **The host contract**: `crates/rayfin-local/tests/host_contract.rs` runs the built binary: `version --json`, fatal errors of `serve --json`, and a `serve --json` of the fixture app from its events to the end of stdin (it skips without the fixture's packages).
+  `control_api.rs` drives the control API and automatic sign-in of the fixture app the same way.
 - **End to end**: Playwright drives the fixture app in `tests/e2e` (sign-in popup, data, functions, storage) and, optionally, the explorer app.
 
 [development.md](development.md) has the commands.

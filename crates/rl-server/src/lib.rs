@@ -19,7 +19,8 @@
 //! - CORS for loopback origins on any port, [`ServerConfig::allowed_origins`] and, with the Host
 //!   check on, origins on the host a request is addressed to (another port of the same machine):
 //!   the usual methods, mirrored request headers, the SDK's response headers exposed, no
-//!   credentials, 10-minute preflight cache.
+//!   credentials, 10-minute preflight cache. Never for `/.rayfin-local/control/*` and
+//!   `/.rayfin-local/dev/*`, which programs on this machine call, not browsers.
 //! - The Host check, when [`ServerConfig::allowed_hosts`] is set (DNS-rebinding protection).
 //! - Static hosting with the SPA fallback, when [`ServerConfig::static_site`] is set.
 //! - A JSON 404 (`{"error":"not_found",...}`) for everything else.

@@ -21,6 +21,7 @@
 //! | `aggregate` | `{E}Connection.groupBy` (DAB's aggregations): its types, plan, SQL (`GROUP BY`/`HAVING` over the connection's rows) and response. |
 //! | `mutation` | `create{E}`/`update{E}`/`delete{E}`: each root field in its own transaction, per-action grants and policies, then the row read back with the read permission. |
 //! | `http` | The routes and the HTTP status policy. |
+//! | [`admin`] | Row counts, pages of rows and clearing rows for a host's control API, whatever the permissions, with values as the queries answer them. |
 //!
 //! # Notes
 //!
@@ -36,6 +37,7 @@
 //!   resolver over [`schema::Schema`] is added (`exec::plan_root`). `__typename` always works.
 
 pub mod access;
+pub mod admin;
 mod aggregate;
 mod coerce;
 mod cursor;

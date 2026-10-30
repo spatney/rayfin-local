@@ -65,6 +65,8 @@ pub struct ServeContext<'a> {
     pub api_origin: &'a str,
     /// The dev server's port (`None` with `--no-frontend` or `--static`).
     pub frontend_port: Option<u16>,
+    /// The run's secret for automatic sign-in, which the dev server sends the backend.
+    pub sign_in_secret: &'a str,
 }
 
 impl ServeContext<'_> {
@@ -639,6 +641,7 @@ pub async fn start_frontend(
         port,
         backend_origin: ctx.api_origin.to_owned(),
         env: rl_frontend::frontend_env(&rayfin_env(ctx)),
+        sign_in_secret: Some(ctx.sign_in_secret.to_owned()),
         sink: ui::child_sink(),
     })
     .await

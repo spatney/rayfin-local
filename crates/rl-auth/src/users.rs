@@ -36,6 +36,12 @@ impl User {
     pub fn name(&self) -> &str {
         self.display_name.as_deref().unwrap_or(&self.username)
     }
+
+    /// Whether this is the developer's own account: the local developer account, or an Entra
+    /// identity (locally, only the developer signs in with one).
+    pub fn is_developer(&self) -> bool {
+        self.entra_oid.is_some() || username_key(&self.username) == crate::LOCAL_DEVELOPER
+    }
 }
 
 impl fmt::Debug for User {
@@ -58,28 +64,55 @@ impl AuthService {
         let username = validate_username(username)?.to_owned();
         validate_password(password)?;
         let key = username_key(&username);
-        let exists = {
-            let key = key.clone();
-            self.db
-                .call(move |conn| find_user(conn, "username_key = ?1", &key))
-                .await??
-                .is_some()
-        };
+        let exists = self
+            .db
+            .call(move |conn| find_user(conn, "username_key = ?1", &key))
+            .await??
+            .is_some();
         if exists {
             return Err(AuthError::UsernameTaken);
         }
         let password_hash = hash_password(password.to_owned()).await?;
+        self.insert_local_user(username, Some(password_hash)).await
+    }
+
+    /// Creates a user without a password, whom only rayfin-local itself signs in (automatic
+    /// sign-in, a host's control API). The username is checked as [`Self::create_user`] checks it.
+    pub async fn create_user_without_password(&self, username: &str) -> Result<User, AuthError> {
+        let username = validate_username(username)?.to_owned();
+        self.insert_local_user(username, None).await
+    }
+
+    /// The user with this id or username, created without a password when there is none.
+    pub async fn find_or_create_user(&self, id_or_username: &str) -> Result<User, AuthError> {
+        if let Some(user) = self.find_user(id_or_username).await? {
+            return Ok(user);
+        }
+        match self.create_user_without_password(id_or_username).await {
+            // Created meanwhile by another request.
+            Err(AuthError::UsernameTaken) => self
+                .find_user(id_or_username)
+                .await?
+                .ok_or(AuthError::UserNotFound),
+            created => created,
+        }
+    }
+
+    async fn insert_local_user(
+        &self,
+        username: String,
+        password_hash: Option<String>,
+    ) -> Result<User, AuthError> {
         let email = looks_like_email(&username).then(|| username.clone());
-        let now = self.now_ms();
         let user = NewUser {
             id: uuid::Uuid::new_v4().to_string(),
+            username_key: username_key(&username),
             username,
-            username_key: key,
             email,
             display_name: None,
-            password_hash: Some(password_hash),
+            password_hash,
             entra_oid: None,
-            now,
+            now: self.now_ms(),
         };
         self.db.call(move |conn| insert_user(conn, &user)).await?
     }
@@ -142,6 +175,26 @@ impl AuthService {
             .await??;
         self.forget_sessions(revoked, now);
         Ok(user)
+    }
+
+    /// Deletes every user and signs out every session; returns how many users there were.
+    pub async fn delete_all_users(&self) -> Result<usize, AuthError> {
+        let now = self.now_ms();
+        let (deleted, revoked) = self
+            .db
+            .call(move |conn| -> Result<_, AuthError> {
+                let tx = conn.transaction()?;
+                let revoked = crate::sessions::revoke_every_session(&tx, now)?;
+                tx.execute("DELETE FROM _rl_auth_refresh_tokens", [])?;
+                // Their handoff codes go with them (ON DELETE CASCADE).
+                let deleted = tx.execute("DELETE FROM _rl_auth_users", [])?;
+                tx.commit()?;
+                Ok((deleted, revoked))
+            })
+            .await??;
+        self.forget_sessions(revoked, now);
+        self.forget_developer_account();
+        Ok(deleted)
     }
 
     /// Replaces a user's password (by id or username) and, as a password reset does on the real
@@ -565,6 +618,46 @@ mod tests {
             auth.delete_user("alice").await,
             Err(AuthError::UserNotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn users_without_a_password_and_deleting_everyone() {
+        let (_dir, auth) = service().await;
+        let ana = auth
+            .create_user_without_password(" ana@example.com ")
+            .await
+            .unwrap();
+        assert_eq!(ana.username, "ana@example.com");
+        assert_eq!(ana.email.as_deref(), Some("ana@example.com"));
+        assert!(!ana.has_password && !ana.is_developer());
+        assert!(matches!(
+            auth.verify_password("ana@example.com", "").await,
+            Err(AuthError::InvalidCredentials)
+        ));
+        assert!(matches!(
+            auth.create_user_without_password("ANA@example.com").await,
+            Err(AuthError::UsernameTaken)
+        ));
+        assert_eq!(
+            auth.find_or_create_user("ANA@example.com")
+                .await
+                .unwrap()
+                .id,
+            ana.id
+        );
+        let developer = auth
+            .find_or_create_user("Developer@Example.com")
+            .await
+            .unwrap();
+        assert!(developer.is_developer());
+        let session = auth.issue_session(&developer).await.unwrap();
+
+        assert_eq!(auth.delete_all_users().await.unwrap(), 2);
+        assert!(auth.list_users().await.unwrap().is_empty());
+        assert_eq!(
+            auth.verify_session_token(&session.access_token),
+            Err(crate::jwt::TokenError::Revoked)
+        );
     }
 
     #[tokio::test]

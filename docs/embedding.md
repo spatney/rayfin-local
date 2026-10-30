@@ -40,7 +40,7 @@ The environment configures the rest:
 
 | Variable | Effect |
 | --- | --- |
-| `RAYFIN_LOCAL_CONTROL_TOKEN` | Turns on the [control API](#control-api); requests must send it as a bearer token. At least 32 characters; shorter values are refused with a fatal `config-invalid` error. An empty value counts as unset. |
+| `RAYFIN_LOCAL_CONTROL_TOKEN` | Turns on the [control API](#control-api); requests must send it as a bearer token. At least 32 characters; shorter values are refused with a fatal `config-invalid` error. An empty value counts as unset. rayfin-local removes it from its environment, so the processes it starts (Vite, the function host, the app's code) don't see it. |
 | `RAYFIN_LOCAL_NODE` | The `node` executable. |
 | `RAYFIN_CONFIG_DIR` | The Rayfin CLI's config folder, for the `rayfin` token source (the account a host has signed in). |
 | `NO_COLOR` | Ignored with `--json` (there are no colors). |
@@ -143,6 +143,7 @@ Hosts show the app once they see this event.
 
 - `appUrl` is `null` with `--no-frontend`; with `--static` it is the backend's origin.
 - `embedUrl` is `null` when the app has no Fabric sign-in, or no `appUrl`.
+- `signInAs` is the [automatic sign-in](#automatic-sign-in) identity: `{"kind":"developer"}`, `{"kind":"user","username":"ana@example.com"}` or `{"kind":"none"}`.
 - `connectors[].supported` is `false` for connector types rayfin-local answers with 501.
 
 ### `config-changed`
@@ -216,45 +217,54 @@ A second Ctrl+C while `serve` stops ends it at once, with `130` (and, with `--js
 
 Apps built from Rayfin's templates sign in during development with `rayfinLocalDev({ autoLogin: true })` from `@microsoft/rayfin-local-dev`.
 Its page asks the dev server for `GET /.rayfin/dev/session-token`, which on Fabric needs a `rayfin login` session.
-Under rayfin-local, the dev server answers that route itself, for the **sign-in identity**, without any Entra sign-in in the browser:
+Under rayfin-local, the dev server answers that route itself, ahead of `rayfinLocalDev()`, for the **sign-in identity**, without any Entra sign-in in the browser:
 
 | Identity | `--sign-in-as` | Signs the app in as |
 | --- | --- | --- |
-| `developer` (default) | `developer` | You: your Entra identity from the Azure CLI or the Rayfin CLI's login when one is available without a prompt, else a local account, `developer@example.com`. |
-| `user` | `user:<username>` | That local user (created when missing). |
+| `developer` (default) | `developer` | You: your Entra identity from the Azure CLI or the Rayfin CLI's cached sign-in when a token for it comes without a prompt and the backend listens on loopback, else a local account, `developer@example.com`. |
+| `user` | `user:<username>` | That local user (created without a password when missing). |
 | `none` | `none` | Nobody: the route answers 401 `{"error":"Automatic sign-in is off.","hint":"…"}`. |
 
-The answer has the shape `fetchRayfinLocalSessionToken()` expects: `{"accessToken","tokenType","expiresIn","refreshToken","scope"}`.
+`[auth] sign_in_as` in `rayfin-local.toml` sets the identity too (`"developer"`, `"none"` or `"user:<username>"`); `--sign-in-as` wins.
+When `developer` finds no Entra identity, it asks again after five minutes, or at once after `PUT /identity`, for example once the developer signed in to Azure.
+The answer is a session like any other, in the shape `fetchRayfinLocalSessionToken()` expects: `{"accessToken","tokenType","expiresIn","refreshToken","scope"}`.
+Failures are `{"error","hint"}`, which the page shows: 403 for requests from other machines or other origins, 404 when the app's auth is off (`services.auth.enabled: false`), 500 when signing in failed.
 Changing the identity (through the control API) revokes every local session, so an app that reloads signs in again as the new identity.
-The backend answers the same route at `GET /.rayfin-local/dev/session-token` (loopback only) for apps whose dev server rayfin-local doesn't start.
+The dev server gets the session from the backend's `GET /.rayfin-local/dev/session-token`, which answers only rayfin-local's own dev server: loopback requests that carry a secret of the run, which no page and none of the app's code sees.
 
 ## Control API
 
 With `RAYFIN_LOCAL_CONTROL_TOKEN` set, the backend serves `{apiUrl}/.rayfin-local/control/*`.
 
-- Only loopback peers are answered.
+- Only loopback peers are answered; others get 403.
 - Every request needs `Authorization: Bearer <RAYFIN_LOCAL_CONTROL_TOKEN>`; otherwise 401.
-- Requests with an `Origin` header (from a browser) get 403.
-- Bodies are JSON.
-  Errors are `{"error":{"code","message","hint"}}` with a 4xx or 5xx status.
+- Requests with an `Origin` header (from a browser) get 403, and CORS never allows these routes.
+  They need no publishable key.
+- Bodies are JSON; a route that takes one also takes an empty body, as `{}`.
+  Errors are `{"error":{"code","message","hint"}}` with a 4xx or 5xx status; `code` is stable, and is one of `unauthorized` (401), `forbidden` (403), `invalid-request` (400), `invalid-order-by` (400), `user-not-found` (404), `entity-not-found` (404), `user-exists` (409), `rows-referenced` (409), `internal` (500), `not-available` (501) and `starting` (503).
 - Without the variable, these routes answer 404.
 
 | Method and path | Body | Answer |
 | --- | --- | --- |
-| `GET /status` | | The `ready` payload (without `v`, `type`, `time`) plus `"state":"running"`, `"schema"` (the last `schema` event), `"functions"` (the last `functions` event) and `"vite"` (the last `vite` event). |
-| `GET /identity` | | `{"kind":"developer","user":{…}}`, `{"kind":"user","user":{…}}` or `{"kind":"none","user":null}`. `user` is the [user](#users) the identity signs in as (for `developer`, `null` until first used). |
-| `PUT /identity` | `{"kind":"developer"}`, `{"kind":"user","user":"<username or id>","create":true}` or `{"kind":"none"}` | The new identity, as `GET /identity`. Revokes every local session. |
-| `GET /users` | | `{"users":[user, …]}` |
-| `POST /users` | `{"username":"ana@example.com","password":"…"}` (`password` optional: without one the user can only be signed in through this API) | `user`, 201. 409 when the username exists. |
-| `DELETE /users/{username or id}` | | 204. Signs out the user's sessions. |
-| `POST /token` | `{"user":"<username or id>","create":false}`, or `{"user":null}` for the developer identity | `{"accessToken","tokenType":"Bearer","expiresIn","user":user}`: an access token for calls a host makes as that user (`create: true` creates a missing user). |
-| `GET /entities` | | `{"entities":[{"name":"Note","rows":12}, …]}` |
-| `GET /entities/{name}/rows?offset=0&limit=50&orderBy=<field>&desc=false` | | `{"columns":[{"name","type","key":bool}],"rows":[{…}],"total":12}`. Every row, regardless of permissions; values formatted as the data API formats them. `limit` is at most 500. |
-| `DELETE /entities/{name}/rows` | | `{"deleted":12}`. 409 when other entities' rows still refer to them. |
-| `POST /data/reset` | | `{"ok":true}`. Deletes every entity's rows, the local users and their sessions, and the stored files, without a restart. |
-| `POST /reload` | `{"forceSchema":false}` | Reads `rayfin.yml`, the entities and the secret values again and applies them now. Answers `{"schema":<schema event>,"config":<config-changed event or null>}`. |
+| `GET /status` | | The `ready` payload (without `v`, `type`, `time`) plus `"state":"running"`, `"schema"` (the last `schema` event), `"functions"` (the last `functions` event) and `"vite"` (the last `vite` event). `signInAs` is the identity as it is now. 503 `starting` before `ready`. |
+| `GET /identity` | | `{"kind":"developer","user":{…}}`, `{"kind":"user","user":{…}}` or `{"kind":"none","user":null}`. `user` is the [user](#users) the identity signs in as: for `developer`, the account it signed in as last in this run (`null` until first used); for `user`, `null` while that user doesn't exist. |
+| `PUT /identity` | `{"kind":"developer"}`, `{"kind":"user","user":"<username or id>","create":true}` or `{"kind":"none"}` | The new identity, as `GET /identity`. Revokes every local session. A missing user is 404 `user-not-found` unless `create` is `true` (default `false`), which creates it without a password. |
+| `GET /users` | | `{"users":[user, …]}`, oldest first. |
+| `POST /users` | `{"username":"ana@example.com","password":"…"}` (`password` optional: without one the user can only be signed in by rayfin-local: automatic sign-in and `POST /token`) | `user`, 201. 409 `user-exists` when the username exists (usernames are unique without regard to case). |
+| `DELETE /users/{username or id}` | | 204. Signs out the user's sessions. 404 `user-not-found`. |
+| `POST /token` | `{"user":"<username or id>","create":false}`, or `{"user":null}` (or no body) for the developer identity | `{"accessToken","tokenType":"Bearer","expiresIn","user":user}`: an access token for calls a host makes as that user (`create: true` creates a missing user, without a password). It has no refresh token; changing the identity or deleting the user ends it. |
+| `GET /entities` | | `{"entities":[{"name":"Note","rows":12}, …]}`, in the model's order; empty when `services.data` is off. |
+| `GET /entities/{name}/rows?offset=0&limit=50&orderBy=<field>&desc=false` | | `{"columns":[{"name","type","key":bool}],"rows":[{…}],"total":12}`. Every row, regardless of permissions; values formatted as the data API formats them. `columns` are the entity's fields with their GraphQL type (`UUID`, `String`, `Int`, `Decimal`, `Boolean` or `DateTime`); `key` marks the primary key. Rows are ordered by `orderBy`, then by the primary key. `limit` is 1 to 500 (default 50). 400 for other values or an unknown `orderBy`; 404 `entity-not-found`. |
+| `DELETE /entities/{name}/rows` | | `{"deleted":12}`. 409 `rows-referenced` when other entities' rows still refer to them; the message says which, and how many. |
+| `POST /data/reset` | | `{"ok":true}`. Deletes every entity's rows, the local users and their sessions, and the stored files, without a restart. The identity stays: a `user` identity's user is created again at its next automatic sign-in. |
+| `POST /reload` | `{"forceSchema":false}` | Reads `rayfin.yml`, the entities and the secret values again and applies them now. Answers `{"schema":<schema event>,"config":<config-changed event or null>}`, or 501 `not-available` when this rayfin-local can't reload on request. |
 
-A <a id="users"></a>**user** is `{"id","username","email","createdAt","signIn":["password","entra"],"developer":bool}`; `email` is `null` when the username isn't an email address.
+A <a id="users"></a>**user** is `{"id","username","email","createdAt","signIn":["password","entra"],"developer":bool}`:
+
+- `email` is `null` when the username isn't an email address.
+- `createdAt` is RFC 3339, UTC, with milliseconds.
+- `signIn` lists how the user signs in: `password`, `entra` (Microsoft Entra ID), or neither for users only rayfin-local signs in.
+- `developer` is `true` for your own accounts: `developer@example.com` and Entra users (locally, only you sign in with Entra).
 
 ## Calling the app's backend as a user
 

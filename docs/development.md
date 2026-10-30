@@ -66,8 +66,9 @@ They print a `skipped: …` note and pass when Node.js or the packages they need
 | `rl-model` `tests/analyze_js.rs` | `js/analyze.mjs` on the fixture app, against the golden analysis; in connectors mode on the `connectors` fixture app. | `npm install` in `tests/fixtures/apps/basic` and `tests/fixtures/apps/connectors` |
 | `rl-connectors` `tests/sql_sdk.rs` | The SDK's Category A connector client (`createConnectorsApi` with the entity classes, for a SQL database, a Warehouse and a SQL analytics endpoint) through rayfin-local on a real SQL Server. | `npm install` in `tests/fixtures/apps/connectors`, and [SQL Server](#sql-server-tests) |
 | `rl-functions` `tests/host.rs`, `tests/invoke.rs` | The function host and the invoke routes on `tests/fixtures/functions/basic`, which they install and build on first use; also the reference app's functions when present. | Node.js and npm |
-| `rl-frontend` `tests/vite.rs` | The Vite dev server and the static build, on copies of the reference app and small Vite apps. | The reference app |
+| `rl-frontend` `tests/vite.rs` | The Vite dev server and the static build, on copies of the reference app and small Vite apps; automatic sign-in answered before `rayfinLocalDev()`'s, on the fixture app and the apps in `RAYFIN_LOCAL_TEST_VITE_APPS`. | The reference app; `npm ci` in `tests/fixtures/apps/basic` |
 | `rayfin-local` `tests/host_contract.rs` | `serve --json` of the fixture app ([embedding.md](embedding.md)): its events from `starting` to `ready`, the app and the backend answering, and a clean stop when stdin closes. | `npm ci` in `tests/fixtures/apps/basic` |
+| `rayfin-local` `tests/control_api.rs` | The control API and automatic sign-in of the fixture app under `serve --json`: status, users, identities, the dev server's session token used on `/graphql`, rows and a data reset. | `npm ci` in `tests/fixtures/apps/basic` |
 
 These variables point the tests at what they need:
 
@@ -77,6 +78,7 @@ These variables point the tests at what they need:
 | `RAYFIN_LOCAL_EXPLORER` | `../fabric-apps/apps/explorer`: the reference app, for `rl-frontend`. |
 | `RAYFIN_LOCAL_EXPLORER_FUNCTIONS` | `../fabric-apps/apps/explorer/rayfin/functions`: the reference app's functions, for `rl-functions`. |
 | `RAYFIN_APPS_DIR` | `../fabric-apps/apps`: every app's `rayfin.yml`, for `rl-project`'s ignored test. |
+| `RAYFIN_LOCAL_TEST_VITE_APPS` | None: more apps with their packages installed (a list of folders, separated as in `PATH`), for `rl-frontend`'s automatic sign-in test, such as an app on another Vite version. |
 | `RAYFIN_LOCAL_NODE` | `node` on `PATH`. |
 
 The defaults are relative to this repository's folder: they expect `fabric-apps` checked out beside it.

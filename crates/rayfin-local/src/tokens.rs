@@ -38,6 +38,19 @@ impl TokenSource for ReportingTokens {
             result
         })
     }
+
+    fn token_silently<'a>(
+        &'a self,
+        scope: &'a str,
+    ) -> BoxFuture<'a, Result<AccessToken, TokenError>> {
+        Box::pin(async move {
+            let result = self.broker.token_silently(scope).await;
+            if let Err(err) = &result {
+                report(self.audience(scope), scope, err);
+            }
+            result
+        })
+    }
 }
 
 /// An `azure-sign-in` warning, the first time an audience (or another scope) fails in this run.

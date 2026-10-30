@@ -353,6 +353,62 @@ async fn cors_allows_loopback_and_redirect_uri_origins_only() {
 }
 
 #[tokio::test]
+async fn routes_for_programs_are_never_allowed_to_browsers() {
+    let mut routes = features();
+    routes.push(
+        Router::new()
+            .route("/.rayfin-local/control/status", get(|| async { "status" }))
+            .route(
+                "/.rayfin-local/dev/session-token",
+                get(|| async { "token" }),
+            ),
+    );
+    let router = build_router(config(), routes);
+    for path in [
+        "/.rayfin-local/control/status",
+        "/.rayfin-local/dev/session-token",
+    ] {
+        let preflight = send(
+            &router,
+            Method::OPTIONS,
+            path,
+            &[
+                ("Origin", "http://localhost:5175"),
+                ("Access-Control-Request-Method", "GET"),
+                ("Access-Control-Request-Headers", "authorization"),
+            ],
+        )
+        .await;
+        assert_eq!(
+            preflight.header("access-control-allow-origin"),
+            None,
+            "{path}"
+        );
+        let reply = send(
+            &router,
+            Method::GET,
+            path,
+            &[("Origin", "http://localhost:5175")],
+        )
+        .await;
+        assert_eq!(reply.header("access-control-allow-origin"), None, "{path}");
+        // Without a publishable key: programs call them.
+        assert_eq!(reply.status, StatusCode::OK, "{path}");
+    }
+    let portal = send(
+        &router,
+        Method::GET,
+        "/.rayfin-local/portal/secureItemEmbed",
+        &[("Origin", "http://localhost:5175")],
+    )
+    .await;
+    assert_eq!(
+        portal.header("access-control-allow-origin"),
+        Some("http://localhost:5175")
+    );
+}
+
+#[tokio::test]
 async fn cors_allows_other_ports_of_the_allowed_host_a_request_is_addressed_to() {
     let router = build_router(
         ServerConfig {

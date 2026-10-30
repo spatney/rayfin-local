@@ -49,6 +49,15 @@ pub trait TokenSource: Send + Sync + 'static {
     /// A token for `scope` (for example `https://analysis.windows.net/powerbi/api/.default`) that
     /// stays valid for at least a few more minutes. Implementations cache.
     fn token<'a>(&'a self, scope: &'a str) -> BoxFuture<'a, Result<AccessToken, TokenError>>;
+
+    /// Like [`TokenSource::token`], but never asks the developer to sign in (no browser window,
+    /// no device code): it fails instead. Sources that never ask keep this default.
+    fn token_silently<'a>(
+        &'a self,
+        scope: &'a str,
+    ) -> BoxFuture<'a, Result<AccessToken, TokenError>> {
+        self.token(scope)
+    }
 }
 
 /// The resources rayfin-local mints tokens for: the `AudienceType` members functions declare on

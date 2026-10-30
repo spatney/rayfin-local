@@ -234,6 +234,11 @@ fn serve_json_starts_the_app_and_stops_when_stdin_closes() {
     let (status, body) = get(&format!("{api_url}/.rayfin-local/health"));
     assert_eq!(status, 200, "{body}");
     assert!(body.contains(r#"{"ok":true}"#), "{body}");
+    let (status, _) = get(&format!("{api_url}/.rayfin-local/control/status"));
+    assert_eq!(
+        status, 404,
+        "no control API without RAYFIN_LOCAL_CONTROL_TOKEN"
+    );
     let app_url = ready["appUrl"].as_str().unwrap();
     assert_eq!(get(app_url).0, 200);
 

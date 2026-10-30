@@ -76,6 +76,7 @@ Clicks each scenario button of the fixture app (see its README) and checks the r
 | `connector-query` | `salesmodel.executeQuery` returns the mock's answer (`support/mock-powerbi.ts`), and every request the mock got was for the connector's dataset, with the query and `RAYFIN_LOCAL_TOKEN_POWERBI` as its bearer token. |
 | `storage-roundtrip` | Upload with fields, list, download, delete. |
 | `sign-out` | The session ends. |
+| `auto-sign-in` | The app signs itself in as Rayfin's templates do (`fetchRayfinLocalSessionToken()`, then `signInWithBrokeredToken`): the dev server answers for the developer (`developer@example.com`, since the suite's Power BI token is fake), no popup opens, and the session works for data. |
 
 The mock Power BI answers `executeDaxQueries` with the Arrow stream rl-connectors recorded for
 `EVALUATE ROW("x", 1)` (`crates/rl-connectors/tests/fixtures/row.arrows`) and `executeQueries`

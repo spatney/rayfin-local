@@ -3,6 +3,7 @@
 mod analysis;
 mod commands;
 mod connectors;
+mod control;
 mod errors;
 mod events;
 mod integrations;
@@ -18,6 +19,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use rl_project::SignInAs;
 use rl_tokens::TokenMode;
 use tracing::{Event, Level, Subscriber};
 use tracing_subscriber::EnvFilter;
@@ -126,6 +128,11 @@ struct ServeArgs {
     /// Start the function host with the Node inspector (default port 9229).
     #[arg(long, value_name = "PORT", num_args = 0..=1, default_missing_value = "9229")]
     inspect: Option<u16>,
+    /// Who apps that sign in automatically (`rayfinLocalDev({ autoLogin: true })`) are signed in
+    /// as: developer (you), none, or `user:<USERNAME>`, created when missing (default:
+    /// `[auth] sign_in_as` in rayfin-local.toml, else developer).
+    #[arg(long, value_name = "WHO")]
+    sign_in_as: Option<SignInAs>,
     /// Open the app in the browser once it is ready (not with --json).
     #[arg(long)]
     open: bool,
@@ -166,6 +173,7 @@ impl ServeArgs {
             force_schema: self.force_schema,
             reset: self.reset,
             inspect: self.inspect,
+            sign_in_as: self.sign_in_as,
             open: self.open,
             verbose,
         }
@@ -190,6 +198,7 @@ const OWN_CRATES: [&str; 13] = [
 ];
 
 fn main() -> ExitCode {
+    commands::serve::take_control_token();
     let cli = Cli::parse();
     if let Command::Version { json } = cli.command {
         return commands::version::run(json);

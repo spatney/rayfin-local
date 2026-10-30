@@ -6,6 +6,8 @@
 //! - stdout `@@rayfin-local:vite-ready {"urls", "version", "rayfinPlugin", ...}` once Vite
 //!   listens, or `@@rayfin-local:vite-error {"code", "message", "stack"}` before it exits 1. These
 //!   lines are not passed on to the sink.
+//! - `RAYFIN_LOCAL_SIGN_IN_SECRET` in the environment ([`DevServerConfig::sign_in_secret`]) turns
+//!   on the `rayfin-local:sign-in` plugin, which answers `GET /.rayfin/dev/session-token`.
 //! - Ctrl+Break (Windows) or SIGTERM (Unix), as [`ManagedChild::kill`] sends them, close the server.
 
 use std::collections::VecDeque;
@@ -27,6 +29,9 @@ use crate::FrontendError;
 const HELPER: Helper = Helper::new("vite-dev", include_str!("../../../js/vite-dev.mjs"));
 const LABEL: &str = "vite";
 const MARKER: &str = "@@rayfin-local:";
+/// The variable that hands the helper [`DevServerConfig::sign_in_secret`]; it removes it from its
+/// environment before Vite loads the app's config.
+const SIGN_IN_SECRET_VAR: &str = "RAYFIN_LOCAL_SIGN_IN_SECRET";
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long Vite gets to close before its process tree is killed.
 const STOP_GRACE: Duration = Duration::from_secs(3);
@@ -51,6 +56,11 @@ pub struct DevServerConfig {
     pub backend_origin: String,
     /// The Rayfin env from [`crate::frontend_env`].
     pub env: Vec<(String, String)>,
+    /// The run's secret for the backend's automatic sign-in (`GET
+    /// /.rayfin-local/dev/session-token`, `rl_auth::DEV_SESSION_TOKEN_PATH`). With it, the dev
+    /// server answers the app's `GET /.rayfin/dev/session-token` itself, ahead of
+    /// `rayfinLocalDev()`, with a session from the backend.
+    pub sign_in_secret: Option<String>,
     /// Receives Vite's output, labeled `vite`.
     pub sink: LineSink,
 }
@@ -68,6 +78,7 @@ impl fmt::Debug for DevServerConfig {
                 "env",
                 &self.env.iter().map(|(name, _)| name).collect::<Vec<_>>(),
             )
+            .field("has_sign_in_secret", &self.sign_in_secret.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -175,6 +186,9 @@ impl DevServer {
         }
         for (name, value) in &config.env {
             spec = spec.env(name, value);
+        }
+        if let Some(secret) = &config.sign_in_secret {
+            spec = spec.env(SIGN_IN_SECRET_VAR, secret);
         }
         if config.port != 0 {
             // As `rayfin dev` does; template configs pin `server.port` to `VITE_PORT`.

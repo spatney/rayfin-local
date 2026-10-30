@@ -23,6 +23,7 @@
 //!
 //! [auth]
 //! auto_create_users = true  # a password sign-in to an unknown email creates the account
+//! sign_in_as = "developer"  # automatic sign-in: "developer", "none" or "user:<username>"
 //!
 //! [fabric]
 //! anonymous_data_access = false  # act like a tenant without anonymous data access
@@ -31,7 +32,9 @@
 //! Every setting is optional. Unknown keys are errors, since the file is rayfin-local's own.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::Path;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -73,6 +76,84 @@ pub struct LocalFabricConfig {
 pub struct LocalAuthConfig {
     /// Create the account on a password sign-in to an unknown email (default on).
     pub auto_create_users: Option<bool>,
+    /// Who the app signs in as automatically (default `developer`); `--sign-in-as` wins.
+    pub sign_in_as: Option<SignInAs>,
+}
+
+/// Who `serve` signs the app in as automatically, written `developer`, `none` or
+/// `user:<username>` (`--sign-in-as`, `[auth] sign_in_as`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub enum SignInAs {
+    /// The developer: their Entra identity when it is available without a prompt, else a local
+    /// developer account.
+    #[default]
+    Developer,
+    /// A local user, by username (created when missing).
+    User(String),
+    /// Nobody: the app signs in itself.
+    None,
+}
+
+/// The longest username local accounts accept.
+const MAX_USERNAME_CHARS: usize = 256;
+
+impl FromStr for SignInAs {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("developer") {
+            return Ok(Self::Developer);
+        }
+        if value.eq_ignore_ascii_case("none") {
+            return Ok(Self::None);
+        }
+        let Some(username) = value
+            .split_once(':')
+            .filter(|(kind, _)| kind.trim().eq_ignore_ascii_case("user"))
+            .map(|(_, username)| username.trim())
+        else {
+            return Err(format!(
+                "`{value}` is not a sign-in identity: use `developer`, `none` or \
+                 `user:<username>`"
+            ));
+        };
+        if username.is_empty() {
+            return Err("`user:` needs a username, such as `user:ana@example.com`".to_owned());
+        }
+        if username.chars().count() > MAX_USERNAME_CHARS || username.chars().any(char::is_control) {
+            return Err(format!(
+                "the username in `{value}` must be at most {MAX_USERNAME_CHARS} characters, \
+                 without control characters"
+            ));
+        }
+        Ok(Self::User(username.to_owned()))
+    }
+}
+
+impl fmt::Display for SignInAs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Developer => f.write_str("developer"),
+            Self::User(username) => write!(f, "user:{username}"),
+            Self::None => f.write_str("none"),
+        }
+    }
+}
+
+impl TryFrom<String> for SignInAs {
+    type Error = String;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        value.parse()
+    }
+}
+
+impl From<SignInAs> for String {
+    fn from(value: SignInAs) -> Self {
+        value.to_string()
+    }
 }
 
 /// `[server]`: the backend.
@@ -214,6 +295,7 @@ mod tests {
              source = \"az\"\ntenant = \"t\"\n[tokens.scopes]\nAzureAI = \"s/.default\"\n\
              [connectors]\npowerbi_base_url = \"http://127.0.0.1:9000\"\n[functions]\n\
              inspect_port = 9230\n[auth]\nauto_create_users = false\n\
+             sign_in_as = \"user:ana@example.com\"\n\
              [fabric]\nanonymous_data_access = false\n",
         )
         .unwrap();
@@ -228,8 +310,38 @@ mod tests {
         );
         assert_eq!(config.functions.inspect_port, Some(9230));
         assert_eq!(config.auth.auto_create_users, Some(false));
+        assert_eq!(
+            config.auth.sign_in_as,
+            Some(SignInAs::User("ana@example.com".into()))
+        );
         assert_eq!(config.fabric.anonymous_data_access, Some(false));
         assert_eq!(parse("").unwrap(), LocalConfig::default());
+    }
+
+    #[test]
+    fn sign_in_identities_parse_and_print_the_same() {
+        for (text, identity) in [
+            ("developer", SignInAs::Developer),
+            (" NONE ", SignInAs::None),
+            (
+                "user:ana@example.com",
+                SignInAs::User("ana@example.com".into()),
+            ),
+            ("User: Ana Lee ", SignInAs::User("Ana Lee".into())),
+        ] {
+            assert_eq!(text.parse::<SignInAs>(), Ok(identity.clone()), "{text}");
+            assert_eq!(identity.to_string().parse::<SignInAs>(), Ok(identity));
+        }
+        for text in ["", "me", "user:", "user:  ", "users:ana", "user:a\u{7}b"] {
+            assert!(text.parse::<SignInAs>().is_err(), "{text}");
+        }
+        let err = parse("[auth]\nsign_in_as = \"admin\"\n").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("(line 2, column 14)"), "{message}");
+        assert!(
+            message.contains("`developer`, `none` or `user:<username>`"),
+            "{message}"
+        );
     }
 
     #[test]

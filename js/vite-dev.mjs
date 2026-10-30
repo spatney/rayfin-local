@@ -1,10 +1,13 @@
 // rayfin-local's Vite runner: starts the app's own Vite dev server (the project's `vite` package,
-// its vite.config and plugins) with one extra plugin, `rayfin-local:shim`.
+// its vite.config and plugins) with extra plugins: `rayfin-local:shim` and, with a sign-in secret,
+// `rayfin-local:sign-in`.
 //
 // Protocol (owner: crates/rl-frontend/src/dev.rs):
 //   node vite-dev.mjs --root <frontend dir> --host <host> --port <port> --backend <origin>
 //     cwd: the frontend dir. The Rayfin env (RAYFIN_PUBLIC_*, VITE_*) comes in the process env,
 //     which wins over the app's .env files in Vite's loadEnv and in rayfinLocalDev().
+//     RAYFIN_LOCAL_SIGN_IN_SECRET: the backend's automatic sign-in secret; removed from the env
+//     before Vite loads the app's config.
 //   stdout `@@rayfin-local:vite-ready {"urls", "local", "network", "version", "rayfinPlugin"}`
 //     once the server listens; Vite's own URL banner follows.
 //   stdout `@@rayfin-local:vite-error {"code", "message", "stack"}` when the server can't start;
@@ -16,6 +19,12 @@
 // `rayfinLocalDev()` from @microsoft/rayfin-local-dev, the shim also does what that plugin does for
 // a local backend: it serves /rayfin.config.json (apiUrl = this dev server's origin) and proxies
 // /api, /graphql, /connector-invoke, /connectors and /functions to the backend.
+//
+// The sign-in plugin answers GET /.rayfin/dev/session-token, which pages of apps with
+// `rayfinLocalDev({ autoLogin: true })` ask for a session (`fetchRayfinLocalSessionToken()`), before
+// rayfinLocalDev()'s own middleware, which would sign in with Entra through the Rayfin CLI. It
+// answers with the backend's GET /.rayfin-local/dev/session-token: a session for rayfin-local's
+// sign-in identity, or `{error, hint}`.
 
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -35,9 +44,19 @@ const CONFIG_FIELDS = [
   ['tenantId', 'VITE_FABRIC_TENANT_ID'],
 ];
 const BACKEND_UNAVAILABLE = JSON.stringify({ error: 'The local Rayfin backend is unavailable.' });
+const SESSION_TOKEN_PATH = '/.rayfin/dev/session-token';
+const BACKEND_SESSION_TOKEN_PATH = '/.rayfin-local/dev/session-token';
+const SIGN_IN_SECRET_VAR = 'RAYFIN_LOCAL_SIGN_IN_SECRET';
+const SIGN_IN_SECRET_HEADER = 'x-rayfin-local-sign-in';
+// Signing in as the developer may run the Azure CLI first.
+const SIGN_IN_TIMEOUT_MS = 120_000;
 // Announcements are single stdout lines, which the reader splits beyond 64 KiB.
 const ANNOUNCED_TEXT_MAX = 8 * 1024;
 const STOP_DEADLINE_MS = 2500;
+
+// Taken before the app's config and plugins load, so none of them sees it.
+const signInSecret = process.env[SIGN_IN_SECRET_VAR] || undefined;
+delete process.env[SIGN_IN_SECRET_VAR];
 
 let server;
 let stopping = false;
@@ -202,6 +221,88 @@ function rayfinLocalShim({ backend }, state) {
   };
 }
 
+function rayfinLocalSignIn({ backend }, secret) {
+  return {
+    name: 'rayfin-local:sign-in',
+    apply: 'serve',
+    // `configureServer` hooks run in plugin order, which puts `pre` plugins before the app's, so
+    // this middleware comes before rayfinLocalDev()'s. Vite's host check (DNS rebinding) and CORS
+    // run before any plugin's middleware.
+    enforce: 'pre',
+    configureServer: {
+      order: 'pre',
+      handler(devServer) {
+        devServer.middlewares.use(SESSION_TOKEN_PATH, (request, response) => {
+          answerSessionToken(request, response, backend, secret).catch(() => {
+            if (!response.writableEnded) response.destroy();
+          });
+        });
+      },
+    },
+  };
+}
+
+/** A session from the backend, for the page of this dev server that asks; or why not. */
+async function answerSessionToken(request, response, backend, secret) {
+  const reply = (status, body) => {
+    response.statusCode = status;
+    response.setHeader('content-type', 'application/json');
+    response.setHeader('cache-control', 'no-store');
+    response.end(typeof body === 'string' ? body : JSON.stringify(body));
+  };
+  if (request.method !== 'GET') {
+    response.setHeader('allow', 'GET');
+    reply(405, { error: 'Method not allowed.' });
+    return;
+  }
+  if (!isLoopbackAddress(request.socket.remoteAddress)) {
+    reply(403, { error: 'Local sign-in is only available from the Vite host.' });
+    return;
+  }
+  if (!isSameOrigin(request)) {
+    reply(403, { error: 'Cross-origin local sign-in requests are not allowed.' });
+    return;
+  }
+  let answer;
+  let body;
+  try {
+    answer = await fetch(`${backend}${BACKEND_SESSION_TOKEN_PATH}`, {
+      headers: { accept: 'application/json', [SIGN_IN_SECRET_HEADER]: secret },
+      redirect: 'error',
+      signal: AbortSignal.timeout(SIGN_IN_TIMEOUT_MS),
+    });
+    body = await answer.text();
+  } catch {
+    reply(502, {
+      error: 'The local Rayfin backend is unavailable.',
+      hint: 'Check that rayfin-local is still running, then reload.',
+    });
+    return;
+  }
+  reply(answer.status, body || { error: 'The local Rayfin backend sent an empty answer.' });
+}
+
+function isLoopbackAddress(address) {
+  return (
+    typeof address === 'string' &&
+    (address === '::1' || /^127(?:\.\d{1,3}){3}$/.test(address) || /^::ffff:127(?:\.\d{1,3}){3}$/i.test(address))
+  );
+}
+
+/** No `Origin` (a same-origin `GET`), or this dev server's own. */
+function isSameOrigin(request) {
+  const origin = request.headers.origin;
+  if (!origin) return true;
+  const host = request.headers.host;
+  if (!host) return false;
+  try {
+    const protocol = request.socket.encrypted ? 'https:' : 'http:';
+    return new URL(origin).origin === `${protocol}//${host}`;
+  } catch {
+    return false;
+  }
+}
+
 async function stop() {
   if (stopping) return;
   stopping = true;
@@ -230,7 +331,10 @@ async function main() {
       // rayfin-local opens the browser itself (`--open`); a browser Vite started would also be
       // stopped together with Vite's process tree.
       server: { host: options.host, port: options.port, strictPort: true, open: false },
-      plugins: [rayfinLocalShim(options, state)],
+      plugins: [
+        rayfinLocalShim(options, state),
+        ...(signInSecret ? [rayfinLocalSignIn(options, signInSecret)] : []),
+      ],
     });
     await server.listen();
   } catch (error) {
