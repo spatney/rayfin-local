@@ -142,6 +142,12 @@ The answer is cached in `.rayfin-local/cache/connectors/<name>.json` for that ty
 - Tokens come from the token broker: the Azure CLI, the Rayfin CLI login, or `RAYFIN_LOCAL_TOKEN_SQL` and `RAYFIN_LOCAL_TOKEN_FABRIC`.
 - The connection is TDS 7.4 through `tiberius` 0.12, encrypted with rustls on ring, with the server certificate checked against the platform's roots; a redirect to another gateway is followed once.
   (`tiberius` 0.13's rustls feature takes `tokio-rustls` 0.26 with its default `aws-lc-rs` provider, which this project never builds.)
+- `tiberius` is vendored in `vendor/tiberius` (`[patch.crates-io]`) with two fixes for Fabric, each marked `rayfin-local patch`, which SqlClient and tedious (the Rayfin CLI's driver) already do:
+  - The PRELOGIN sends a `TRACEID` (a connection id and an activity id).
+    Without one, Fabric refuses the login with "Couldn't complete the operation due to a system update".
+    Fabric SQL databases answer it with an empty `TRACEID`, which the driver accepts.
+  - Fabric redirects logins to `<host>\<instance>`.
+    The new connection and its TLS certificate check use the host, and LOGIN7 keeps the instance; without it, Fabric drops the connection.
 - Each connector has a pool of up to 4 connections; idle ones close after 5 minutes and every one after 45.
   Logins time out after 40 seconds and statements after 120.
 
@@ -187,12 +193,14 @@ Keep `serve` on loopback (the default): anyone who can reach the backend acts on
 | `crates/rl-model/src/convert.rs`, `connector.rs` | The connector model and `metadata.json`. |
 | `crates/rl-graphql/src/tsql/` | The T-SQL executor, emitter and mutations, and the `SqlBackend` trait. |
 | `crates/rl-connectors/src/sql/` | The route, operations, location (`location.rs`) and the TDS pool (`tds.rs`). |
+| `vendor/tiberius` | The TDS driver, patched for Fabric (see [Signing in](#signing-in)). |
 | `crates/rayfin-local/src/connectors.rs` | The analysis at startup and after changes, its cache and warnings. |
 
 - `crates/rl-model/tests/connector_model.rs` and `analyze_js.rs`: the model of the `inventory` connector of `tests/fixtures/apps/connectors`, and the helper against its golden analysis.
 - `crates/rl-graphql/tests/tsql.rs`: the schema of that connector per type, and the statements its documents become, on a fake database.
 - `crates/rl-connectors/tests/sql_server.rs`: the routes against a real SQL Server (queries, roles and policies, composite and keyless keys, mutations per type, failures).
 - `crates/rl-connectors/tests/sql_sdk.rs`: the real SDK 1.36.2 client with the fixture's entity classes against the same.
-- `crates/rl-connectors/tests/real_fabric_sql.rs` (ignored): a read-only query of a real Fabric SQL database as you.
+- `crates/rl-connectors/tests/real_fabric_sql.rs` (ignored): a read-only query of a real Fabric SQL database, Warehouse or SQL analytics endpoint as you.
+- `crates/rl-connectors/src/sql/tds.rs`'s unit tests: the driver patches are in place (the PRELOGIN's `TRACEID`, an empty `TRACEID` in the server's answer, the routed host).
 
 [development.md](development.md#sql-server-tests) has the commands.

@@ -29,6 +29,7 @@ Each service has a local stand-in:
 | `crates/rl-frontend` | The project's Vite dev server or static build, with the local Rayfin env. |
 | `crates/rl-server` | Router composition: `/rayfin.config.json`, CORS, publishable-key and Host checks, static hosting. |
 | `js/` | JS helpers embedded in the binary (see `js/README.md`). |
+| `vendor/tiberius` | The TDS driver (tiberius 0.12.3) with Fabric fixes, used through `[patch.crates-io]`; changes are marked `rayfin-local patch` (see `docs/sql-connectors.md`). |
 | `tests/` | Fixture projects, SDK conformance suite (Node + real `@microsoft/rayfin-*` 1.36.2), e2e. |
 
 ## Commands

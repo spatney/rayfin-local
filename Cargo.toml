@@ -5,6 +5,13 @@
 resolver = "3"
 members = ["crates/*"]
 
+[patch.crates-io]
+# tiberius 0.12.3 with the two fixes Fabric's SQL endpoints need, each marked "rayfin-local patch": a
+# PRELOGIN TRACEID (Fabric refuses logins without one; SQL databases answer with an empty one), and
+# redirects to `host\instance` that connect to the host but keep the instance in LOGIN7.
+# docs/sql-connectors.md has the details.
+tiberius = { path = "vendor/tiberius" }
+
 [workspace.package]
 version = "0.2.0"
 edition = "2024"
@@ -52,7 +59,8 @@ tower-http = { version = "0.6.11", features = ["cors", "fs", "trace", "set-heade
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider", "json", "stream", "http2"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 # TDS for Category A SQL connectors. 0.12 because 0.13's `rustls` feature takes tokio-rustls 0.26 with its
-# default features, which pull in aws-lc-rs; 0.12's rustls 0.21 runs on ring alone.
+# default features, which pull in aws-lc-rs; 0.12's rustls 0.21 runs on ring alone. Patched: see
+# [patch.crates-io].
 tiberius = { version = "0.12.3", default-features = false, features = ["tds73", "rustls"] }
 # Crypto: ring for ES256 signing, RS256 verification, SHA-256, HMAC and randomness; argon2 for passwords.
 ring = "0.17.14"

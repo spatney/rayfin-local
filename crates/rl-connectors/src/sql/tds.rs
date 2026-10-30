@@ -6,6 +6,10 @@
 //! redirected to another gateway (`Routing`) is followed once. Connections are encrypted and
 //! the server certificate is checked against the platform's roots.
 //!
+//! `tiberius` is vendored with two fixes Fabric needs (`vendor/tiberius`, marked "rayfin-local
+//! patch"): its PRELOGIN sends a `TRACEID`, and a redirect to `host\instance` connects to the
+//! host while LOGIN7 keeps the instance.
+//!
 //! A connection that fails mid-statement or times out is dropped, never reused; a pooled one that
 //! the server closed while idle is replaced once, for reads. Writes run in a transaction that a
 //! dropped [`SqlTransaction`] rolls back by closing its connection.
@@ -157,14 +161,16 @@ impl Pool {
             Auth::Password { user, password } => AuthMethod::sql_server(user, password),
         });
         match self.login(config.clone()).await {
+            // Fabric redirects to `host\instance`, and drops a login that leaves out the instance.
             Err(tiberius::error::Error::Routing { host, port }) => {
-                config.host(host);
+                config.host(&host);
                 config.port(port);
-                self.login(config).await
+                self.login(config)
+                    .await
+                    .map_err(|error| self.login_error(error, &host, port))
             }
-            other => other,
+            other => other.map_err(|error| self.login_error(error, &endpoint.host, endpoint.port)),
         }
-        .map_err(|error| self.login_error(error))
     }
 
     async fn login(&self, config: Config) -> Result<TdsClient, tiberius::error::Error> {
@@ -184,9 +190,8 @@ impl Pool {
     }
 
     /// What a failed connection means and what to do about it.
-    fn login_error(&self, error: tiberius::error::Error) -> SqlError {
+    fn login_error(&self, error: tiberius::error::Error, host: &str, port: u16) -> SqlError {
         let Context { connector, item } = &self.context;
-        let host = &self.endpoint.host;
         let message = match &error {
             tiberius::error::Error::Server(token) => match token.code() {
                 18456 | 4060 | 916 => format!(
@@ -214,10 +219,9 @@ impl Pool {
                 ),
             },
             tiberius::error::Error::Io { kind, message } => format!(
-                "Couldn't connect to the database of connector '{connector}' at {host},{} ({kind:?}: \
-                 {message}). Check your network connection, VPN and firewall (TCP port {} must be \
-                 open), then try again.",
-                self.endpoint.port, self.endpoint.port
+                "Couldn't connect to the database of connector '{connector}' at {host},{port} \
+                 ({kind:?}: {message}). Check your network connection, VPN and firewall (TCP \
+                 port {port} must be open), then try again."
             ),
             tiberius::error::Error::Tls(message) => format!(
                 "The secure connection to the database of connector '{connector}' ({host}) failed: \
@@ -598,6 +602,94 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routing_uses_the_dns_host_without_the_sql_instance() {
+        let mut config = Config::new();
+        config.host("capacity.pbidedicated.windows.net\\warehouse-dw");
+        config.port(1444);
+        assert_eq!(config.get_addr(), "capacity.pbidedicated.windows.net:1444");
+        config.host("gateway.database.windows.net");
+        assert_eq!(config.get_addr(), "gateway.database.windows.net:1444");
+    }
+
+    #[tokio::test]
+    async fn prelogin_sends_a_trace_id() {
+        use tokio::io::AsyncReadExt as _;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = Config::new();
+        config.host("127.0.0.1");
+        config.port(listener.local_addr().unwrap().port());
+        config.encryption(EncryptionLevel::NotSupported);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut header = [0u8; 8];
+            socket.read_exact(&mut header).await.unwrap();
+            let mut body = vec![0u8; usize::from(u16::from_be_bytes([header[2], header[3]])) - 8];
+            socket.read_exact(&mut body).await.unwrap();
+            body
+        });
+        let tcp = TcpStream::connect(config.get_addr()).await.unwrap();
+        // The server hangs up after the PRELOGIN, so the login itself fails.
+        let _ = Client::connect(config, tcp.compat_write()).await;
+        let prelogin = server.await.unwrap();
+        // Options are (token, offset, length) up to 0xFF; TRACEID is token 5, 36 bytes long.
+        let trace_id = prelogin
+            .chunks(5)
+            .take_while(|option| option[0] != 0xff)
+            .find(|option| option[0] == 0x05)
+            .map(|option| u16::from_be_bytes([option[3], option[4]]));
+        assert_eq!(trace_id, Some(36), "PRELOGIN: {prelogin:?}");
+    }
+
+    #[tokio::test]
+    async fn the_server_may_answer_the_trace_id_with_an_empty_one() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = Config::new();
+        config.host("127.0.0.1");
+        config.port(listener.local_addr().unwrap().port());
+        config.encryption(EncryptionLevel::NotSupported);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut header = [0u8; 8];
+            socket.read_exact(&mut header).await.unwrap();
+            let mut body = vec![0u8; usize::from(u16::from_be_bytes([header[2], header[3]])) - 8];
+            socket.read_exact(&mut body).await.unwrap();
+            // A Fabric SQL database's answer: THREADID and TRACEID empty, the TRACEID near the end.
+            let options: [(u8, &[u8]); 7] = [
+                (0, &[16, 0, 0x0f, 0xa0, 0, 0]),
+                (1, &[2]),
+                (2, &[0]),
+                (3, &[]),
+                (4, &[0]),
+                (5, &[]),
+                (6, &[0]),
+            ];
+            let mut payload = Vec::new();
+            let mut data = Vec::new();
+            for (token, value) in options {
+                let offset = options.len() * 5 + 1 + data.len();
+                payload.push(token);
+                payload.extend((offset as u16).to_be_bytes());
+                payload.extend((value.len() as u16).to_be_bytes());
+                data.extend_from_slice(value);
+            }
+            payload.push(0xff);
+            payload.extend(data);
+            let mut reply = vec![0x04, 0x01];
+            reply.extend(((payload.len() + 8) as u16).to_be_bytes());
+            reply.extend([0, 0, 1, 0]);
+            reply.extend(payload);
+            socket.write_all(&reply).await.unwrap();
+            // The type of the client's next packet: LOGIN7 when it read the answer.
+            socket.read_exact(&mut header).await.ok().map(|_| header[0])
+        });
+        let tcp = TcpStream::connect(config.get_addr()).await.unwrap();
+        // The server hangs up after the LOGIN7 arrives, so the login itself fails.
+        let _ = Client::connect(config, tcp.compat_write()).await;
+        assert_eq!(server.await.unwrap(), Some(0x10));
+    }
 
     #[test]
     fn dates_and_times_read_as_iso_text() {

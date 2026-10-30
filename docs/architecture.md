@@ -388,7 +388,7 @@ SQL connectors (`fabric-sqldatabase`, `fabric-warehouse`, `fabric-sqlanalytics`)
 
 - At startup, and again when they change, the binary analyzes `rayfin/connectors/<name>/` with the project's `@microsoft/rayfin-core` (`js/analyze.mjs` in connectors mode), completes each model with the connector's `metadata.json`, and limits its grants to the connector's `operations`.
 - `rl-graphql`'s front end (parsing, validation, planning, policies) runs on that schema, and its `tsql` module turns each root field into one T-SQL statement and runs it on a `SqlBackend`.
-- `rl-connectors` implements `SqlBackend` over TDS (`tiberius`, rustls on ring) with a small pool, after finding the item's server and database through the Fabric REST API; both calls use the developer's tokens.
+- `rl-connectors` implements `SqlBackend` over TDS (`tiberius`, rustls on ring, vendored with Fabric fixes in `vendor/tiberius`) with a small pool, after finding the item's server and database through the Fabric REST API; both calls use the developer's tokens.
 
 [sql-connectors.md](sql-connectors.md) is the design in full.
 Other connector types answer 501.
