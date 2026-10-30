@@ -41,18 +41,24 @@ fn fixture() -> Option<PathBuf> {
 struct Serve {
     child: Child,
     events: Receiver<Value>,
+    seen: Vec<Value>,
+    /// The Azure CLI's configuration folder: empty, so that there is no Azure sign-in.
+    _no_azure: tempfile::TempDir,
 }
 
 impl Serve {
     fn start(project: &Path) -> Self {
+        let no_azure = tempfile::tempdir().unwrap();
         let mut child = Command::new(env!("CARGO_BIN_EXE_rayfin-local"))
             .args(["serve", "--json", "--reset", "--no-functions"])
             .args(["--port", "0", "--frontend-port", "0", "-C"])
             .arg(project)
             .env("RAYFIN_LOCAL_CONTROL_TOKEN", TOKEN)
-            // Not a user's token: the developer identity signs in as the local developer account,
-            // whatever Azure sign-in this machine has.
-            .env("RAYFIN_LOCAL_TOKEN_POWERBI", "not-a-user-token")
+            // No Azure sign-in, whatever this machine has: the developer identity signs in as the
+            // local developer account.
+            .args(["--token-source", "az"])
+            .env("AZURE_CONFIG_DIR", no_azure.path())
+            .env_remove("RAYFIN_LOCAL_TOKEN_POWERBI")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -69,11 +75,16 @@ impl Serve {
                 }
             }
         });
-        Self { child, events }
+        Self {
+            child,
+            events,
+            seen: Vec::new(),
+            _no_azure: no_azure,
+        }
     }
 
     /// The next event of type `wanted`.
-    fn until(&self, wanted: &str) -> Value {
+    fn until(&mut self, wanted: &str) -> Value {
         loop {
             let event = self
                 .events
@@ -83,10 +94,19 @@ impl Serve {
                 event["type"], "stopped",
                 "stopped before `{wanted}`: {event}"
             );
+            self.seen.push(event.clone());
             if event["type"] == wanted {
                 return event;
             }
         }
+    }
+
+    /// The events emitted so far.
+    fn seen(&mut self) -> &[Value] {
+        while let Ok(event) = self.events.try_recv() {
+            self.seen.push(event);
+        }
+        &self.seen
     }
 
     fn stop(mut self) -> Option<i32> {
@@ -137,13 +157,33 @@ async fn answer(request: reqwest::RequestBuilder) -> (StatusCode, Value) {
     (status, serde_json::from_str(&text).unwrap_or(Value::Null))
 }
 
+/// The stamp of the backend's sessions that the dev server puts in the app's page.
+async fn page_stamp(client: &reqwest::Client, app_url: &str) -> String {
+    let page = client
+        .get(format!("{app_url}/"))
+        .header("accept", "text/html")
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    let before = "(window.localStorage,\"";
+    let start = page
+        .find(before)
+        .unwrap_or_else(|| panic!("no session stamp in the page:\n{page}"))
+        + before.len();
+    let end = start + page[start..].find('"').unwrap();
+    page[start..end].to_owned()
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_host_drives_the_app_and_signs_it_in_as_anyone() {
     let Some(project) = fixture() else {
         return;
     };
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let serve = Serve::start(&project);
+    let mut serve = Serve::start(&project);
     let ready = serve.until("ready");
     assert_eq!(ready["signInAs"], json!({ "kind": "developer" }));
     let api_url = ready["apiUrl"].as_str().unwrap().to_owned();
@@ -196,6 +236,23 @@ async fn a_host_drives_the_app_and_signs_it_in_as_anyone() {
     let (_, identity) = host.call(Method::GET, "/identity", None).await;
     assert_eq!(identity["user"]["username"], "developer@example.com");
     assert_eq!(identity["user"]["developer"], true);
+    // Without an Azure sign-in, the developer is the local account, which the log says; no
+    // `azure-sign-in` warning, which is for what can't work without Azure.
+    let seen = serve.seen();
+    assert!(
+        seen.iter().any(|event| event["type"] == "log"
+            && event["level"] == "info"
+            && event["line"]
+                .as_str()
+                .is_some_and(|line| line.starts_with("Signing in as the local developer account"))),
+        "{seen:?}"
+    );
+    assert!(
+        !seen.iter().any(|event| event["code"] == "azure-sign-in"),
+        "{seen:?}"
+    );
+    let stamp = page_stamp(&client, &app_url).await;
+    assert_eq!(page_stamp(&client, &app_url).await, stamp);
 
     let ana = json!({ "username": "ana@example.com", "password": "secret-1" });
     let (status, ana) = host.call(Method::POST, "/users", Some(ana)).await;
@@ -204,6 +261,9 @@ async fn a_host_drives_the_app_and_signs_it_in_as_anyone() {
     let (status, identity) = host.call(Method::PUT, "/identity", Some(as_ana)).await;
     assert_eq!(status, StatusCode::OK, "{identity}");
     assert_eq!(identity["user"]["id"], ana["id"]);
+    // Pages forget the sessions the switch signed out.
+    let switched = page_stamp(&client, &app_url).await;
+    assert_ne!(switched, stamp);
     let (status, signed_in) = answer(sign_in()).await;
     assert_eq!(status, StatusCode::OK, "{signed_in}");
     let access_token = signed_in["accessToken"].as_str().unwrap().to_owned();
@@ -276,8 +336,10 @@ async fn a_host_drives_the_app_and_signs_it_in_as_anyone() {
     assert_eq!(reload["schema"]["result"], "unchanged", "{reload}");
     assert_eq!(reload["config"], Value::Null, "{reload}");
 
+    let before_reset = page_stamp(&client, &app_url).await;
     let (status, reset) = host.call(Method::POST, "/data/reset", None).await;
     assert_eq!((status, reset), (StatusCode::OK, json!({ "ok": true })));
+    assert_ne!(page_stamp(&client, &app_url).await, before_reset);
     let (_, entities) = host.call(Method::GET, "/entities", None).await;
     assert!(
         entities["entities"]

@@ -40,7 +40,6 @@ use crate::integrations::{self, FunctionsSlot, SecretValues, ServeContext};
 use crate::ports::{self, DEFAULT_API_PORT, PortRequest};
 use crate::reload;
 use crate::shutdown::{self, StopHooks, StopListener, StopRequest};
-use crate::tokens;
 use crate::ui;
 
 /// The interface to listen on when neither `--host` nor `[server] host` is set.
@@ -435,9 +434,11 @@ fn is_wildcard(host: &str) -> bool {
         .is_ok_and(|ip| ip.is_unspecified())
 }
 
-/// The auth service. Signing in as the developer's Entra identity ("Continue as <you>" and the
-/// Entra exchange) is on only on loopback, with the developer's tokens from `broker`; automatic
-/// sign-in answers the holder of `sign_in_secret` (the app's dev server).
+/// The auth service. Signing in as the developer's Entra identity ("Continue as <you>", the
+/// Entra exchange and automatic sign-in) is on only on loopback, with the developer's tokens
+/// from `broker`. They are optional there: without one, automatic sign-in signs in as the local
+/// developer account and the sign-in page says why, so a missing token is no `azure-sign-in`
+/// warning. Automatic sign-in answers the holder of `sign_in_secret` (the app's dev server).
 async fn start_auth(
     project: &Project,
     state: &LocalState,
@@ -454,7 +455,7 @@ async fn start_auth(
     let auth = AuthService::new(db.clone(), state.keys_dir(), settings.clone())
         .await
         .context("Could not start the local auth service")?
-        .with_entra(tokens::reporting(Arc::clone(broker)))
+        .with_entra(broker.clone())
         .with_dev_sign_in_secret(sign_in_secret);
     Ok((Arc::new(auth), settings))
 }

@@ -1,9 +1,21 @@
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  cpSync,
+  createWriteStream,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { join, relative, sep } from 'node:path';
 
-import { LOG_DIR } from './paths.ts';
+import { FIXTURE_DIR, LOG_DIR } from './paths.ts';
 
 /** Runs a command with its output in `test-results/logs/<label>.log`; throws with the log's tail. */
 export async function run(command: string, args: string[], cwd: string, label: string): Promise<void> {
@@ -100,4 +112,44 @@ export function newUser(): { email: string; password: string } {
 /** A made-up token for a `RAYFIN_LOCAL_TOKEN_<AUDIENCE>` override. */
 export function fakeToken(audience: string): string {
   return `e2e-fake-${audience}-token-${randomBytes(8).toString('hex')}`;
+}
+
+/** What a copy of the fixture app leaves out: packages, state, build output, the run's toml. */
+const NOT_COPIED = new Set(['node_modules', '.rayfin-local', 'dist', 'rayfin-local.toml']);
+
+/**
+ * A copy of the fixture app in `dir`, another app to serve, with a `node_modules` that links each
+ * of the fixture's packages, so that Vite's caches go to the copy. Run it with `--no-functions`:
+ * the functions' packages aren't linked.
+ */
+export class FixtureCopy {
+  readonly dir: string;
+  readonly #links: string[] = [];
+
+  constructor(dir: string) {
+    this.dir = dir;
+    cpSync(FIXTURE_DIR, dir, {
+      recursive: true,
+      filter: (source) => !relative(FIXTURE_DIR, source).split(sep).some((part) => NOT_COPIED.has(part)),
+    });
+    const packages = join(FIXTURE_DIR, 'node_modules');
+    mkdirSync(join(dir, 'node_modules'));
+    for (const name of readdirSync(packages)) {
+      const target = join(packages, name);
+      if (name.startsWith('.vite') || !statSync(target).isDirectory()) continue;
+      const link = join(dir, 'node_modules', name);
+      symlinkSync(target, link, 'junction');
+      this.#links.push(link);
+    }
+  }
+
+  /** Deletes the copy, its links first, so that deleting it never reaches the fixture's packages. */
+  remove(): void {
+    for (const link of this.#links.splice(0)) unlinkSync(link);
+    try {
+      rmSync(this.dir, { recursive: true, force: true, maxRetries: 5 });
+    } catch {
+      // A file still in use: Playwright deletes test-results before the next run.
+    }
+  }
 }

@@ -210,7 +210,7 @@ A `fatal` error is followed by `stopped`; other errors leave `serve` running.
 | `secret-missing` | warning | A declared secret has no local value. `details`: `{"name"}`. |
 | `anonymous-role` | warning | Entities grant the `anonymous` role, which most Fabric tenants refuse. `details`: `{"entities"}`. |
 | `connector-unsupported` | warning | A connector's type runs only on Fabric. `details`: `{"name","type"}`. |
-| `azure-sign-in` | warning | No Azure token could be had (functions' `ctx.Tokens`, connectors and the developer identity need one); once per audience. `details`: `{"audience","scope"}` (`audience` is `null` for other scopes). |
+| `azure-sign-in` | warning | No Azure token could be had for what needs one: functions' `ctx.Tokens` and connectors; once per audience. `details`: `{"audience","scope"}` (`audience` is `null` for other scopes). The developer identity needs none: without one it signs in as the local developer account, which a `log` line says. |
 | `internal` | error | Anything else. |
 
 ### `stopped`
@@ -236,15 +236,26 @@ Under rayfin-local, the dev server answers that route itself, ahead of `rayfinLo
 | --- | --- | --- |
 | `developer` (default) | `developer` | You: your Entra identity from the Azure CLI or the Rayfin CLI's cached sign-in when a token for it comes without a prompt and the backend listens on loopback, else a local account, `developer@example.com`. |
 | `user` | `user:<username>` | That local user (created without a password when missing). |
-| `none` | `none` | Nobody: the route answers 401 `{"error":"Automatic sign-in is off.","hint":"…"}`. |
+| `none` | `none` | Nobody: the route answers 401 `{"error":"Automatic sign-in is off.","hint":"Use the app's sign-in to sign in."}`. |
 
 `[auth] sign_in_as` in `rayfin-local.toml` sets the identity too (`"developer"`, `"none"` or `"user:<username>"`); `--sign-in-as` wins.
 Changing it while `serve` runs switches the identity (a `config-changed` event with `auth` in `what`), unless `--sign-in-as` was given; other live changes keep the identity.
 When `developer` finds no Entra identity, it asks again after five minutes, or at once when the identity is set again (`PUT /identity`), for example once the developer signed in to Azure.
+It then signs in as the local account without a warning: an info `log` line says "Signing in as the local developer account; sign in with `az login` to preview as yourself", once until the Entra identity is found.
 The answer is a session like any other, in the shape `fetchRayfinLocalSessionToken()` expects: `{"accessToken","tokenType","expiresIn","refreshToken","scope"}`.
 Failures are `{"error","hint"}`, which the page shows: 403 for requests from other machines or other origins, 404 when the app's auth is off (`services.auth.enabled: false`), 500 when signing in failed.
 Changing the identity (through the control API, or `[auth] sign_in_as` while `serve` runs) revokes every local session, so an app that reloads signs in again as the new identity.
 The dev server gets the session from the backend's `GET /.rayfin-local/dev/session-token`, which answers only rayfin-local's own dev server: loopback requests that carry a secret of the run, which no page and none of the app's code sees.
+
+### Stale sessions
+
+The SDK keeps the app's session in the page's `localStorage` (`authStorage: true`), per origin, and trusts it until it expires.
+But the dev server's port can serve another app later, and a data reset (`POST /data/reset`, `--reset`) or a new identity signs every local session out, so a stored session can be one the backend no longer accepts.
+Before the app's code runs, every page the dev server serves compares the stamp of the backend's sessions, `<appId>:<sessionEpoch>`, with the one stored for its origin (`rayfin-local:session-stamp` in `localStorage`); when they differ, it removes the SDK's stored session (`authSession` and `rayfin_pkce_*`) and keeps the rest of `localStorage`.
+The epoch changes whenever every session is signed out, and with a new database.
+After `POST /data/reset` or `PUT /identity`, reloading the page is enough: hosts need not clear its storage, and the app signs in again rather than get 401s.
+The dev server gets the stamp from the backend's `GET /.rayfin-local/dev/session-stamp`, which answers only it, as the session route does.
+`--static` serves the app's build without this.
 
 ## Control API
 
@@ -263,7 +274,7 @@ With `RAYFIN_LOCAL_CONTROL_TOKEN` set, the backend serves `{apiUrl}/.rayfin-loca
 | --- | --- | --- |
 | `GET /status` | | The `ready` payload (without `v`, `type`, `time`) plus `"state":"running"`, `"analysis"` (the last `analysis` event), `"schema"` (the last `schema` event), `"functions"` (the last `functions` event) and `"vite"` (the last `vite` event). `signInAs`, `features.data.entities` and `features.functions.names` are as they are now: the identity may have changed since the last `ready`, and changed entities and rebuilt functions apply without a new `ready`. 503 `starting` before `ready`. |
 | `GET /identity` | | `{"kind":"developer","user":{…}}`, `{"kind":"user","user":{…}}` or `{"kind":"none","user":null}`. `user` is the [user](#users) the identity signs in as: for `developer`, the account it signed in as last in this run (`null` until first used); for `user`, `null` while that user doesn't exist. |
-| `PUT /identity` | `{"kind":"developer"}`, `{"kind":"user","user":"<username or id>","create":true}` or `{"kind":"none"}` | The new identity, as `GET /identity`. Revokes every local session. A missing user is 404 `user-not-found` unless `create` is `true` (default `false`), which creates it without a password. |
+| `PUT /identity` | `{"kind":"developer"}`, `{"kind":"user","user":"<username or id>","create":true}` or `{"kind":"none"}` | The new identity, as `GET /identity`. Revokes every local session, which the app's page forgets when it loads again ([stale sessions](#stale-sessions)). A missing user is 404 `user-not-found` unless `create` is `true` (default `false`), which creates it without a password. |
 | `GET /users` | | `{"users":[user, …]}`, oldest first. |
 | `POST /users` | `{"username":"ana@example.com","password":"…"}` (`password` optional: without one the user can only be signed in by rayfin-local: automatic sign-in and `POST /token`) | `user`, 201. 409 `user-exists` when the username exists (usernames are unique without regard to case). |
 | `DELETE /users/{username or id}` | | 204. Signs out the user's sessions. 404 `user-not-found`. |
@@ -271,7 +282,7 @@ With `RAYFIN_LOCAL_CONTROL_TOKEN` set, the backend serves `{apiUrl}/.rayfin-loca
 | `GET /entities` | | `{"entities":[{"name":"Note","rows":12}, …]}`, in the model's order; empty when `services.data` is off. |
 | `GET /entities/{name}/rows?offset=0&limit=50&orderBy=<field>&desc=false` | | `{"columns":[{"name","type","key":bool}],"rows":[{…}],"total":12}`. Every row, regardless of permissions; values formatted as the data API formats them. `columns` are the entity's fields with their GraphQL type (`UUID`, `String`, `Int`, `Decimal`, `Boolean` or `DateTime`); `key` marks the primary key. Rows are ordered by `orderBy`, then by the primary key. `limit` is 1 to 500 (default 50). 400 for other values or an unknown `orderBy`; 404 `entity-not-found`. |
 | `DELETE /entities/{name}/rows` | | `{"deleted":12}`. 409 `rows-referenced` when other entities' rows still refer to them; the message says which, and how many. |
-| `POST /data/reset` | | `{"ok":true}`. Deletes every entity's rows, the local users and their sessions, and the stored files, without a restart. The identity stays: a `user` identity's user is created again at its next automatic sign-in. |
+| `POST /data/reset` | | `{"ok":true}`. Deletes every entity's rows, the local users and their sessions, and the stored files, without a restart; the app's page forgets its stored session when it loads again ([stale sessions](#stale-sessions)). The identity stays: a `user` identity's user is created again at its next automatic sign-in. |
 | `POST /reload` | `{"forceSchema":false}` | Reads `rayfin.yml`, `rayfin-local.toml`, the entities, the SQL connectors' entities and the secret values again and applies them now, as after an edit, running the data build command (`services.data.buildCommand`) first, as a start does (`forceSchema`: also a schema change that loses data). Answers `{"schema":<schema event>,"config":<config-changed event or null>}`, the events it also emits; a change that would lose data answers 200 with a `refused` `schema` event. A reload in progress finishes first, and one asked for before `ready` waits for the start. A `rayfin.yml` or `rayfin-local.toml` that can't be read answers 422 `config-invalid`, and entities that can't be built or analyzed 422 `analysis-failed`; what could be read is applied all the same. 503 `stopping` once `serve` stops. |
 
 A <a id="users"></a>**user** is `{"id","username","email","createdAt","signIn":["password","entra"],"developer":bool}`:

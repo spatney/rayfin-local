@@ -19,6 +19,8 @@ export interface ServeOptions {
   frontend?: boolean;
   /** More `serve` arguments, e.g. `--no-functions`. */
   args?: string[];
+  /** The frontend's port; default a free one. */
+  frontendPort?: number;
   /** Default 5 minutes: the first start builds the functions and Vite optimizes dependencies. */
   startupTimeoutMs?: number;
 }
@@ -79,7 +81,8 @@ export class ServeProcess {
       'build it with `cargo build -p rayfin-local` or set RAYFIN_LOCAL_BIN',
     );
     for (let attempt = 1; ; attempt++) {
-      const [apiPort, frontendPort] = await freePorts(2);
+      const [apiPort, freePort] = await freePorts(options.frontendPort ? 1 : 2);
+      const frontendPort = options.frontendPort ?? freePort;
       try {
         return await ServeProcess.#startOnce(bin, options, apiPort, frontendPort);
       } catch (error) {

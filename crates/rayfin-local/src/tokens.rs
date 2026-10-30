@@ -1,5 +1,7 @@
-//! The developer's Azure tokens as `serve` hands them to the feature services: the broker's,
-//! with each audience whose token can't be had reported once to hosts (`azure-sign-in`).
+//! The developer's Azure tokens as `serve` hands them to the functions (`ctx.Tokens`) and the
+//! connectors, which can't work without them: the broker's, with each audience whose token can't
+//! be had reported once to hosts (`azure-sign-in`). The auth service gets the broker itself,
+//! since it signs in as the local developer account without a token.
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};

@@ -122,6 +122,7 @@ Run them explicitly; they print no tokens and no identity.
 ### JS helper tests
 
 `js/test/` tests the helpers with Node's test runner.
+The session stamp's tests need nothing else: `node --test js/test/session-stamp.test.mjs`.
 The function host's tests need the fixture functions package installed and built first:
 
 ```sh

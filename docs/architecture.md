@@ -195,7 +195,8 @@ Programs such as Fabricator run `serve --json` as a child process; [embedding.md
 - **Codes.** Warnings hosts act on go through `ui::warning` with a code (`sdk-unsupported`, `secret-missing`, …).
   Fatal errors are classified in `errors.rs`: an error tagged at the stage that failed (`errors::Coded`, which shows as the error it wraps), else the first error of a known type in the chain (`ProjectError`, `NodeError`, `SchemaError`, `FrontendError`, …), else `internal`.
 - **Stopping.** A thread reads stdin until it ends (`shutdown::StopListener`); `serve` listens to it, and to Ctrl+C, from the start, so a host that gives up during a slow start stops it too.
-- **Feature crates** report through hooks rather than knowing about events: `rl-functions` calls `FunctionsConfig::on_state` (building, ready, failed with the compiler's messages), the token sources handed to the services report the audiences without a token (`azure-sign-in`), and which connector types run locally is decided in one place, `integrations::connector_runs_locally`.
+- **Feature crates** report through hooks rather than knowing about events: `rl-functions` calls `FunctionsConfig::on_state` (building, ready, failed with the compiler's messages), the token sources handed to the functions and connectors report the audiences without a token (`azure-sign-in`), and which connector types run locally is decided in one place, `integrations::connector_runs_locally`.
+  The auth service gets the token broker without that report: the developer identity signs in as the local developer account without a token, and says so in the log.
 - **Live state.** `events::live()` keeps the last `ready`, `analysis`, `schema`, `functions` and `vite` events, with or without `--json`, for the control API's `GET /status`, which reads the identity, the served entities (`DataApi::model`) and the loaded functions (`FunctionsSlot`) as they are now: entity changes and function rebuilds bring no new `ready`.
 - **Reloading.** A configuration change that applied emits `config-changed`, then a new `ready` (`commands::serve::ready_event`, as at startup).
   `ServeContext::reload` is the `reload::ReloadHandle` the control API's `POST /reload` calls.
@@ -242,6 +243,8 @@ Under rayfin-local, the sign-in identity answers instead:
 - `developer` is the Entra user of a Power BI token that the broker gets without a prompt (`TokenSource::token_silently`: the environment, its cache, the Azure CLI, or the Rayfin CLI's cache), signed in as "Continue as" does; without one, `developer@example.com`.
   Without an Azure sign-in, asking takes a second or more, so after a failure it asks again only after five minutes or a switch of the identity.
 - Switching the identity revokes every session while it holds the identity's write lock, so no session for the old identity is issued during the switch.
+- Pages keep the SDK's session in their origin's `localStorage`, and the dev server's port serves other apps over time, so the `rayfin-local:session-stamp` plugin puts a script first in each page (`js/session-stamp.mjs`): it removes the SDK's stored session when the origin's stamp isn't the backend's, `<appId>:<sessionEpoch>`, which the plugin asks `GET /.rayfin-local/dev/session-stamp` for with the secret, for each page.
+  The epoch is a random value in the database (`_rl_auth_session_epoch`), replaced whenever every session is signed out (`sessions::revoke_every_session`, for identity switches and data resets); a new database (`--reset`) comes with a new one.
 
 ### "Sign in with Fabric"
 
@@ -446,7 +449,7 @@ rayfin-local is a development tool for one person, but it holds the keys to that
   Get tokens from the `TokenSource`, return failures in the shapes the SDK's normalizer reads, and update the support table in [differences.md](differences.md).
 - **A new route.** Add it to the owning feature crate's router.
   Routes the SDK calls without a publishable key belong in that crate's exempt list (as `rl_auth::PUBLISHABLE_KEY_EXEMPT_PATHS` does for auth).
-- **A new Node helper.** Add the script to `js/`, declare it with `rl_node::Helper::new(name, include_str!(...))` in the crate that uses it, and run it with `run_helper` (one-shot) or `ManagedChild` (long-running).
+- **A new Node helper.** Add the script to `js/`, declare it with `rl_node::Helper::new(name, include_str!(...))` in the crate that uses it (with the modules it imports, written next to it by `rl_node::materialize_bundle`, as for `vite-dev.mjs`), and run it with `run_helper` (one-shot) or `ManagedChild` (long-running).
 - **A new SDK version.** Compare its wire contract with 1.36.2 (routes, bodies, headers, error shapes), update the version check in `rl-project`, and run the conformance tests and the e2e suites with the new packages.
   The analysis runs the project's own `@microsoft/rayfin-core`, so changes to the analyzer's output show up as `rl-model` parse errors and in its golden tests.
 
@@ -458,6 +461,6 @@ rayfin-local is a development tool for one person, but it holds the keys to that
 - **The host contract**: `crates/rayfin-local/tests/host_contract.rs` runs the built binary: `version --json`, fatal errors of `serve --json`, and a `serve --json` of the fixture app from its events to the end of stdin (it skips without the fixture's packages).
   `control_api.rs` drives the control API and automatic sign-in of the fixture app the same way.
 - **Live reload**: `crates/rayfin-local/tests/live_reload.rs` runs `serve --json` on a copy of the fixture app: `rayfin.yml` edits applied on the same ports, a data package built before its entities are analyzed again, `secret set` restarting the function host, Vite started again after it is killed, and the control API, its `POST /reload` and automatic sign-in across changes.
-- **End to end**: Playwright drives the fixture app in `tests/e2e` (sign-in popup, data, functions, storage) and, optionally, the explorer app.
+- **End to end**: Playwright drives the fixture app in `tests/e2e` (sign-in popup, data, functions, storage, stale sessions) and, optionally, the explorer app.
 
 [development.md](development.md) has the commands.

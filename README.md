@@ -227,7 +227,7 @@ Its port is remembered per project; when it is busy, rayfin-local takes the next
 | `/.rayfin-local/portal` | The local "Sign in with Fabric" page. |
 | `/.rayfin-local/portal/embed` | The local Fabric host, for apps that sign in embedded. |
 | `/.rayfin-local/health` | `{"ok":true}` once the backend is up. |
-| `/.rayfin-local/dev/session-token` | Automatic sign-in, for rayfin-local's own dev server only. |
+| `/.rayfin-local/dev/session-token`, `/.rayfin-local/dev/session-stamp` | Automatic sign-in, and the stamp of the sessions the backend accepts, for rayfin-local's own dev server only. |
 | `/.rayfin-local/control/*` | The control API, for programs that run rayfin-local, with `RAYFIN_LOCAL_CONTROL_TOKEN` (see [docs/embedding.md](docs/embedding.md#control-api)). |
 
 As on Fabric, `/api/*`, `/graphql`, `/functions/*`, `/connector-invoke/*` and `/connectors/*` need an `X-Publishable-Key` header; the local key is in `/rayfin.config.json`.
@@ -244,6 +244,8 @@ Users are local: they live in `.rayfin-local/db.sqlite`, not in Entra ID.
   - `developer` (the default): you, as your own Entra user when `az login` or the Rayfin CLI's login has a token without a prompt and the backend listens on loopback, else a local account, `developer@example.com`.
   - `user:<username>`: that local user, created without a password when missing.
   - `none`: nobody, so the app offers its own sign-in, which opens the local sign-in page.
+
+  Each page forgets the session the SDK stored for its origin when the backend no longer accepts it: another app's that ran on the same port, or one that `--reset` or a new sign-in identity signed out.
 - **"Sign in with Fabric".** `ensureSignedInWithFabric` opens rayfin-local's sign-in page in the popup instead of the Fabric portal.
   There you can sign in with a local user, create one, or choose **Continue as &lt;you&gt;** to sign in as your own Entra user (the account of your `az` or Rayfin CLI login).
   "Continue as" is offered only when the backend listens on a loopback address.

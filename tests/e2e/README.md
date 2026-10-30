@@ -40,7 +40,8 @@ everything `rayfin-local serve --verbose` printed.
 | `HEADED` | | `1`: show the browser. |
 
 The fixture suite sets `RAYFIN_LOCAL_TOKEN_POWERBI` and `RAYFIN_LOCAL_TOKEN_FABRIC` to fake
-tokens for its `serve`, so it needs no Azure sign-in. The explorer suite uses your real tokens
+tokens for its `serve`, so it needs no Azure sign-in, and `RAYFIN_LOCAL_CONTROL_TOKEN` to a
+random one, for the control API. The explorer suite uses your real tokens
 (`az login`), because its connector queries the real semantic model.
 
 ## How it works
@@ -77,6 +78,8 @@ Clicks each scenario button of the fixture app (see its README) and checks the r
 | `storage-roundtrip` | Upload with fields, list, download, delete. |
 | `sign-out` | The session ends. |
 | `auto-sign-in` | The app signs itself in as Rayfin's templates do (`fetchRayfinLocalSessionToken()`, then `signInWithBrokeredToken`): the dev server answers for the developer (`developer@example.com`, since the suite's Power BI token is fake), no popup opens, and the session works for data. |
+| `stale sessions` › after a data reset | After the control API's `POST /data/reset` and a reload, the page has no session (rayfin-local's dev server made it forget the one the reset signed out), and the app signs itself in again with no 401. It deletes the local users, so it runs last. |
+| `stale sessions` › another app on the same port | Two copies of the fixture (`FixtureCopy` in `support/project.ts`, in `test-results`) served one after the other on one frontend port, in a browser context of their own: the second app's page has no session from the first, and signs itself in. |
 
 The mock Power BI answers `executeDaxQueries` with the Arrow stream rl-connectors recorded for
 `EVALUATE ROW("x", 1)` (`crates/rl-connectors/tests/fixtures/row.arrows`) and `executeQueries`

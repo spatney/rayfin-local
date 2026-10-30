@@ -5,12 +5,15 @@
 //! `GET /.rayfin/dev/session-token`, then installs the answer with `signInWithBrokeredToken()`.
 //! rayfin-local's own dev server answers that route by asking [`DEV_SESSION_TOKEN_PATH`] here for
 //! a session of the [`SignInAs`] identity, with the run's secret in [`DEV_SIGN_IN_SECRET_HEADER`].
+//! With the same secret, it asks [`DEV_SESSION_STAMP_PATH`] for the stamp of the sessions this
+//! backend accepts, so that its pages forget a stored session of another app or epoch.
 //!
 //! The answer is the `POST /api/auth/v1/token` body: a session like any other. Refusals are
 //! `{"error", "hint"}`, which `fetchRayfinLocalSessionToken()` shows as `<error> <hint>`.
 
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::{
@@ -30,6 +33,8 @@ use crate::{
 
 /// Where rayfin-local's dev server gets automatic sign-ins.
 pub const DEV_SESSION_TOKEN_PATH: &str = "/.rayfin-local/dev/session-token";
+/// Where rayfin-local's dev server gets [`AuthService::session_stamp`], as `{"stamp"}`.
+pub const DEV_SESSION_STAMP_PATH: &str = "/.rayfin-local/dev/session-stamp";
 /// The header with the run's secret, which only rayfin-local's own dev server knows.
 pub const DEV_SIGN_IN_SECRET_HEADER: &str = "x-rayfin-local-sign-in";
 /// The local account the developer identity signs in as when their Entra identity isn't there.
@@ -64,6 +69,9 @@ pub(crate) struct AutoSignIn {
     developer: RwLock<Option<String>>,
     /// Until when the developer identity doesn't ask for their Entra identity again.
     entra_unavailable_until: Mutex<Option<Instant>>,
+    /// Whether the log says the developer signs in as [`LOCAL_DEVELOPER`]: once, until they sign
+    /// in as their Entra user.
+    local_developer_logged: AtomicBool,
 }
 
 impl AuthService {
@@ -123,6 +131,13 @@ impl AuthService {
                     );
                     *self.auto_sign_in.entra_unavailable_until.lock() =
                         Some(Instant::now() + ENTRA_RETRY_AFTER);
+                    let logged = &self.auto_sign_in.local_developer_logged;
+                    if !logged.swap(true, Ordering::Relaxed) {
+                        tracing::info!(
+                            "Signing in as the local developer account; sign in with `az login` \
+                             to preview as yourself"
+                        );
+                    }
                 })
                 .ok()
         } else {
@@ -130,6 +145,9 @@ impl AuthService {
         };
         let user = match entra {
             Some(identity) => {
+                self.auto_sign_in
+                    .local_developer_logged
+                    .store(false, Ordering::Relaxed);
                 self.find_or_create_external_user(
                     &identity.object_id,
                     identity.email.as_deref(),
@@ -166,6 +184,39 @@ impl AuthService {
 
     /// A session for the identity, for the dev server.
     async fn automatic_sign_in(&self, request: &Parts) -> Result<TokenResponse, Refusal> {
+        self.check_dev_server(request)?;
+        if !self.settings().enabled {
+            return Err(Refusal::new(
+                StatusCode::NOT_FOUND,
+                "Sign-in is turned off for this app.",
+                Some("services.auth.enabled is false in rayfin/rayfin.yml."),
+            ));
+        }
+        let _switching = self.auto_sign_in.switching.read().await;
+        let user = match self.sign_in_user().await {
+            Ok(Some(user)) => user,
+            Ok(None) => {
+                return Err(Refusal::new(
+                    StatusCode::UNAUTHORIZED,
+                    "Automatic sign-in is off.",
+                    Some("Use the app's sign-in to sign in."),
+                ));
+            }
+            Err(error) => return Err(Refusal::failed(&error)),
+        };
+        let tokens = self
+            .issue_session(&user)
+            .await
+            .map_err(|error| Refusal::failed(&error))?;
+        tracing::debug!(
+            developer = user.is_developer(),
+            "signed the app in automatically"
+        );
+        Ok(tokens)
+    }
+
+    /// Only rayfin-local's dev server: a loopback peer, no other origin, and the run's secret.
+    fn check_dev_server(&self, request: &Parts) -> Result<(), Refusal> {
         let Some(secret) = &self.auto_sign_in.secret else {
             return Err(Refusal::new(
                 StatusCode::NOT_FOUND,
@@ -198,37 +249,7 @@ impl AuthService {
                 None,
             ));
         }
-        if !self.settings().enabled {
-            return Err(Refusal::new(
-                StatusCode::NOT_FOUND,
-                "Sign-in is turned off for this app.",
-                Some("services.auth.enabled is false in rayfin/rayfin.yml."),
-            ));
-        }
-        let _switching = self.auto_sign_in.switching.read().await;
-        let user = match self.sign_in_user().await {
-            Ok(Some(user)) => user,
-            Ok(None) => {
-                return Err(Refusal::new(
-                    StatusCode::UNAUTHORIZED,
-                    "Automatic sign-in is off.",
-                    Some(
-                        "rayfin-local signs nobody in automatically (--sign-in-as none); use the \
-                         app's own sign-in.",
-                    ),
-                ));
-            }
-            Err(error) => return Err(Refusal::failed(&error)),
-        };
-        let tokens = self
-            .issue_session(&user)
-            .await
-            .map_err(|error| Refusal::failed(&error))?;
-        tracing::debug!(
-            developer = user.is_developer(),
-            "signed the app in automatically"
-        );
-        Ok(tokens)
+        Ok(())
     }
 }
 
@@ -238,10 +259,38 @@ pub(crate) async fn dev_session_token(
     request: Request,
 ) -> Response {
     let (parts, _) = request.into_parts();
-    let mut response = match auth.automatic_sign_in(&parts).await {
+    let response = match auth.automatic_sign_in(&parts).await {
         Ok(tokens) => Json(tokens).into_response(),
         Err(refusal) => refusal.into_response(),
     };
+    no_store(response)
+}
+
+/// `GET` [`DEV_SESSION_STAMP_PATH`]: `{"stamp"}`, also while the app's sign-in is off, since a
+/// page may still hold another app's session.
+pub(crate) async fn dev_session_stamp(
+    State(auth): State<Arc<AuthService>>,
+    request: Request,
+) -> Response {
+    let (parts, _) = request.into_parts();
+    let stamp = match auth.check_dev_server(&parts) {
+        Ok(()) => auth.session_stamp().await.map_err(|error| {
+            tracing::error!("could not read the session stamp: {error}");
+            Refusal::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not read the session stamp.",
+                None,
+            )
+        }),
+        Err(refusal) => Err(refusal),
+    };
+    no_store(match stamp {
+        Ok(stamp) => Json(json!({ "stamp": stamp })).into_response(),
+        Err(refusal) => refusal.into_response(),
+    })
+}
+
+fn no_store(mut response: Response) -> Response {
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
@@ -351,8 +400,17 @@ mod tests {
         peer: Option<[u8; 4]>,
         origin: Option<&str>,
     ) -> axum::http::Request<Body> {
-        let mut request =
-            axum::http::Request::get(DEV_SESSION_TOKEN_PATH).header(header::HOST, "localhost:7171");
+        request_to(DEV_SESSION_TOKEN_PATH, secret, peer, origin)
+    }
+
+    /// A `GET path` from `peer` (an IPv4 address).
+    fn request_to(
+        path: &str,
+        secret: Option<&str>,
+        peer: Option<[u8; 4]>,
+        origin: Option<&str>,
+    ) -> axum::http::Request<Body> {
+        let mut request = axum::http::Request::get(path).header(header::HOST, "localhost:7171");
         if let Some(secret) = secret {
             request = request.header(DEV_SIGN_IN_SECRET_HEADER, secret);
         }
@@ -480,8 +538,29 @@ mod tests {
         let answer = sign_in(&app).await;
         assert_eq!(answer.status, StatusCode::UNAUTHORIZED);
         assert_eq!(answer.body["error"], "Automatic sign-in is off.");
-        assert!(answer.body["hint"].as_str().unwrap().contains("none"));
+        assert_eq!(answer.body["hint"], "Use the app's sign-in to sign in.");
         assert_eq!(app.auth.identity_user().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn only_the_dev_server_gets_the_session_stamp_even_with_sign_in_off() {
+        let mut settings = AuthSettings::new(APP_ID);
+        settings.enabled = false;
+        let app = app(settings).await;
+        let stamp = |secret, origin| request_to(DEV_SESSION_STAMP_PATH, secret, LOOPBACK, origin);
+        let answer = app.send(stamp(Some(SECRET), None)).await;
+        assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+        assert_eq!(answer.headers[header::CACHE_CONTROL], "no-store");
+        let expected = app.auth.session_stamp().await.unwrap();
+        assert_eq!(answer.body, json!({ "stamp": expected }));
+        let page = Some("http://localhost:5173");
+        for refused in [
+            stamp(None, None),
+            stamp(Some("guess"), None),
+            stamp(Some(SECRET), page),
+        ] {
+            assert_eq!(app.send(refused).await.status, StatusCode::FORBIDDEN);
+        }
     }
 
     #[tokio::test]

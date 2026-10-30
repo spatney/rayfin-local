@@ -1,6 +1,6 @@
 // rayfin-local's Vite runner: starts the app's own Vite dev server (the project's `vite` package,
 // its vite.config and plugins) with extra plugins: `rayfin-local:shim` and, with a sign-in secret,
-// `rayfin-local:sign-in`.
+// `rayfin-local:sign-in` and `rayfin-local:session-stamp`.
 //
 // Protocol (owner: crates/rl-frontend/src/dev.rs):
 //   node vite-dev.mjs --root <frontend dir> --host <host> --port <port> --backend <origin>
@@ -8,6 +8,7 @@
 //     which wins over the app's .env files in Vite's loadEnv and in rayfinLocalDev().
 //     RAYFIN_LOCAL_SIGN_IN_SECRET: the backend's automatic sign-in secret; removed from the env
 //     before Vite loads the app's config.
+//     It imports ./session-stamp.mjs, which the owner writes next to it.
 //   stdout `@@rayfin-local:vite-ready {"urls", "local", "network", "version", "rayfinPlugin"}`
 //     once the server listens; Vite's own URL banner follows.
 //   stdout `@@rayfin-local:vite-error {"code", "message", "stack"}` when the server can't start;
@@ -25,11 +26,18 @@
 // rayfinLocalDev()'s own middleware, which would sign in with Entra through the Rayfin CLI. It
 // answers with the backend's GET /.rayfin-local/dev/session-token: a session for rayfin-local's
 // sign-in identity, or `{error, hint}`.
+//
+// The session-stamp plugin puts a script first in each page's <head>, with the stamp of the
+// sessions the backend accepts from its GET /.rayfin-local/dev/session-stamp, asked for each page:
+// the page forgets the SDK's stored session when another app on this port, or the backend before
+// its sessions were signed out, left it (see session-stamp.mjs).
 
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+
+import { sessionStampScript } from './session-stamp.mjs';
 
 const MARKER = '@@rayfin-local:';
 const RAYFIN_PLUGIN = 'rayfin-local-dev';
@@ -46,10 +54,13 @@ const CONFIG_FIELDS = [
 const BACKEND_UNAVAILABLE = JSON.stringify({ error: 'The local Rayfin backend is unavailable.' });
 const SESSION_TOKEN_PATH = '/.rayfin/dev/session-token';
 const BACKEND_SESSION_TOKEN_PATH = '/.rayfin-local/dev/session-token';
+const BACKEND_SESSION_STAMP_PATH = '/.rayfin-local/dev/session-stamp';
 const SIGN_IN_SECRET_VAR = 'RAYFIN_LOCAL_SIGN_IN_SECRET';
 const SIGN_IN_SECRET_HEADER = 'x-rayfin-local-sign-in';
 // Signing in as the developer may run the Azure CLI first.
 const SIGN_IN_TIMEOUT_MS = 120_000;
+// Each page waits for the stamp, which the backend reads from its database.
+const SESSION_STAMP_TIMEOUT_MS = 10_000;
 // Announcements are single stdout lines, which the reader splits beyond 64 KiB.
 const ANNOUNCED_TEXT_MAX = 8 * 1024;
 const STOP_DEADLINE_MS = 2500;
@@ -282,6 +293,50 @@ async function answerSessionToken(request, response, backend, secret) {
   reply(answer.status, body || { error: 'The local Rayfin backend sent an empty answer.' });
 }
 
+function rayfinLocalSessionStamp({ backend }, secret) {
+  let warned = false;
+  return {
+    name: 'rayfin-local:session-stamp',
+    apply: 'serve',
+    transformIndexHtml: {
+      // Last, so that its prepended tag comes before those of the app and the other plugins.
+      order: 'post',
+      async handler(_html, context) {
+        let stamp;
+        try {
+          stamp = await fetchSessionStamp(backend, secret);
+          warned = false;
+        } catch (error) {
+          if (!warned) {
+            warned = true;
+            context.server?.config.logger.warn(
+              `rayfin-local: could not get the session stamp from the local backend ` +
+                `(${error instanceof Error ? error.message : String(error)}), so the page keeps ` +
+                `any session it stored.`,
+            );
+          }
+          return undefined;
+        }
+        return [{ tag: 'script', children: sessionStampScript(stamp), injectTo: 'head-prepend' }];
+      },
+    },
+  };
+}
+
+/** The stamp of the sessions the backend accepts now. */
+async function fetchSessionStamp(backend, secret) {
+  const answer = await fetch(`${backend}${BACKEND_SESSION_STAMP_PATH}`, {
+    headers: { accept: 'application/json', [SIGN_IN_SECRET_HEADER]: secret },
+    redirect: 'error',
+    signal: AbortSignal.timeout(SESSION_STAMP_TIMEOUT_MS),
+  });
+  const body = await answer.json().catch(() => null);
+  if (!answer.ok || typeof body?.stamp !== 'string') {
+    throw new Error(body?.error ?? `it answered ${answer.status}`);
+  }
+  return body.stamp;
+}
+
 function isLoopbackAddress(address) {
   return (
     typeof address === 'string' &&
@@ -333,7 +388,9 @@ async function main() {
       server: { host: options.host, port: options.port, strictPort: true, open: false },
       plugins: [
         rayfinLocalShim(options, state),
-        ...(signInSecret ? [rayfinLocalSignIn(options, signInSecret)] : []),
+        ...(signInSecret
+          ? [rayfinLocalSignIn(options, signInSecret), rayfinLocalSessionStamp(options, signInSecret)]
+          : []),
       ],
     });
     await server.listen();

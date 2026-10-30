@@ -45,8 +45,9 @@ impl AuthService {
     ///   [`crate::EntraSettings::enabled`]
     /// - the sign-in portal under [`crate::PORTAL_PATH`] (the app's `fabricPortalUrl`), with the
     ///   local Fabric host at [`crate::EMBED_HOST_PATH`]
-    /// - [`crate::DEV_SESSION_TOKEN_PATH`]: automatic sign-in, for rayfin-local's dev server
-    ///   (see [`AuthService::with_dev_sign_in_secret`])
+    /// - [`crate::DEV_SESSION_TOKEN_PATH`]: automatic sign-in, and [`crate::DEV_SESSION_STAMP_PATH`]:
+    ///   the stamp of the sessions it accepts, for rayfin-local's dev server (see
+    ///   [`AuthService::with_dev_sign_in_secret`])
     /// - the routes of features rayfin-local lacks (magic links, email verification, password
     ///   reset email), answering as the real service does when the feature is disabled
     ///
@@ -83,6 +84,10 @@ impl AuthService {
             .route(
                 crate::DEV_SESSION_TOKEN_PATH,
                 get(crate::identity::dev_session_token),
+            )
+            .route(
+                crate::DEV_SESSION_STAMP_PATH,
+                get(crate::identity::dev_session_stamp),
             )
             .merge(crate::portal::routes())
             .with_state(self)

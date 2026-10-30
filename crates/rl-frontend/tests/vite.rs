@@ -31,6 +31,16 @@ const KEY: &str = "pk-local-test";
 const WORKSPACE: &str = "11111111-1111-4111-8111-111111111111";
 const ITEM: &str = "22222222-2222-4222-8222-222222222222";
 const SIGN_IN_SECRET: &str = "the-run's-sign-in-secret";
+/// The stand-in backend's session stamp.
+const STAMP: &str = "stand-in-app:0123abcd";
+
+/// Whether a request to the backend's `/.rayfin-local/dev/*` carries the run's secret.
+fn from_the_dev_server(headers: &HeaderMap) -> bool {
+    headers
+        .get("x-rayfin-local-sign-in")
+        .map(|value| value.as_bytes())
+        == Some(SIGN_IN_SECRET.as_bytes())
+}
 
 /// A token response, as the backend's sign-in routes answer; `access_token` says which.
 fn session(access_token: &str) -> Value {
@@ -288,14 +298,19 @@ impl Backend {
             .route(
                 "/.rayfin-local/dev/session-token",
                 get(|headers: HeaderMap| async move {
-                    if headers
-                        .get("x-rayfin-local-sign-in")
-                        .map(|value| value.as_bytes())
-                        != Some(SIGN_IN_SECRET.as_bytes())
-                    {
+                    if !from_the_dev_server(&headers) {
                         return (StatusCode::FORBIDDEN, Json(json!({"error": "no secret"})));
                     }
                     (StatusCode::OK, Json(session("from-rayfin-local")))
+                }),
+            )
+            .route(
+                "/.rayfin-local/dev/session-stamp",
+                get(|headers: HeaderMap| async move {
+                    if !from_the_dev_server(&headers) {
+                        return (StatusCode::FORBIDDEN, Json(json!({"error": "no secret"})));
+                    }
+                    (StatusCode::OK, Json(json!({ "stamp": STAMP })))
                 }),
             )
             // Where rayfinLocalDev()'s own automatic sign-in exchanges an Entra token.
@@ -579,6 +594,22 @@ async fn the_dev_server_signs_the_app_in_before_rayfin_local_dev_does() {
                     .await
                     .unwrap();
                 assert_eq!(other_page.status(), 403, "Vite {vite}");
+            }
+            // With the secret, each page forgets a stored session of another backend first.
+            let page_url = format!("http://127.0.0.1:{port}/");
+            let (status, page) = fetch(&client, "GET", &page_url, "text/html").await;
+            assert_eq!(status, 200, "Vite {vite}: {page}");
+            let stamped = page.find("rayfin-local:session-stamp");
+            if secret.is_some() {
+                let at = stamped.unwrap_or_else(|| panic!("Vite {vite}: no stamp in\n{page}"));
+                assert!(
+                    page.contains(&format!("\"{STAMP}\"")),
+                    "Vite {vite}: {page}"
+                );
+                let client_at = page.find("/@vite/client").unwrap();
+                assert!(at < client_at, "Vite {vite}: not first in\n{page}");
+            } else {
+                assert_eq!(stamped, None, "Vite {vite}: {page}");
             }
             server.stop().await.unwrap();
             versions.push(vite);

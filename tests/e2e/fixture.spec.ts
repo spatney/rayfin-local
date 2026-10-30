@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { BrowserLog, describe } from './support/browser-log.ts';
 import {
   ensureSignedIn,
   expectOk,
@@ -12,12 +13,16 @@ import {
 } from './support/fixture-app.ts';
 import { expect, test } from './support/fixtures.ts';
 import type { RecordedRequest } from './support/mock-powerbi.ts';
+import { freePorts } from './support/ports.ts';
 import { signInThroughPopup } from './support/portal.ts';
+import { fakeToken, FixtureCopy } from './support/project.ts';
+import { ServeProcess } from './support/serve.ts';
 
 /*
  * The fixture app (tests/fixtures/apps/basic) against `rayfin-local serve`, scenario by scenario,
  * in this order: config, sign-in, session, data, functions, connector, storage, sign-out,
- * auto-sign-in. Expected values are in the fixture's README.
+ * auto-sign-in, then stale sessions (which deletes the local users). Expected values are in the
+ * fixture's README.
  */
 
 const DAX_QUERY = 'EVALUATE ROW("answer", 42)';
@@ -246,4 +251,75 @@ test('auto-sign-in: the app signs itself in as the developer, with no popup', as
     page.off('popup', countPopup);
   }
   await expectOk(page, 'sign-out');
+});
+
+/*
+ * The SDK keeps the app's session in the origin's localStorage. rayfin-local's dev server makes
+ * each page forget a session its backend signed out, or another app's that ran on the same port,
+ * so the app signs in again rather than get 401s for it (which the log check would catch).
+ */
+test.describe('stale sessions', () => {
+  const signedOut = { isAuthenticated: false, user: null };
+
+  test('after a data reset, a reload signs the app in again', async ({ app }) => {
+    await openFixtureApp(app);
+    const { page, info } = app;
+    expect(await expectOk<SessionInfo>(page, 'auto-sign-in')).toMatchObject({ isAuthenticated: true });
+    const reset = await fetch(`${info.serve.apiUrl}/.rayfin-local/control/data/reset`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${info.controlToken}` },
+    });
+    expect(reset.status, await reset.text()).toBe(200);
+
+    await page.reload();
+    await expect(page.getByTestId('app-status')).toHaveText('ready');
+    expect(await expectOk<SessionInfo>(page, 'session')).toEqual(signedOut);
+    expect(await expectOk<SessionInfo>(page, 'auto-sign-in')).toMatchObject({
+      isAuthenticated: true,
+      user: { email: 'developer@example.com' },
+    });
+    expect(await expectOk(page, 'todo-crud')).toMatchObject({ deleted: true, foundAfterDelete: false });
+  });
+
+  test('another app on the same port starts signed out', async ({ browser }, testInfo) => {
+    test.setTimeout(10 * 60_000);
+    const [frontendPort] = await freePorts(1);
+    const copies = [new FixtureCopy(testInfo.outputPath('app-a')), new FixtureCopy(testInfo.outputPath('app-b'))];
+    const env = { RAYFIN_LOCAL_TOKEN_POWERBI: fakeToken('powerbi') };
+    const serve = (copy: FixtureCopy, label: string) =>
+      ServeProcess.start({ projectDir: copy.dir, label, env, frontendPort, args: ['--no-functions'] });
+    const context = await browser.newContext();
+    const log = new BrowserLog(context);
+    const page = await context.newPage();
+    let running: ServeProcess | undefined;
+    try {
+      running = await serve(copies[0], 'same-port-a');
+      const url = running.info.frontendUrl!;
+      await page.goto(url);
+      await expect(page.getByTestId('app-status')).toHaveText('ready');
+      const first = await expectOk<SessionInfo>(page, 'auto-sign-in');
+      expect(first.isAuthenticated).toBe(true);
+      // Away from the app while its dev server stops, so Vite's client doesn't poll for it.
+      await page.goto('about:blank');
+      await running.stop();
+
+      running = await serve(copies[1], 'same-port-b');
+      expect(new URL(running.info.frontendUrl!).origin).toBe(new URL(url).origin);
+      await page.goto(url);
+      await expect(page.getByTestId('app-status')).toHaveText('ready');
+      expect(await expectOk<SessionInfo>(page, 'session')).toEqual(signedOut);
+      const second = await expectOk<SessionInfo>(page, 'auto-sign-in');
+      expect(second.isAuthenticated).toBe(true);
+      expect(second.user?.id).not.toBe(first.user?.id);
+      expect(await expectOk(page, 'todo-crud')).toMatchObject({ deleted: true, foundAfterDelete: false });
+      expect(
+        log.unexpected(0, [/\/favicon\.ico(\s|$)/]).map(describe),
+        'console errors or failed requests',
+      ).toEqual([]);
+    } finally {
+      await running?.stop();
+      await context.close();
+      for (const copy of copies) copy.remove();
+    }
+  });
 });

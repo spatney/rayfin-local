@@ -57,4 +57,11 @@ pub(crate) const STEPS: &[&str] = &[
         used_at INTEGER
     ) STRICT;
     CREATE INDEX _rl_auth_handoff_codes_by_expiry ON _rl_auth_handoff_codes (expires_at);",
+    // 3: the session epoch, a random value that changes whenever every session is signed out,
+    // and comes new with the database, so that pages can tell a session stored before.
+    "CREATE TABLE _rl_auth_session_epoch (
+        id INTEGER PRIMARY KEY NOT NULL CHECK (id = 1),
+        epoch TEXT NOT NULL
+    ) STRICT;
+    INSERT INTO _rl_auth_session_epoch (id, epoch) VALUES (1, lower(hex(randomblob(8))));",
 ];

@@ -21,6 +21,8 @@ export interface SuiteInfo {
   user: { email: string; password: string };
   tokens: Record<string, string>;
   mockPowerBiUrl?: string;
+  /** `RAYFIN_LOCAL_CONTROL_TOKEN` of the suite's serve, for its control API. */
+  controlToken?: string;
 }
 
 export interface RunningSuite {

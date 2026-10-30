@@ -7,7 +7,10 @@
 //!   listens, or `@@rayfin-local:vite-error {"code", "message", "stack"}` before it exits 1. These
 //!   lines are not passed on to the sink.
 //! - `RAYFIN_LOCAL_SIGN_IN_SECRET` in the environment ([`DevServerConfig::sign_in_secret`]) turns
-//!   on the `rayfin-local:sign-in` plugin, which answers `GET /.rayfin/dev/session-token`.
+//!   on the `rayfin-local:sign-in` plugin, which answers `GET /.rayfin/dev/session-token`, and the
+//!   `rayfin-local:session-stamp` plugin, which makes each page forget a stored session the
+//!   backend no longer accepts.
+//! - The helper imports `session-stamp.mjs`, written next to it.
 //! - Ctrl+Break (Windows) or SIGTERM (Unix), as [`ManagedChild::kill`] sends them, close the server.
 
 use std::collections::VecDeque;
@@ -26,7 +29,15 @@ use tokio::sync::oneshot;
 
 use crate::FrontendError;
 
-const HELPER: Helper = Helper::new("vite-dev", include_str!("../../../js/vite-dev.mjs"));
+/// The helper, and the module it imports, written to one folder.
+const HELPERS: [Helper; 2] = [
+    Helper::new(SCRIPT, include_str!("../../../js/vite-dev.mjs")),
+    Helper::new(
+        "session-stamp.mjs",
+        include_str!("../../../js/session-stamp.mjs"),
+    ),
+];
+const SCRIPT: &str = "vite-dev.mjs";
 const LABEL: &str = "vite";
 const MARKER: &str = "@@rayfin-local:";
 /// The variable that hands the helper [`DevServerConfig::sign_in_secret`]; it removes it from its
@@ -59,7 +70,9 @@ pub struct DevServerConfig {
     /// The run's secret for the backend's automatic sign-in (`GET
     /// /.rayfin-local/dev/session-token`, `rl_auth::DEV_SESSION_TOKEN_PATH`). With it, the dev
     /// server answers the app's `GET /.rayfin/dev/session-token` itself, ahead of
-    /// `rayfinLocalDev()`, with a session from the backend.
+    /// `rayfinLocalDev()`, with a session from the backend, and puts the stamp of the sessions
+    /// the backend accepts (`rl_auth::DEV_SESSION_STAMP_PATH`) in each page, which then forgets a
+    /// stored session of another app or of before its sessions were signed out.
     pub sign_in_secret: Option<String>,
     /// Receives Vite's output, labeled `vite`.
     pub sink: LineSink,
@@ -164,7 +177,8 @@ impl DevServer {
         if !port_is_free(&config.host, config.port) {
             return Err(FrontendError::PortInUse { port: config.port });
         }
-        let script = HELPER.materialize(&config.cache_dir)?;
+        let script =
+            rl_node::materialize_bundle(&config.cache_dir, "vite-dev", &HELPERS)?.join(SCRIPT);
 
         let (announce, mut announced) = oneshot::channel();
         let startup = Arc::new(Mutex::new(Startup {

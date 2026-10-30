@@ -296,6 +296,23 @@ impl AuthService {
         Ok(count)
     }
 
+    /// The stamp of the sessions this backend accepts, `<app id>:<session epoch>`. It changes
+    /// whenever every session is signed out (a data reset, a new sign-in identity) and comes new
+    /// with the database, so a session stored under another stamp is gone, or another app's.
+    pub async fn session_stamp(&self) -> Result<String, AuthError> {
+        let epoch: String = self
+            .db
+            .call(|conn| {
+                conn.query_row(
+                    "SELECT epoch FROM _rl_auth_session_epoch WHERE id = 1",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await??;
+        Ok(format!("{}:{epoch}", self.settings().app_id))
+    }
+
     /// Verifies an access token and that its session has not been signed out.
     pub(crate) fn verify_session_token(&self, token: &str) -> Result<AccessClaims, TokenError> {
         let claims = self.jwt().verify(token, self.now_ms() / 1000)?;
@@ -384,7 +401,7 @@ pub(crate) fn revoke_user_sessions(
     Ok(ids)
 }
 
-/// Signs out every active session, returning their ids.
+/// Signs out every active session, returning their ids, and starts a new session epoch.
 pub(crate) fn revoke_every_session(conn: &Connection, now: i64) -> Result<Vec<String>, AuthError> {
     let mut statement = conn.prepare(
         "UPDATE _rl_auth_sessions SET revoked_at = ?1 WHERE revoked_at IS NULL RETURNING id",
@@ -392,6 +409,10 @@ pub(crate) fn revoke_every_session(conn: &Connection, now: i64) -> Result<Vec<St
     let ids = statement
         .query_map([now], |row| row.get(0))?
         .collect::<Result<Vec<String>, _>>()?;
+    conn.execute(
+        "UPDATE _rl_auth_session_epoch SET epoch = lower(hex(randomblob(8))) WHERE id = 1",
+        [],
+    )?;
     Ok(ids)
 }
 
@@ -663,5 +684,43 @@ mod tests {
             auth.issue_session(&user).await,
             Err(AuthError::UserNotFound)
         ));
+    }
+
+    #[tokio::test]
+    async fn the_session_stamp_changes_when_every_session_ends() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = rl_db::Db::open(&dir.path().join("db.sqlite")).unwrap();
+        let settings = AuthSettings::new(crate::tests::APP_ID);
+        let keys = dir.path().join("keys");
+        let auth = AuthService::new(db.clone(), keys.clone(), settings.clone())
+            .await
+            .unwrap();
+        let first = auth.session_stamp().await.unwrap();
+        assert!(
+            first.starts_with(&format!("{}:", crate::tests::APP_ID)),
+            "{first}"
+        );
+
+        // One user's sign-outs keep it, and so does a restart.
+        let user = auth.create_user("alice", "secret1").await.unwrap();
+        auth.issue_session(&user).await.unwrap();
+        auth.revoke_all_sessions(&user.id).await.unwrap();
+        let restarted = AuthService::new(db, keys, settings).await.unwrap();
+        assert_eq!(restarted.session_stamp().await.unwrap(), first);
+
+        // Signing everyone out, for a new sign-in identity or a data reset, starts a new epoch.
+        restarted
+            .switch_sign_in_as(crate::SignInAs::None)
+            .await
+            .unwrap();
+        let switched = restarted.session_stamp().await.unwrap();
+        assert_ne!(switched, first);
+        restarted.delete_all_users().await.unwrap();
+        let reset = restarted.session_stamp().await.unwrap();
+        assert_ne!(reset, switched);
+
+        // A new database (`serve --reset`) comes with one of its own.
+        let (_other, fresh) = service().await;
+        assert_ne!(fresh.session_stamp().await.unwrap(), reset);
     }
 }

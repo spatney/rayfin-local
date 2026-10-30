@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -17,8 +18,8 @@ export function removeStaleToml(): void {
 
 /**
  * The fixture app (`tests/fixtures/apps/basic`) on a fresh database, with fake Power BI and Fabric
- * tokens and its connector pointed at the mock Power BI through a `rayfin-local.toml`, which
- * stop() takes out again.
+ * tokens, its connector pointed at the mock Power BI through a `rayfin-local.toml`, which
+ * stop() takes out again, and the control API on.
  */
 export async function startFixtureSuite(): Promise<RunningSuite> {
   await assertNotServed(FIXTURE_DIR);
@@ -29,6 +30,7 @@ export async function startFixtureSuite(): Promise<RunningSuite> {
     RAYFIN_LOCAL_TOKEN_POWERBI: fakeToken('powerbi'),
     RAYFIN_LOCAL_TOKEN_FABRIC: fakeToken('fabric'),
   };
+  const controlToken = randomBytes(24).toString('hex');
   const mock = await MockPowerBi.start(tokens.RAYFIN_LOCAL_TOKEN_POWERBI);
   removeStaleToml();
   const toml = new ProjectFile(TOML_PATH);
@@ -43,7 +45,11 @@ export async function startFixtureSuite(): Promise<RunningSuite> {
   };
   try {
     toml.write(`${TOML_HEADER}\n[connectors]\npowerbi_base_url = "${mock.baseUrl}"\n`);
-    serve = await ServeProcess.start({ projectDir: FIXTURE_DIR, label: 'fixture', env: tokens });
+    serve = await ServeProcess.start({
+      projectDir: FIXTURE_DIR,
+      label: 'fixture',
+      env: { ...tokens, RAYFIN_LOCAL_CONTROL_TOKEN: controlToken },
+    });
     return {
       info: {
         name: 'fixture',
@@ -52,6 +58,7 @@ export async function startFixtureSuite(): Promise<RunningSuite> {
         user: newUser(),
         tokens,
         mockPowerBiUrl: mock.baseUrl,
+        controlToken,
       },
       stop,
     };
