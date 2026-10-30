@@ -198,7 +198,7 @@ A `fatal` error is followed by `stopped`; other errors leave `serve` running.
 | `node-too-old` | error | Node.js is older than 20. `details`: `{"version"}`. |
 | `project-not-found` | error | No `rayfin/rayfin.yml` in the folder or its parents. |
 | `config-invalid` | error | `rayfin.yml`, `rayfin-local.toml`, `.rayfin-local/state.json`, the functions' folder, `package.json` or `local.settings.json`, or the control token is invalid. Not fatal when `rayfin.yml` or `rayfin-local.toml` changes while serving: the previous configuration stays in use. |
-| `packages-missing` | error | The project's npm packages (or the functions') aren't installed. `details`: `{"dir"}`, the folder to run `npm install` in. For the functions' packages it is not fatal: it comes before their build, which then fails. |
+| `packages-missing` | error | The project's npm packages (or the functions') aren't installed. `details`: `{"dir"}`, the folder to run `npm install` in. For the functions' packages it is not fatal: it comes before their build, which then fails, once they have stayed missing for five seconds (an `npm install` that is still running when the functions start doesn't raise it). |
 | `sdk-unsupported` | warning | The app's Rayfin packages are outside `sdk.supported`. `details`: `{"version","supported"}`. |
 | `analysis-failed` | error | The model could not be analyzed, or `rayfin-local.toml` refuses it (`[fabric] anonymous_data_access = false` and entities that grant `anonymous`). |
 | `schema-refused` | error | See [`schema`](#schema). `details`: `{"losses"}`. |

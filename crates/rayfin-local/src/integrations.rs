@@ -478,7 +478,7 @@ pub async fn start_functions(
     config.on_state = Some(Arc::new(move |state: &FunctionsState| {
         report_functions_state(state, &warned);
     }));
-    if let Some(missing) = missing_packages(functions_dir) {
+    if let Some(missing) = still_missing_packages(functions_dir, PACKAGES_GRACE).await {
         let dir = functions_dir.display().to_string();
         events::emit(Event::Error(events::ErrorEvent {
             code: ErrorCode::PackagesMissing,
@@ -562,6 +562,25 @@ fn missing_packages(functions_dir: &Path) -> Option<Vec<String>> {
         .cloned()
         .collect();
     (!missing.is_empty()).then_some(missing)
+}
+
+/// How long the functions' missing packages get to appear before they are reported: an
+/// `npm install` still running when the functions start writes them moments later.
+const PACKAGES_GRACE: Duration = Duration::from_secs(5);
+/// How often [`still_missing_packages`] looks again.
+const PACKAGES_RECHECK: Duration = Duration::from_millis(250);
+
+/// [`missing_packages`], once they have stayed missing for `grace`; `None` as soon as they are
+/// all there.
+async fn still_missing_packages(functions_dir: &Path, grace: Duration) -> Option<Vec<String>> {
+    let deadline = Instant::now() + grace;
+    loop {
+        let missing = missing_packages(functions_dir)?;
+        if Instant::now() >= deadline {
+            return Some(missing);
+        }
+        tokio::time::sleep(PACKAGES_RECHECK).await;
+    }
 }
 
 /// What the function host gets for the secrets: the values of the secrets `rayfin.yml` declares
@@ -1050,5 +1069,40 @@ connectors:
         assert_eq!(backoff.next(at(100)), Some(Duration::from_secs(2)));
         assert_eq!(backoff.next(at(130)), Some(Duration::from_secs(2)));
         assert_eq!(backoff.next(at(400)), Some(Duration::from_secs(1)));
+    }
+
+    #[tokio::test]
+    async fn packages_an_install_writes_moments_later_are_not_reported() {
+        fn install(functions: &Path, name: &str) {
+            let package = functions.join("node_modules").join(name);
+            std::fs::create_dir_all(&package).unwrap();
+            std::fs::write(package.join("package.json"), "{}").unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let functions = dir.path().to_owned();
+        std::fs::write(
+            functions.join("package.json"),
+            r#"{"dependencies": {"rl-test-a": "1"}, "devDependencies": {"rl-test-b": "1"}}"#,
+        )
+        .unwrap();
+        install(&functions, "rl-test-a");
+        let grace = Duration::from_millis(600);
+        assert_eq!(
+            still_missing_packages(&functions, grace).await,
+            Some(vec!["rl-test-b".to_owned()])
+        );
+
+        let installing = tokio::spawn({
+            let functions = functions.clone();
+            async move {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                install(&functions, "rl-test-b");
+            }
+        });
+        assert_eq!(
+            still_missing_packages(&functions, Duration::from_secs(10)).await,
+            None
+        );
+        installing.await.unwrap();
     }
 }
