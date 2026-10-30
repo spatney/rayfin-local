@@ -1,0 +1,4 @@
+node_modules/
+.rayfin-local/
+rayfin/.temp/
+*.tsbuildinfo

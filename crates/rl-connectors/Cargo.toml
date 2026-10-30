@@ -11,21 +11,27 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+rl-graphql.workspace = true
 rl-model.workspace = true
 rl-tokens.workspace = true
 axum.workspace = true
 base64.workspace = true
 bytes.workspace = true
 futures-util.workspace = true
+parking_lot.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+tiberius.workspace = true
+time.workspace = true
 tokio.workspace = true
+tokio-util = { workspace = true, features = ["compat"] }
 tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 tower.workspace = true
 http-body-util.workspace = true
+tempfile.workspace = true

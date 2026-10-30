@@ -8,7 +8,7 @@ Each service has a local stand-in:
 - **Data API:** a DAB-compatible GraphQL API.
 - **Auth:** username/password, with an emulated Fabric sign-in popup.
 - **Functions:** the app's own UDF code on a Node host.
-- **Connectors:** semantic models queried through Power BI with the developer's token.
+- **Connectors:** semantic models queried through Power BI, and SQL databases, warehouses and SQL analytics endpoints over TDS, with the developer's token.
 - **Storage:** the local file system.
 
 ## Layout
@@ -20,11 +20,11 @@ Each service has a local stand-in:
 | `crates/rl-node` | Node discovery, embedded JS helpers (`run_helper`), supervised process trees (`ManagedChild`). |
 | `crates/rl-model` | The app model (IR) from `@microsoft/rayfin-core`'s analyzer; `Caller`/`CallerResolver` (request identity). |
 | `crates/rl-db` | The SQLite handle (`Db`), component migrations, entity DDL and schema migrations. |
-| `crates/rl-graphql` | `POST /graphql`: DAB-compatible queries, mutations, aggregations and policies over SQLite. |
+| `crates/rl-graphql` | `POST /graphql`: DAB-compatible queries, mutations, aggregations and policies over SQLite; the same front end over T-SQL (`tsql`) for SQL connectors. |
 | `crates/rl-auth` | `/api/auth/v1/*`, JWKS, runtime settings, the sign-in popup portal, the Entra exchange; implements `CallerResolver`. |
 | `crates/rl-tokens` | `TokenSource`: Azure tokens for the developer (az CLI, Rayfin CLI login, env overrides); `Audience` scopes. |
 | `crates/rl-functions` | Functions build/watch, `runtimemetadata.json`, the Node function host, `/functions/<name>/invoke`. |
-| `crates/rl-connectors` | `/connector-invoke/<name>`: `fabric-semanticmodel` through Power BI; 501 for other types. |
+| `crates/rl-connectors` | `/connector-invoke/<name>`: `fabric-semanticmodel` through Power BI; `/connectors/<name>/graphql`: SQL connectors over TDS (see `docs/sql-connectors.md`); 501 for other types. |
 | `crates/rl-storage` | `/api/storage/*` on the local file system. |
 | `crates/rl-frontend` | The project's Vite dev server or static build, with the local Rayfin env. |
 | `crates/rl-server` | Router composition: `/rayfin.config.json`, CORS, publishable-key and Host checks, static hosting. |

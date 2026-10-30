@@ -27,7 +27,7 @@ use crate::plan::{
     self, Collected, ConnectionField, ConnectionPlan, Ctx, FieldPlan, ObjectPlan, collect_fields,
 };
 use crate::schema::{Resolver, Schema, TypeRef};
-use crate::sql::{CmpOp, Operand, Pred, Sql, column_sql, quote_ident};
+use crate::sql::{Pred, Sql, column_sql, quote_ident};
 use crate::value::Source;
 use crate::{DataApiSettings, Snapshot};
 
@@ -60,80 +60,34 @@ pub async fn execute(
     settings: &DataApiSettings,
     request: Request,
 ) -> Outcome {
-    if nesting_depth(&request.query) > MAX_DOCUMENT_DEPTH {
-        return syntax_error("The GraphQL document is nested too deeply.", Pos::default());
-    }
-    let doc = match async_graphql_parser::parse_query(&request.query) {
-        Ok(doc) => doc,
-        Err(error) => {
-            let pos = error.positions().next().unwrap_or_default();
-            let message = match &error {
-                async_graphql_parser::Error::Syntax { message, .. } => message
-                    .lines()
-                    .last()
-                    .unwrap_or(message)
-                    .trim_start_matches("= ")
-                    .to_owned(),
-                other => other.to_string(),
-            };
-            return syntax_error(&message, pos);
-        }
+    let parsed = match prepare(&snapshot.schema, settings, &request) {
+        Ok(parsed) => parsed,
+        Err(outcome) => return outcome,
     };
     let source = Source::new(&request.query);
-    let schema = &snapshot.schema;
-    let errors = crate::validate::validate(schema, &doc, &source, settings.allow_introspection);
-    if !errors.is_empty() {
-        return response(None, errors);
-    }
-    let op = match select_operation(&doc, request.operation_name.as_deref()) {
-        Ok(op) => op,
-        Err(error) => return response(None, vec![error]),
-    };
-    let variables = match crate::validate::coerce_variables(schema, op, &source, &request.variables)
-    {
-        Ok(variables) => variables,
-        Err(error) => return response(None, vec![error]),
-    };
-    let var_types: HashMap<String, (TypeRef, bool)> = op
-        .variable_definitions
-        .iter()
-        .map(|d| {
-            let ty = TypeRef::from_parsed(&d.node.var_type.node);
-            (
-                d.node.name.node.to_string(),
-                (ty, d.node.default_value.is_some()),
-            )
-        })
-        .collect();
-
+    let op = parsed.operation();
     let model = &snapshot.model;
+    let schema = &snapshot.schema;
     // Validation refused operations whose root type the schema lacks (subscriptions).
     if op.ty == OperationType::Mutation {
         let planned = {
-            let ctx = Ctx::new(
-                model, schema, caller, settings, &doc, &source, &variables, &var_types,
-            );
+            let ctx = parsed.ctx(model, schema, caller, settings, &source);
             crate::mutation::plan(&ctx, &op.selection_set.node)
         };
         return crate::mutation::execute(model, db, planned).await;
     }
     let roots = {
-        let ctx = Ctx::new(
-            model, schema, caller, settings, &doc, &source, &variables, &var_types,
-        );
-        let fields = collect_fields(&ctx, &schema.query_type, &[&op.selection_set.node]);
-        if !caller.is_authenticated()
-            && requires_authentication(model, schema, &schema.query_type, &fields)
-        {
-            return Outcome::AuthenticationRequired;
+        let ctx = parsed.ctx(model, schema, caller, settings, &source);
+        match plan_query(&ctx, op) {
+            Ok(roots) => roots,
+            Err(outcome) => return outcome,
         }
-        fields
-            .iter()
-            .map(|field| plan_root(&ctx, field))
-            .collect::<Vec<_>>()
     };
 
-    let statements: Vec<Sql> = roots.iter().filter_map(|r| r.sql.clone()).collect();
+    let statements: Vec<Sql> = roots
+        .iter()
+        .filter_map(|root| sqlite_statement(model, root))
+        .collect();
     let results = if statements.is_empty() {
         Ok(Vec::new())
     } else {
@@ -152,23 +106,164 @@ pub async fn execute(
             Vec::new().into_iter()
         }
     };
+    let rows = roots
+        .iter()
+        .map(|root| {
+            if !root.runs_statement() {
+                return None;
+            }
+            Some(match results.next() {
+                Some(Ok(rows)) => Ok(rows.iter().map(|row| parse_row(row)).collect()),
+                Some(Err(error)) => {
+                    tracing::warn!(field = %root.key, "data API statement failed: {error}");
+                    Err(database_error())
+                }
+                None => Err(database_error()),
+            })
+        })
+        .collect();
+    shape_query(model, roots, rows)
+}
 
+/// DAB's answer to a statement the database failed.
+pub(crate) fn database_error() -> GraphQlError {
+    GraphQlError::dab(
+        codec::DATABASE_ERROR_MESSAGE,
+        codes::DATABASE_OPERATION_FAILED,
+    )
+}
+
+/// A request parsed, validated and its variables coerced: what [`Ctx`] borrows.
+pub(crate) struct Parsed {
+    doc: async_graphql_parser::types::ExecutableDocument,
+    operation_name: Option<String>,
+    variables: Map<String, Json>,
+    var_types: HashMap<String, (TypeRef, bool)>,
+}
+
+impl Parsed {
+    /// The operation to run ([`prepare`] checked it exists).
+    pub(crate) fn operation(&self) -> &async_graphql_parser::types::OperationDefinition {
+        select_operation(&self.doc, self.operation_name.as_deref())
+            .expect("prepare selected the operation")
+    }
+
+    /// The planner's context for `caller`; `source` is the request's query.
+    pub(crate) fn ctx<'a>(
+        &'a self,
+        model: &'a AppModel,
+        schema: &'a Schema,
+        caller: &'a Caller,
+        settings: &'a DataApiSettings,
+        source: &'a Source<'a>,
+    ) -> Ctx<'a> {
+        Ctx::new(
+            model,
+            schema,
+            caller,
+            settings,
+            &self.doc,
+            source,
+            &self.variables,
+            &self.var_types,
+        )
+    }
+}
+
+/// Parses and validates `request` against `schema` and coerces its variables, as Hot Chocolate
+/// does before executing; `Err` is the answer to a request that doesn't get that far.
+pub(crate) fn prepare(
+    schema: &Schema,
+    settings: &DataApiSettings,
+    request: &Request,
+) -> Result<Parsed, Outcome> {
+    if nesting_depth(&request.query) > MAX_DOCUMENT_DEPTH {
+        return Err(syntax_error(
+            "The GraphQL document is nested too deeply.",
+            Pos::default(),
+        ));
+    }
+    let doc = match async_graphql_parser::parse_query(&request.query) {
+        Ok(doc) => doc,
+        Err(error) => {
+            let pos = error.positions().next().unwrap_or_default();
+            let message = match &error {
+                async_graphql_parser::Error::Syntax { message, .. } => message
+                    .lines()
+                    .last()
+                    .unwrap_or(message)
+                    .trim_start_matches("= ")
+                    .to_owned(),
+                other => other.to_string(),
+            };
+            return Err(syntax_error(&message, pos));
+        }
+    };
+    let source = Source::new(&request.query);
+    let errors = crate::validate::validate(schema, &doc, &source, settings.allow_introspection);
+    if !errors.is_empty() {
+        return Err(response(None, errors));
+    }
+    let op = match select_operation(&doc, request.operation_name.as_deref()) {
+        Ok(op) => op,
+        Err(error) => return Err(response(None, vec![error])),
+    };
+    let variables = match crate::validate::coerce_variables(schema, op, &source, &request.variables)
+    {
+        Ok(variables) => variables,
+        Err(error) => return Err(response(None, vec![error])),
+    };
+    let var_types: HashMap<String, (TypeRef, bool)> = op
+        .variable_definitions
+        .iter()
+        .map(|d| {
+            let ty = TypeRef::from_parsed(&d.node.var_type.node);
+            (
+                d.node.name.node.to_string(),
+                (ty, d.node.default_value.is_some()),
+            )
+        })
+        .collect();
+    Ok(Parsed {
+        doc,
+        operation_name: request.operation_name.clone(),
+        variables,
+        var_types,
+    })
+}
+
+/// Plans the root fields of a query; `Err` is the 401 for a token-less request that needs a
+/// signed-in user.
+pub(crate) fn plan_query(
+    ctx: &Ctx<'_>,
+    op: &async_graphql_parser::types::OperationDefinition,
+) -> Result<Vec<QueryRoot>, Outcome> {
+    let fields = collect_fields(ctx, &ctx.schema.query_type, &[&op.selection_set.node]);
+    if !ctx.caller.is_authenticated()
+        && requires_authentication(ctx.model, ctx.schema, &ctx.schema.query_type, &fields)
+    {
+        return Err(Outcome::AuthenticationRequired);
+    }
+    Ok(fields.iter().map(|field| plan_root(ctx, field)).collect())
+}
+
+/// Shapes the answer of a query: `rows` holds, per root field, its rows (each a JSON row as
+/// the SQL builds it) or the error its statement ran into; `None` for root fields without a
+/// statement.
+pub(crate) fn shape_query(
+    model: &AppModel,
+    roots: Vec<QueryRoot>,
+    rows: Vec<Option<Result<Vec<Json>, GraphQlError>>>,
+) -> Outcome {
     let mut shaper = Shaper {
         model,
         errors: Vec::new(),
     };
     let mut data = Map::new();
     let mut data_null = false;
-    for root in roots {
+    for (root, rows) in roots.into_iter().zip(rows) {
         let path = PathSegment::Key(root.key.clone());
-        let rows = match &root.sql {
-            Some(_) => match results.next() {
-                Some(Ok(rows)) => Ok(rows),
-                Some(Err(error)) => Err(error),
-                None => Err("the database is unavailable".to_owned()),
-            },
-            None => Ok(Vec::new()),
-        };
+        let rows = rows.unwrap_or_else(|| Ok(Vec::new()));
         let value = match (root.kind, rows) {
             (RootKind::Typename, _) => Some(json!("Query")),
             (RootKind::Failed(error), _) => {
@@ -176,21 +271,13 @@ pub async fn execute(
                 None
             }
             (_, Err(error)) => {
-                tracing::warn!(field = %root.key, "data API statement failed: {error}");
-                let error = GraphQlError::dab(
-                    codec::DATABASE_ERROR_MESSAGE,
-                    codes::DATABASE_OPERATION_FAILED,
-                );
                 shaper.errors.push(error.with_path(vec![path]));
                 None
             }
-            (RootKind::List(plan), Ok(rows)) => {
-                let rows: Vec<Json> = rows.iter().map(|r| parse_row(r)).collect();
-                shaper.connection(&plan, &rows, &mut vec![path])
-            }
-            (RootKind::ByPk(plan), Ok(rows)) => match rows.first() {
+            (RootKind::List(plan), Ok(rows)) => shaper.connection(&plan, &rows, &mut vec![path]),
+            (RootKind::ByPk(plan, _), Ok(rows)) => match rows.first() {
                 None => Some(Json::Null),
-                Some(row) => shaper.object(&plan, &parse_row(row), &mut vec![path]),
+                Some(row) => shaper.object(&plan, row, &mut vec![path]),
             },
         };
         match value {
@@ -326,28 +413,35 @@ pub(crate) fn requires_authentication(
     })
 }
 
-struct Root {
-    key: String,
-    pos: Pos,
-    nullable: bool,
-    kind: RootKind,
-    sql: Option<Sql>,
+/// A planned root field of a query.
+pub(crate) struct QueryRoot {
+    pub key: String,
+    pub pos: Pos,
+    pub nullable: bool,
+    pub kind: RootKind,
 }
 
-enum RootKind {
+impl QueryRoot {
+    /// Whether the root field reads the database.
+    pub(crate) fn runs_statement(&self) -> bool {
+        matches!(self.kind, RootKind::List(_) | RootKind::ByPk(..))
+    }
+}
+
+pub(crate) enum RootKind {
     Typename,
     List(ConnectionPlan),
-    ByPk(ObjectPlan),
+    /// The object and its `WHERE`: the key, and the read policy.
+    ByPk(ObjectPlan, Pred),
     Failed(GraphQlError),
 }
 
-fn plan_root(ctx: &Ctx<'_>, field: &Collected<'_>) -> Root {
-    let mut root = Root {
+fn plan_root(ctx: &Ctx<'_>, field: &Collected<'_>) -> QueryRoot {
+    let mut root = QueryRoot {
         key: field.key.clone(),
         pos: field.pos(),
         nullable: true,
         kind: RootKind::Typename,
-        sql: None,
     };
     if field.name() == "__typename" {
         return root;
@@ -364,24 +458,16 @@ fn plan_root(ctx: &Ctx<'_>, field: &Collected<'_>) -> Root {
     };
     root.nullable = !def.ty.is_non_null();
     let planned = match def.resolver {
-        Resolver::List(index) => {
-            plan_list(ctx, def, field, index).map(|(plan, sql)| (RootKind::List(plan), sql))
-        }
+        Resolver::List(index) => plan_list(ctx, def, field, index).map(RootKind::List),
         Resolver::ByPk(index) => {
-            plan_by_pk(ctx, def, field, index).map(|(plan, sql)| (RootKind::ByPk(plan), sql))
+            plan_by_pk(ctx, def, field, index).map(|(plan, filter)| RootKind::ByPk(plan, filter))
         }
         _ => Err(GraphQlError::dab(
             messages::DATABASE_ERROR,
             codes::UNEXPECTED_ERROR,
         )),
     };
-    match planned {
-        Ok((kind, sql)) => {
-            root.kind = kind;
-            root.sql = Some(sql);
-        }
-        Err(error) => root.kind = RootKind::Failed(error),
-    }
+    root.kind = planned.unwrap_or_else(RootKind::Failed);
     root
 }
 
@@ -390,22 +476,13 @@ fn plan_list(
     def: &crate::schema::FieldDef,
     field: &Collected<'_>,
     index: usize,
-) -> Result<(ConnectionPlan, Sql), GraphQlError> {
+) -> Result<ConnectionPlan, GraphQlError> {
     let entity = &ctx.model.entities[index];
     let Some(grant) = access::grant(entity, ctx.caller.role(), Action::Read) else {
         return Err(GraphQlError::not_authorized());
     };
     let args = ctx.arguments(def, &field.fields[0].node)?;
-    let plan = plan::connection_plan(ctx, index, grant, &field.sub_sets(), &args, None)?;
-    let mut sql = Sql::default();
-    sql.push("SELECT ");
-    if crate::aggregate::is_group_by(&plan) {
-        crate::aggregate::connection_sql(&mut sql, ctx.model, &plan);
-        return Ok((plan, sql));
-    }
-    item_array(&mut sql, ctx.model, &plan);
-    from_where_order(&mut sql, ctx.model, &plan);
-    Ok((plan, sql))
+    plan::connection_plan(ctx, index, grant, &field.sub_sets(), &args, None)
 }
 
 fn plan_by_pk(
@@ -413,38 +490,45 @@ fn plan_by_pk(
     def: &crate::schema::FieldDef,
     field: &Collected<'_>,
     index: usize,
-) -> Result<(ObjectPlan, Sql), GraphQlError> {
+) -> Result<(ObjectPlan, Pred), GraphQlError> {
     let entity = &ctx.model.entities[index];
     let Some(grant) = access::grant(entity, ctx.caller.role(), Action::Read) else {
         return Err(GraphQlError::not_authorized());
     };
     let args = ctx.arguments(def, &field.fields[0].node)?;
-    let pk = entity.primary_key_column();
     let alias = ctx.alias();
-    let id = match args.get(&pk.field) {
-        Some(crate::coerce::Input::Scalar(json)) => codec::encode_operand(&pk.kind, json)
-            .map_err(|e| GraphQlError::dab(e.to_string(), codes::BAD_REQUEST))?,
-        _ => rusqlite::types::Value::Null,
-    };
-    let mut preds = vec![Pred::Cmp(
-        Operand::column(&alias, &pk.name),
-        CmpOp::Eq,
-        Operand::Value(id),
-    )];
+    let mut preds = vec![plan::key_predicate(entity, &alias, &args)?];
     if let Some(policy) = crate::policy::read_filter(entity, ctx.caller, &alias)? {
         preds.push(policy);
     }
-    let plan = plan::object_plan(ctx, index, alias.clone(), &field.sub_sets(), Some(grant))?;
+    let plan = plan::object_plan(ctx, index, alias, &field.sub_sets(), Some(grant))?;
+    Ok((plan, Pred::all(preds)))
+}
+
+/// The SQLite statement of a root field, `None` when it reads nothing.
+fn sqlite_statement(model: &AppModel, root: &QueryRoot) -> Option<Sql> {
     let mut sql = Sql::default();
     sql.push("SELECT ");
-    object_json(&mut sql, ctx.model, &plan);
-    sql.push(" FROM ")
-        .push(&quote_ident(&entity.table))
-        .push(" AS ")
-        .push(&alias)
-        .push(" WHERE ");
-    Pred::all(preds).render(&mut sql);
-    Ok((plan, sql))
+    match &root.kind {
+        RootKind::List(plan) if crate::aggregate::is_group_by(plan) => {
+            crate::aggregate::connection_sql(&mut sql, model, plan);
+        }
+        RootKind::List(plan) => {
+            item_array(&mut sql, model, plan);
+            from_where_order(&mut sql, model, plan);
+        }
+        RootKind::ByPk(plan, filter) => {
+            object_json(&mut sql, model, plan);
+            sql.push(" FROM ")
+                .push(&quote_ident(&model.entities[plan.entity].table))
+                .push(" AS ")
+                .push(&plan.alias)
+                .push(" WHERE ");
+            filter.render(&mut sql);
+        }
+        RootKind::Typename | RootKind::Failed(_) => return None,
+    }
+    Some(sql)
 }
 
 /// `json_object('key', value, ...)` of an object selection.
@@ -592,12 +676,23 @@ pub(crate) fn shape_object(
     key: &str,
     errors: &mut Vec<GraphQlError>,
 ) -> Option<Json> {
+    shape_json_object(model, plan, &parse_row(row), key, errors)
+}
+
+/// [`shape_object`] of a row already parsed.
+pub(crate) fn shape_json_object(
+    model: &AppModel,
+    plan: &ObjectPlan,
+    row: &Json,
+    key: &str,
+    errors: &mut Vec<GraphQlError>,
+) -> Option<Json> {
     let mut shaper = Shaper {
         model,
         errors: std::mem::take(errors),
     };
     let mut path = vec![PathSegment::Key(key.to_owned())];
-    let value = shaper.object(plan, &parse_row(row), &mut path);
+    let value = shaper.object(plan, row, &mut path);
     *errors = shaper.errors;
     value
 }

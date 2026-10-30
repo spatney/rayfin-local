@@ -22,7 +22,7 @@ rayfin-local serve
   API         http://localhost:7171
   Entities    2 entities
   Functions   3 functions (askAnalyst, getBacklog, getModelRefreshStatus)
-  Connectors  missioncontroltelemetry
+  Connectors  missioncontroltelemetry (fabric-semanticmodel, as you)
   Storage     off (services.storage is disabled in rayfin.yml)
   Data        C:\code\my-rayfin-app\.rayfin-local
   Sign in     Fabric sign-in opens a local page: create any account there, or continue as your Azure identity
@@ -53,7 +53,7 @@ rayfin-local serve
 - **Disposable data.** Each project gets its own SQLite database; start over with `--reset`.
 - **A fast loop.** Entity changes migrate the database while the app runs, functions rebuild and reload, and Vite hot-reloads the UI.
 - **Production code, unmodified.** Your app, the Rayfin SDK, your entity decorators and your functions run as they are; rayfin-local implements the backend side of the SDK's contract.
-- **Real cloud data where you want it.** Functions and semantic-model connectors call real Azure DevOps, Azure AI, Fabric and Power BI APIs with your own Azure sign-in.
+- **Real cloud data where you want it.** Functions and connectors call real Azure DevOps, Azure AI, Fabric and Power BI APIs and query real Fabric SQL databases, warehouses and Lakehouse SQL endpoints with your own Azure sign-in.
 - **Easy end-to-end tests.** One command starts the whole app, and tokens can be fixed with environment variables.
 
 rayfin-local is for local development and testing; deploy with `npx rayfin up` as usual.
@@ -78,6 +78,7 @@ flowchart LR
   end
   cloud["Azure DevOps, Azure AI, Fabric APIs"]
   pbi["Power BI semantic models"]
+  fsql[("Fabric SQL databases, warehouses, SQL endpoints")]
 
   browser --> vite
   browser --> backend
@@ -88,11 +89,12 @@ flowchart LR
   fns --> host
   host -- "your az login" --> cloud
   conn -- "your az login" --> pbi
+  conn -- "your az login" --> fsql
 ```
 
 `rayfin-local serve`:
 
-1. Reads `rayfin/rayfin.yml` and analyzes the entities in `rayfin/data` with your project's own `@microsoft/rayfin-core`, as the Rayfin CLI does.
+1. Reads `rayfin/rayfin.yml` and analyzes the entities in `rayfin/data` (and SQL connectors' entities in `rayfin/connectors`) with your project's own `@microsoft/rayfin-core`, as the Rayfin CLI does.
    A data package with `services.data.buildCommand` (a workspace layout with `services.data.path`) is built first, as the CLI does.
 2. Creates or migrates a SQLite database in `.rayfin-local/`.
 3. Starts one backend that answers every route the SDK calls: auth, `/graphql`, functions, connectors and storage, with your `@role` policies enforced.
@@ -114,9 +116,10 @@ flowchart LR
 | Functions, `ctx.getDataClient()`, secrets | Yes | Rebuilt and reloaded when the sources change. |
 | Function connections (`ctx.Tokens.ADO`, `.AzureAI`, `.Fabric`, `.Sql`, `.Storage`) | As you | Tokens for your own Azure account, not the app's identity. |
 | `fabric-semanticmodel` connectors | As you | Real Power BI queries with your token. |
+| SQL connectors (`fabric-sqldatabase`, `fabric-warehouse`, `fabric-sqlanalytics`) | As you | The real Fabric database, queried and written as you, with your entities' `@role` grants and policies; aggregations don't run yet. See [docs/sql-connectors.md](docs/sql-connectors.md). |
 | Storage (`@blob` folders) | Yes | Files on disk, with the folders' rules. |
 | Static hosting | Yes | `serve --static` builds the app once and serves it from the backend. |
-| SQL connectors (warehouse, SQL database, lakehouse) and Kusto | No | They answer 501. |
+| `kusto` connectors | No | They answer 501. |
 | Passwordless sign-in, email verification, password-reset email | No | |
 | GraphQL introspection | No | |
 
@@ -175,7 +178,8 @@ To uninstall, delete the binary. On Windows, also remove `%LOCALAPPDATA%\Program
 - **Node.js 20 or later** on `PATH` (or `RAYFIN_LOCAL_NODE` set to the `node` executable).
   rayfin-local runs your project's own packages with it: `@microsoft/rayfin-core`, `vite`, `typescript` and your functions.
 - **Your project's npm packages:** run `npm install` in the project, and in `rayfin/functions` when it has its own `package.json`.
-- **Optional: a signed-in Azure CLI (`az login`) or Rayfin CLI (`npx rayfin login`)**, for functions that use `ctx.Tokens`, for semantic-model connectors, and for "Continue as" on the sign-in page.
+- **Optional: a signed-in Azure CLI (`az login`) or Rayfin CLI (`npx rayfin login`)**, for functions that use `ctx.Tokens`, for connectors, and for "Continue as" on the sign-in page.
+  SQL connectors also need your account to have access to their Fabric items, and TCP port 1433 open to Fabric.
 
 ## Quick start
 
@@ -212,13 +216,14 @@ Its port is remembered per project; when it is busy, rayfin-local takes the next
 | `/api/projectRuntimeSettings` | The auth settings from `rayfin.yml`. |
 | `/graphql` | The data API. |
 | `/functions/<name>/invoke` | Your functions. |
-| `/connector-invoke/<name>` | Your connectors. |
+| `/connector-invoke/<name>` | Your semantic-model connectors. |
+| `/connectors/<name>/graphql` | Your SQL connectors' entities. |
 | `/api/storage/*` | Storage. |
 | `/.rayfin-local/portal` | The local "Sign in with Fabric" page. |
 | `/.rayfin-local/portal/embed` | The local Fabric host, for apps that sign in embedded. |
 | `/.rayfin-local/health` | `{"ok":true}` once the backend is up. |
 
-As on Fabric, `/api/*`, `/graphql`, `/functions/*` and `/connector-invoke/*` need an `X-Publishable-Key` header; the local key is in `/rayfin.config.json`.
+As on Fabric, `/api/*`, `/graphql`, `/functions/*`, `/connector-invoke/*` and `/connectors/*` need an `X-Publishable-Key` header; the local key is in `/rayfin.config.json`.
 
 The app runs on its own Vite dev server, with your `vite.config` and plugins, on `RAYFIN_PUBLIC_FRONTEND_PORT` from `rayfin/.env` (default 5173).
 rayfin-local starts Vite itself, never `npm run dev`, which may call `rayfin up` or `rayfin dev`.
@@ -244,11 +249,12 @@ Users are local: they live in `.rayfin-local/db.sqlite`, not in Entra ID.
 
 ## Identity and Azure tokens
 
-Deployed, functions get tokens for the app's identity, and delegated connectors run as the signed-in user.
-Locally, both run as **you, the developer**:
+Deployed, functions get tokens for the app's identity, and connectors run as the app (`auth: application`) or as the signed-in user (`auth: delegated`).
+Locally, all of them run as **you, the developer**:
 
 - `ctx.Tokens.<Audience>` in functions (`Sql`, `Storage`, `Fabric`, `AzureAI`, `ADO`) holds a token for your account.
 - `fabric-semanticmodel` connectors query Power BI with your token (the app user must still be signed in).
+- SQL connectors find their Fabric item with your `Fabric` token and sign in to its database with your `Sql` token, even for `auth: application` connectors; your entities' `@role` grants and policies still apply to the app's signed-in user.
 
 A function or query can therefore reach exactly what your account can reach.
 
@@ -267,9 +273,9 @@ Each audience has a default scope, which `[tokens.scopes]` in `rayfin-local.toml
 
 | Audience | Default scope |
 | --- | --- |
-| `Sql` | `https://database.windows.net/.default` |
+| `Sql` (functions, SQL connectors) | `https://database.windows.net/.default` |
 | `Storage` | `https://storage.azure.com/.default` |
-| `Fabric` | `https://api.fabric.microsoft.com/.default` |
+| `Fabric` (functions, finding SQL connectors' databases) | `https://api.fabric.microsoft.com/.default` |
 | `AzureAI` | `https://ai.azure.com/.default` |
 | `ADO` | `499b84ac-1321-427f-aa17-267ca6975798/.default` |
 | `PowerBI` (connectors, "Continue as") | `https://analysis.windows.net/powerbi/api/.default` |
@@ -294,7 +300,7 @@ Outside it, rayfin-local writes only build output: what your build commands prod
 | `db.sqlite` | The app's data, users and sessions. |
 | `keys/` | Token and storage signing keys. |
 | `storage/` | Uploaded files. |
-| `cache/` | Analysis output and the helper scripts rayfin-local runs with Node.js. |
+| `cache/` | Analysis output (the entities' and the SQL connectors'), where SQL connectors' databases are (`cache/connectors/`), and the helper scripts rayfin-local runs with Node.js. |
 | `state.json` | The local app id, publishable key, workspace, item and tenant ids, and the last ports. |
 | `secrets.json` | Local secret values. |
 | `serve.lock`, `serve.json` | Keep a second `serve` (or a `reset`) off the project while one runs. |
@@ -314,7 +320,7 @@ Rebuilding the package yourself also counts as a change.
 - Changes that would lose data are refused with a list of exactly what would be lost: dropped entities or fields that hold values, values that can't be converted to a new type, required fields without a default.
   Restart with `serve --force-schema` to apply them anyway (a `serve` started with it also applies them as you edit), or `serve --reset` to start over.
 
-Changes to `rayfin.yml` itself (services, auth settings, connectors, secrets) and to the storage folders apply on the next start; `serve` prints a reminder when it sees them.
+Changes to `rayfin.yml` itself (services, auth settings, connectors, secrets), to the storage folders and to SQL connectors' entities (`rayfin/connectors/`) apply on the next start; `serve` prints a reminder when it sees changes to `rayfin.yml` and the storage folders.
 
 `rayfin-local schema` prints the app model and the SQLite schema derived from `rayfin/data`.
 
@@ -440,10 +446,15 @@ Run `rayfin-local doctor` first: it checks what `serve` needs and says what to f
   It signs in only inside a Fabric frame: open the banner's **Embedded** URL (`/.rayfin-local/portal/embed` on the backend) instead of the App URL.
 - **"Continue as" is missing from the sign-in page.**
   It needs a loopback `--host` and a token from `az login` or the Rayfin CLI's login.
+- **A SQL connector's queries fail.**
+  The error's message (also in `serve`'s output) says what to do: run `az login`, check `config.workspaceId` and `config.itemId` in `rayfin.yml`, ask the item's owner for access for your account (rayfin-local connects as you, even for `auth: application` connectors), or open TCP port 1433 to Fabric.
+  `DatabaseOperationFailed` with an `extensions.detail` such as `Invalid column name …` means an entity file no longer matches its table: regenerate it from a fresh `metadata.json` (`rayfin connector remove`, then `connector add`).
+  [docs/sql-connectors.md](docs/sql-connectors.md#when-it-fails) lists the failures.
 
 ## More documentation
 
 - [Architecture](docs/architecture.md): how rayfin-local works, its design principles, crates and request flows.
+- [SQL connectors](docs/sql-connectors.md): Category A connectors locally, their contract, schema, database and identity.
 - [Differences from Fabric](docs/differences.md): what is supported, what differs and what is missing, per SDK surface.
 - [Development](docs/development.md): building, testing and releasing rayfin-local.
 

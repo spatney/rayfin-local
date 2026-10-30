@@ -26,6 +26,7 @@ fn column(name: &str, kind: FieldKind, nullable: bool, default: Option<Value>) -
         primary_key: false,
         unique: false,
         origin: ColumnOrigin::Declared,
+        source: None,
     }
 }
 

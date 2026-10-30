@@ -25,6 +25,17 @@
 //   ({folders, config} from analyzeStorageFolders()/StorageConfigGenerator, or null), sources
 //   (project-relative module paths; `inputs` holds the project files the TypeScript program read
 //   and the modules imported at run time, such as a data package's build output) and diagnostics.
+//
+// Connectors mode (`mode: "connectors"`): the entity classes of Category A connectors
+// (`rayfin/connectors/<name>/*.ts`), analyzed the way `rayfin up connector apply` does (CLI 1.36.2,
+// services/connector-generator.js): ConnectorSchemaAnalyzer, then ConnectorConfigGenerator.
+//   Input: projectRoot, tsconfigPath (the project's rayfin/tsconfig.json, or null), outDir,
+//   connectors ([{name, dir, dialect}]: dialect is the connector type's analyzer dialect, `mssql`,
+//   `fabric-warehouse` or `fabric-sqlanalytics`), verbose.
+//   Result: coreVersion, typescriptVersion, featureFlags, connectors ([{name, dialect, entities,
+//   config, policies}] as above, or [{name, dialect, error: {message}}] when that connector's
+//   analysis failed), sources ({inputs}) and diagnostics. A compile error fails the whole run, as
+//   it fails the CLI's.
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import * as nodeModule from 'node:module';
@@ -75,6 +86,7 @@ function parseArgs(argv) {
 }
 
 async function analyze(input) {
+  if (input?.mode === 'connectors') return analyzeConnectors(input);
   const projectRoot = path.resolve(required(input, 'projectRoot'));
   const dataDir = path.resolve(projectRoot, required(input, 'dataDir'));
   const storageDir = path.resolve(projectRoot, input.storageDir ?? path.join(dataDir, '..', 'storage'));
@@ -197,6 +209,94 @@ async function analyze(input) {
       storage: entries.storage.map((file) => rel(projectRoot, sourceOf(file))),
       inputs: inputs.map((file) => rel(projectRoot, file)),
     },
+    diagnostics,
+  };
+}
+
+async function analyzeConnectors(input) {
+  const projectRoot = path.resolve(required(input, 'projectRoot'));
+  const outDir = path.resolve(required(input, 'outDir'));
+  const tsconfigPath = input.tsconfigPath ? path.resolve(projectRoot, input.tsconfigPath) : null;
+  const log = input.verbose ? (message = '') => process.stderr.write(`${message}\n`) : () => {};
+  const diagnostics = [];
+  const connectors = (Array.isArray(input.connectors) ? input.connectors : []).map((connector) => ({
+    name: required(connector, 'name'),
+    dir: path.resolve(projectRoot, required(connector, 'dir')),
+    dialect: required(connector, 'dialect'),
+  }));
+
+  installProjectResolution(projectRoot);
+  const ts = (await import('typescript')).default;
+  const core = await import('@microsoft/rayfin-core');
+  const coreSchema = await import('@microsoft/rayfin-core/schema');
+  const analysis = await import('@microsoft/rayfin-core/analysis');
+  const coreVersion = packageVersion('@microsoft/rayfin-core', projectRoot);
+  if (typeof analysis.ConnectorSchemaAnalyzer !== 'function' || typeof analysis.ConnectorConfigGenerator !== 'function') {
+    throw new Error(
+      `@microsoft/rayfin-core ${coreVersion ?? '(unknown version)'} has no connector analyzer ` +
+        `(ConnectorSchemaAnalyzer); upgrade the app's @microsoft/rayfin-* packages to 1.36.`,
+    );
+  }
+
+  const existing = connectors.filter((connector) => existsSync(connector.dir));
+  const compiled = compile(ts, {
+    projectRoot,
+    tsconfigPath,
+    outDir,
+    entryDirs: existing.map((connector) => connector.dir),
+    diagnostics,
+  });
+  const results = [];
+  for (const connector of connectors) {
+    const { name, dir, dialect } = connector;
+    try {
+      const files = compiled.entries.get(dir) ?? [];
+      if (files.length === 0) {
+        throw new Error(
+          `No connector entities were compiled from ${rel(projectRoot, dir)}. Generate the entity ` +
+            `files from its metadata.json (see the Category A connector docs), then restart.`,
+        );
+      }
+      const found = {};
+      for (const file of files) {
+        collect(await import(pathToFileURL(file).href), found, coreSchema.isRayfinEntity);
+      }
+      const entityClasses = Object.values(found);
+      if (entityClasses.length === 0) {
+        throw new Error(`${rel(projectRoot, dir)} exports no @entity() class.`);
+      }
+      const analyzer = new analysis.ConnectorSchemaAnalyzer(entityClasses, dialect, { log });
+      const entities = analyzer.analyzeEntities();
+      const config = new analysis.ConnectorConfigGenerator(dialect).generateConfig(entities);
+      const configJson = JSON.parse(JSON.stringify(config));
+      results.push({
+        name,
+        dialect,
+        entities: toJson(entities),
+        config: configJson,
+        policies: collectPolicies(core, entityClasses, entities, coreVersion),
+        sources: files.map((file) => rel(projectRoot, sourceOf(file))),
+      });
+    } catch (error) {
+      results.push({ name, dialect, error: { message: error instanceof Error ? error.message : String(error) } });
+    }
+  }
+
+  const known = new Set(compiled.inputs);
+  const imported = (await importedModules()).filter(
+    (file) =>
+      !known.has(file) &&
+      isInside(projectRoot, file) &&
+      !isInside(outDir, file) &&
+      !file.split(path.sep).includes('node_modules'),
+  );
+  const inputs = [...compiled.inputs, ...imported.sort((a, b) => a.localeCompare(b))];
+  return {
+    coreVersion,
+    typescriptVersion: ts.version,
+    featureFlags: process.env.RAYFIN_FEATURE_FLAGS ?? null,
+    connectors: results,
+    sources: { inputs: inputs.map((file) => rel(projectRoot, file)) },
     diagnostics,
   };
 }

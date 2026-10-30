@@ -50,18 +50,23 @@ use crate::exec::{self, Outcome, Request};
 use crate::plan::{self, Collected, Ctx, ObjectPlan};
 use crate::policy;
 use crate::schema::{
-    FieldDef, InputObjectDef, InputValueDef, ObjectDef, Resolver, Schema, TypeDef, TypeRef,
+    FieldDef, InputObjectDef, InputValueDef, Mutations, ObjectDef, Resolver, Schema, TypeDef,
+    TypeRef,
 };
 use crate::sql::{CmpOp, Operand, Pred, Sql, quote_ident};
 use crate::value::PKind;
 
 /// The mutation root type.
 pub const MUTATION: &str = "Mutation";
+/// What [`Mutations::OperationResult`] mutations return, and its one field.
+pub const DB_OPERATION_RESULT: &str = "DbOperationResult";
+pub const DB_OPERATION_RESULT_FIELD: &str = "result";
 
-const FIELDS_NOT_ALLOWED: &str = "Unauthorized due to one or more fields in this mutation.";
-const INSERT_REFUSED: &str = "Could not insert row with given values.";
+pub(crate) const FIELDS_NOT_ALLOWED: &str =
+    "Unauthorized due to one or more fields in this mutation.";
+pub(crate) const INSERT_REFUSED: &str = "Could not insert row with given values.";
 
-fn read_denied(field: &str) -> String {
+pub(crate) fn read_denied(field: &str) -> String {
     format!(
         "The mutation operation {field} was successful but the current user is unauthorized to \
          view the response due to lack of read permissions"
@@ -69,7 +74,19 @@ fn read_denied(field: &str) -> String {
 }
 
 /// Adds the `Mutation` type, and the input types it uses, for the entities some role may write.
+/// [`Mutations::OperationResult`] fields return `DbOperationResult`; [`Mutations::None`] adds
+/// none. Columns the database generates (identity, computed and server-managed columns of a
+/// connector's source) are left out of the inputs, and those with a database default are optional
+/// on create.
 pub(crate) fn extend_schema(schema: &mut Schema, model: &AppModel) {
+    let style = schema.options.mutations;
+    if style == Mutations::None {
+        return;
+    }
+    let returns = |e: &str| match style {
+        Mutations::OperationResult => DB_OPERATION_RESULT.to_owned(),
+        _ => e.to_owned(),
+    };
     let mut fields = IndexMap::new();
     let mut inputs = Vec::new();
     for (index, entity) in model.entities.iter().enumerate() {
@@ -88,12 +105,14 @@ pub(crate) fn extend_schema(schema: &mut Schema, model: &AppModel) {
                 Resolver::Column(_, column) => Some(&entity.columns[column]),
                 _ => None,
             })
+            .filter(|column| !column.source.as_ref().is_some_and(|s| s.generated))
             .collect();
         let granted = |action| {
             [access::ANONYMOUS, access::AUTHENTICATED]
                 .iter()
                 .any(|role| access::grant(entity, role, action).is_some())
         };
+        let keys = entity.key_columns();
         let e = &names.type_name;
         if granted(Action::Create) {
             let input = input_object(
@@ -101,7 +120,10 @@ pub(crate) fn extend_schema(schema: &mut Schema, model: &AppModel) {
                 &format!("Input type for creating {e}"),
                 &columns,
                 |column| {
-                    !column.nullable && column.default.is_none() && !codec::is_generated_key(column)
+                    !column.nullable
+                        && column.default.is_none()
+                        && !codec::is_generated_key(column)
+                        && !column.source.as_ref().is_some_and(|s| s.has_default)
                 },
             );
             let item = argument(
@@ -113,13 +135,13 @@ pub(crate) fn extend_schema(schema: &mut Schema, model: &AppModel) {
             let field = mutation_field(
                 &names.create_mutation,
                 &format!("Creates a new {e}"),
-                e,
+                &returns(e),
                 Resolver::Create(index),
-                [item],
+                vec![item],
             );
             fields.insert(field.name.clone(), field);
         }
-        if granted(Action::Update) {
+        if granted(Action::Update) && !keys.is_empty() {
             let input = input_object(
                 &names.update_input(),
                 &format!("Input type for updating {e}"),
@@ -132,22 +154,24 @@ pub(crate) fn extend_schema(schema: &mut Schema, model: &AppModel) {
                 TypeRef::named(&input.name).non_null(),
             );
             inputs.push(input);
+            let mut args = key_arguments(entity, "updated");
+            args.push(item);
             let field = mutation_field(
                 &names.update_mutation,
                 &format!("Updates a {e}"),
-                e,
+                &returns(e),
                 Resolver::Update(index),
-                [key_argument(entity, "updated"), item],
+                args,
             );
             fields.insert(field.name.clone(), field);
         }
-        if granted(Action::Delete) {
+        if granted(Action::Delete) && !keys.is_empty() {
             let field = mutation_field(
                 &names.delete_mutation,
                 &format!("Delete a {e}"),
-                e,
+                &returns(e),
                 Resolver::Delete(index),
-                [key_argument(entity, "deleted")],
+                key_arguments(entity, "deleted"),
             );
             fields.insert(field.name.clone(), field);
         }
@@ -159,6 +183,25 @@ pub(crate) fn extend_schema(schema: &mut Schema, model: &AppModel) {
         schema
             .types
             .insert(input.name.clone(), TypeDef::InputObject(input));
+    }
+    if style == Mutations::OperationResult {
+        let result = FieldDef {
+            name: DB_OPERATION_RESULT_FIELD.into(),
+            description: Some("Contains result for mutation execution".into()),
+            args: IndexMap::new(),
+            ty: TypeRef::named("String"),
+            resolver: Resolver::Extension,
+        };
+        let object = ObjectDef {
+            name: DB_OPERATION_RESULT.into(),
+            description: Some(
+                "Represents the result of a mutation operation on the database.".into(),
+            ),
+            fields: IndexMap::from([(result.name.clone(), result)]),
+        };
+        schema
+            .types
+            .insert(DB_OPERATION_RESULT.into(), TypeDef::Object(object));
     }
     let mutation = ObjectDef {
         name: MUTATION.into(),
@@ -181,22 +224,28 @@ fn argument(name: &str, description: &str, ty: TypeRef) -> InputValueDef {
     }
 }
 
-/// The primary key argument (`id: UUID!`).
-fn key_argument(entity: &Entity, done: &str) -> InputValueDef {
-    let pk = entity.primary_key_column();
-    argument(
-        &pk.field,
-        &format!("One of the ids of the item being {done}"),
-        TypeRef::named(pk.kind.graphql_scalar()).non_null(),
-    )
+/// The primary key arguments: `id: UUID!` for data entities, one per key column for a
+/// connector's.
+fn key_arguments(entity: &Entity, done: &str) -> Vec<InputValueDef> {
+    entity
+        .key_columns()
+        .into_iter()
+        .map(|key| {
+            argument(
+                &key.field,
+                &format!("One of the ids of the item being {done}"),
+                TypeRef::named(key.kind.graphql_scalar()).non_null(),
+            )
+        })
+        .collect()
 }
 
-fn mutation_field<const N: usize>(
+fn mutation_field(
     name: &str,
     description: &str,
     type_name: &str,
     resolver: Resolver,
-    args: [InputValueDef; N],
+    args: Vec<InputValueDef>,
 ) -> FieldDef {
     FieldDef {
         name: name.into(),
@@ -529,7 +578,7 @@ fn write_then_read(
 }
 
 /// The role's grant for `action`, or Hot Chocolate's authorization error.
-fn granted<'m>(
+pub(crate) fn granted<'m>(
     ctx: &Ctx<'_>,
     entity: &'m Entity,
     action: Action,
@@ -593,7 +642,7 @@ fn key_value(
 
 /// The `item` argument as (column index, stored value) pairs, in document order, once the grant
 /// is known to allow every field.
-fn item_values(
+pub(crate) fn item_values(
     ctx: &Ctx<'_>,
     entity: &Entity,
     grant: &ActionPermission,
@@ -807,7 +856,7 @@ impl Write {
 
 /// `error` at root field `key`, located at the field unless it is a server error (DAB writes
 /// those without `locations`) or already located.
-fn located(error: GraphQlError, pos: Pos, key: &str) -> GraphQlError {
+pub(crate) fn located(error: GraphQlError, pos: Pos, key: &str) -> GraphQlError {
     let code = error.extensions.get("code").and_then(Json::as_str);
     let server = matches!(
         code,

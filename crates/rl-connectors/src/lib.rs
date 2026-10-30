@@ -1,6 +1,11 @@
-//! Rayfin connectors (`POST /connector-invoke/<name>`). `fabric-semanticmodel` queries run against
-//! the real model through Power BI's `executeDaxQueries`, as the developer; other connector types
-//! answer 501 for now.
+//! Rayfin connectors: `POST /connector-invoke/<name>` (Category B) and
+//! `POST /connectors/<name>/graphql` (Category A).
+//!
+//! - `fabric-semanticmodel` queries run against the real model through Power BI's
+//!   `executeDaxQueries`, as the developer (below).
+//! - `fabric-sqldatabase`, `fabric-warehouse` and `fabric-sqlanalytics` answer DAB-style GraphQL
+//!   from their entity classes over the real Fabric SQL source, as the developer ([`sql`]).
+//! - Other connector types (`kusto`) answer 501.
 //!
 //! Deployed, Rayfin runs a semantic-model query as the signed-in user (on-behalf-of). Locally it
 //! runs as the developer, with a token from [`TokenSource`], calling Power BI the way
@@ -24,6 +29,7 @@
 
 mod invoke;
 mod semantic_model;
+pub mod sql;
 
 use std::sync::Arc;
 
@@ -31,8 +37,16 @@ use rl_model::CallerResolver;
 use rl_tokens::{Audience, TokenSource};
 use serde_json::{Map, Value};
 
+pub use sql::{SqlConnectorModel, SqlConnectorsConfig, SqlKind};
+
 /// The public Power BI REST origin `executeDaxQueries` is called on.
 pub const DEFAULT_POWERBI_BASE_URL: &str = "https://api.powerbi.com";
+
+/// Whether rayfin-local runs connectors of type `kind` (`rayfin.yml` `connectors[].type`); the
+/// others answer 501.
+pub fn runs_locally(kind: &str) -> bool {
+    kind == "fabric-semanticmodel" || SqlKind::parse(kind).is_some()
+}
 
 /// A connector declared in `rayfin/rayfin.yml` (`connectors[]`).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -61,6 +75,8 @@ pub struct ConnectorsConfig {
     pub powerbi_base_url: String,
     /// The scope of the developer token sent to Power BI.
     pub powerbi_scope: String,
+    /// Category A connectors: their entities, and how their databases are found.
+    pub sql: SqlConnectorsConfig,
 }
 
 impl Default for ConnectorsConfig {
@@ -69,6 +85,7 @@ impl Default for ConnectorsConfig {
             connectors: Vec::new(),
             powerbi_base_url: DEFAULT_POWERBI_BASE_URL.to_owned(),
             powerbi_scope: Audience::PowerBi.default_scope().to_owned(),
+            sql: SqlConnectorsConfig::default(),
         }
     }
 }
@@ -76,7 +93,8 @@ impl Default for ConnectorsConfig {
 /// `POST /connector-invoke/{name}` and `POST /connectors/{name}/graphql`.
 ///
 /// `callers` identifies the signed-in user from the request's bearer token; `tokens` mints the
-/// developer's Power BI tokens for `fabric-semanticmodel` queries.
+/// developer's tokens: Power BI for `fabric-semanticmodel` queries, Fabric and SQL for Category A
+/// connectors.
 pub fn router(
     config: ConnectorsConfig,
     callers: Arc<dyn CallerResolver>,

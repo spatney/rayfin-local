@@ -19,7 +19,7 @@ The app is unchanged: the SDK receives a different URL, and everything behind it
 - **Wire compatibility.** For every supported feature, the SDK sees the same status codes, headers, bodies and errors as from Fabric.
   The real SDK 1.36.2 is the oracle in tests.
 - **No Fabric dependency** for the core services: auth, data, functions and storage run entirely on the machine.
-- **Real data where needed.** Functions and semantic-model connectors reach real Azure and Fabric resources with the developer's own identity.
+- **Real data where needed.** Functions and connectors reach real Azure and Fabric resources, Fabric SQL databases included, with the developer's own identity.
 - **A fast inner loop.** Schema changes migrate the database live, functions rebuild and reload, and Vite hot-reloads the UI.
 - **One binary.** `cargo install` (or a release download) is the whole installation; Node.js is the only other requirement, and every Rayfin project already needs it.
 
@@ -68,7 +68,7 @@ flowchart LR
     auth["rl-auth: /api/auth/v1, JWKS, portal"]
     data["rl-graphql: /graphql"]
     fns["rl-functions: /functions/*"]
-    conn["rl-connectors: /connector-invoke/*"]
+    conn["rl-connectors: /connector-invoke/*, /connectors/*/graphql"]
     store["rl-storage: /api/storage/*"]
   end
   db[(".rayfin-local/db.sqlite")]
@@ -77,6 +77,7 @@ flowchart LR
   broker["rl-tokens: TokenBroker"]
   creds["az CLI, Rayfin CLI login, RAYFIN_LOCAL_TOKEN_*"]
   pbi["Power BI"]
+  fsql[("Fabric SQL databases, warehouses, SQL endpoints")]
   azure["Fabric and Azure APIs"]
 
   browser -- "pages, HMR" --> vite
@@ -90,6 +91,7 @@ flowchart LR
   host -- "ctx.getDataClient()" --> guards
   host -- "ctx.Tokens" --> azure
   conn --> pbi
+  conn -- "TDS, as the developer" --> fsql
   auth & fns & conn --> broker
   broker --> creds
 ```
@@ -103,11 +105,11 @@ crates/
   rl-node/         Node.js discovery, embedded helpers, supervised process trees
   rl-model/        the app model built from @microsoft/rayfin-core's analysis; request identity
   rl-db/           SQLite, value codecs, entity DDL and migrations
-  rl-graphql/      the DAB-compatible data API
+  rl-graphql/      the DAB-compatible data API, and its T-SQL executor for SQL connectors
   rl-auth/         auth routes, JWTs, the sign-in portal, the Entra exchange
   rl-tokens/       Azure tokens for the developer (az CLI, Rayfin CLI, env)
   rl-functions/    functions build, metadata, Node host and invoke routes
-  rl-connectors/   /connector-invoke (semantic models)
+  rl-connectors/   /connector-invoke (semantic models), /connectors/*/graphql (SQL, over TDS)
   rl-storage/      /api/storage on local files
   rl-frontend/     Vite dev server and static builds
   rl-server/       router composition and the request guards
@@ -126,11 +128,11 @@ docs/              this document, differences.md, development.md
 | `rl-node` | Node.js discovery, embedded JS helpers (`Helper`, `run_helper`), supervised process trees (`ManagedChild`). | |
 | `rl-model` | The app model (IR) built from `@microsoft/rayfin-core`'s analysis; `Caller` and `CallerResolver` (request identity). | |
 | `rl-db` | The SQLite handle (`Db`), value codecs, entity DDL and schema migrations. | `rl-model` |
-| `rl-graphql` | `/graphql`: DAB-compatible queries, mutations, aggregations and policies, compiled to SQL. | `rl-model`, `rl-db` |
+| `rl-graphql` | `/graphql`: DAB-compatible queries, mutations, aggregations and policies, compiled to SQL; the same front end over T-SQL for SQL connectors (`tsql`). | `rl-model`, `rl-db` |
 | `rl-auth` | `/api/auth/v1/*`, JWKS, runtime settings, the sign-in portal, the Entra exchange; implements `CallerResolver`. | `rl-model`, `rl-db`, `rl-tokens` |
 | `rl-tokens` | `TokenSource` and `TokenBroker`: Azure tokens for the developer; `Audience` scopes. | `rl-node` |
 | `rl-functions` | Functions build and watch, `runtimemetadata.json`, the Node function host, `/functions/<name>/invoke`. | `rl-model`, `rl-node`, `rl-tokens` |
-| `rl-connectors` | `/connector-invoke/<name>`: `fabric-semanticmodel` through Power BI; 501 for other types. | `rl-model`, `rl-tokens` |
+| `rl-connectors` | `/connector-invoke/<name>`: `fabric-semanticmodel` through Power BI; `/connectors/<name>/graphql`: SQL connectors over their Fabric items (TDS); 501 for other types. | `rl-model`, `rl-tokens`, `rl-graphql` |
 | `rl-storage` | `/api/storage/*` on the local file system, with `@blob` folder rules. | `rl-model`, `rl-db` |
 | `rl-frontend` | The app's Vite dev server or static build, with the local Rayfin environment. | `rl-node` |
 | `rl-server` | Router composition: `/rayfin.config.json`, CORS, publishable-key and Host checks, static hosting. | |
@@ -153,7 +155,7 @@ Two rules keep the feature crates independent of each other:
 5. Creates the token broker and the auth service.
 6. Binds the backend port and chooses the frontend port.
    Ports set by a flag or `rayfin-local.toml` must be free; remembered and default ports move to the next free one.
-7. Builds the router, starts the functions and the frontend, waits for the backend's health route, and prints the banner.
+7. Analyzes the SQL connectors' entities in `rayfin/connectors` (cached in `.rayfin-local/cache/connectors-analysis.json`), builds the router, starts the functions and the frontend, waits for the backend's health route, and prints the banner.
 
 ### While running
 
@@ -330,6 +332,14 @@ A missing token doesn't fail the invocation: reading that audience's token throw
 For `fabric-semanticmodel`, it requires a signed-in caller, gets a Power BI token from the `TokenSource`, and sends the query to Power BI's `executeDaxQueries` the way the SDK's direct path does, streaming the Arrow answer back unchanged.
 Power BI refuses `executeDaxQueries` to tokens without a dataset scope (Azure CLI tokens), so those queries go to `executeQueries` and come back in the JSON envelope the SDK also accepts.
 Failures come back in the envelope the SDK's normalizer reads, so the app sees the same `QueryError`s as on Fabric.
+
+SQL connectors (`fabric-sqldatabase`, `fabric-warehouse`, `fabric-sqlanalytics`) answer `/connectors/<name>/graphql` with the GraphQL API `rayfin up` would deploy for their entity classes:
+
+- At startup, the binary analyzes `rayfin/connectors/<name>/` with the project's `@microsoft/rayfin-core` (`js/analyze.mjs` in connectors mode), completes each model with the connector's `metadata.json`, and limits its grants to the connector's `operations`.
+- `rl-graphql`'s front end (parsing, validation, planning, policies) runs on that schema, and its `tsql` module turns each root field into one T-SQL statement and runs it on a `SqlBackend`.
+- `rl-connectors` implements `SqlBackend` over TDS (`tiberius`, rustls on ring) with a small pool, after finding the item's server and database through the Fabric REST API; both calls use the developer's tokens.
+
+[sql-connectors.md](sql-connectors.md) is the design in full.
 Other connector types answer 501.
 
 ## Storage
@@ -382,7 +392,7 @@ rayfin-local is a development tool for one person, but it holds the keys to that
 
 ## Extending rayfin-local
 
-- **A new connector type.** Add a module to `rl-connectors` beside `semantic_model.rs` and dispatch to it on the connector's `type` in `invoke.rs`.
+- **A new connector type.** Add a module to `rl-connectors` beside `semantic_model.rs` and `sql/`, dispatch to it on the connector's `type` in `invoke.rs`, and add the type to `rl_connectors::runs_locally`.
   Get tokens from the `TokenSource`, return failures in the shapes the SDK's normalizer reads, and update the support table in [differences.md](differences.md).
 - **A new route.** Add it to the owning feature crate's router.
   Routes the SDK calls without a publishable key belong in that crate's exempt list (as `rl_auth::PUBLISHABLE_KEY_EXEMPT_PATHS` does for auth).
@@ -393,6 +403,7 @@ rayfin-local is a development tool for one person, but it holds the keys to that
 ## Testing
 
 - **Unit and integration tests** in each crate (`cargo test --workspace`): the GraphQL compiler, policies, migrations, auth flows, storage and the token broker run against SQLite and fakes.
+- **SQL connectors** against a real SQL Server (`rl-connectors`' `sql_server.rs` and `sql_sdk.rs`, with `RAYFIN_LOCAL_TEST_MSSQL`; CI runs them in a SQL Server container), and their T-SQL on a fake database (`rl-graphql`'s `tsql.rs`).
 - **SDK conformance**: the `sdk.rs` tests of `rl-auth`, `rl-graphql` and `rl-storage`, `rl-connectors`' `sdk_decode.rs` and `rl-functions`' `host.rs` drive rayfin-local with the real `@microsoft/rayfin-*` 1.36.2 packages from the fixture app, and skip when Node.js or the packages are missing.
 - **End to end**: Playwright drives the fixture app in `tests/e2e` (sign-in popup, data, functions, storage) and, optionally, the explorer app.
 

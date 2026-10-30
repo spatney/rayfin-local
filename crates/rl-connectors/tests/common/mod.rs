@@ -2,6 +2,8 @@
 //! caller resolver and a fake token source.
 #![allow(dead_code)]
 
+pub mod sql;
+
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
@@ -402,4 +404,56 @@ pub fn sdk_node_modules() -> Option<PathBuf> {
         });
     let marker = path.join("@microsoft/rayfin-connector-fabric-semanticmodel/package.json");
     marker.is_file().then_some(path)
+}
+
+/// `az account get-access-token --scope <scope>`.
+pub struct AzCli;
+
+impl TokenSource for AzCli {
+    fn token<'a>(&'a self, scope: &'a str) -> BoxFuture<'a, Result<AccessToken, TokenError>> {
+        Box::pin(async move {
+            let args = [
+                "account",
+                "get-access-token",
+                "--scope",
+                scope,
+                "-o",
+                "json",
+            ];
+            let output = if cfg!(windows) {
+                tokio::process::Command::new("cmd")
+                    .arg("/C")
+                    .arg("az")
+                    .args(args)
+                    .output()
+                    .await
+            } else {
+                tokio::process::Command::new("az").args(args).output().await
+            };
+            let failed = |message: String| TokenError {
+                scope: scope.to_owned(),
+                message,
+                hint: Some("Run `az login`, then retry.".to_owned()),
+            };
+            let output = output.map_err(|e| failed(format!("couldn't run az: {e}")))?;
+            if !output.status.success() {
+                return Err(failed(
+                    String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                ));
+            }
+            let answer: Value = serde_json::from_slice(&output.stdout)
+                .map_err(|e| failed(format!("az printed something unexpected: {e}")))?;
+            let token = answer["accessToken"]
+                .as_str()
+                .ok_or_else(|| failed("az printed no accessToken".to_owned()))?;
+            let expires_at = answer["expires_on"]
+                .as_u64()
+                .map(|seconds| std::time::UNIX_EPOCH + Duration::from_secs(seconds))
+                .unwrap_or_else(|| SystemTime::now() + Duration::from_secs(300));
+            Ok(AccessToken {
+                token: token.to_owned(),
+                expires_at,
+            })
+        })
+    }
 }

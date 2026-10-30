@@ -16,8 +16,9 @@ use rl_tokens::TokenSource;
 use serde_json::{Map, Value, json};
 
 use crate::{
-    ConnectorDef, ConnectorsConfig,
+    ConnectorDef, ConnectorsConfig, SqlKind,
     semantic_model::{self, PowerBi, Target},
+    sql::SqlConnectors,
 };
 
 const FABRIC_SEMANTIC_MODEL: &str = "fabric-semanticmodel";
@@ -29,6 +30,8 @@ struct Connectors {
     tokens: Arc<dyn TokenSource>,
     /// `Err` holds why Power BI can't be called (a bad base URL); every query answers it.
     power_bi: Result<PowerBi, String>,
+    /// Category A connectors (`/connectors/<name>/graphql`).
+    sql: SqlConnectors,
 }
 
 impl Connectors {
@@ -50,21 +53,25 @@ pub(crate) fn router(
         tracing::error!("{problem}");
     }
     for connector in &config.connectors {
-        if connector.kind != FABRIC_SEMANTIC_MODEL {
+        if !crate::runs_locally(&connector.kind) {
             tracing::info!(
                 connector = %connector.name,
                 "connector type '{}' isn't supported by rayfin-local yet; its calls answer 501",
                 connector.kind
             );
-        } else if let Err(problem) = Target::of(connector) {
+        } else if connector.kind == FABRIC_SEMANTIC_MODEL
+            && let Err(problem) = Target::of(connector)
+        {
             tracing::warn!(connector = %connector.name, "{problem}");
         }
     }
+    let sql = SqlConnectors::new(config.sql, &config.connectors, Arc::clone(&tokens));
     let state = Arc::new(Connectors {
         connectors: config.connectors,
         callers,
         tokens,
         power_bi,
+        sql,
     });
     Router::new()
         .route("/connector-invoke/{name}", post(invoke))
@@ -88,6 +95,18 @@ async fn invoke(
     let Some(connector) = state.find(&name) else {
         return connector_not_found(&state, &name);
     };
+    if SqlKind::parse(&connector.kind).is_some() {
+        return service_error(
+            StatusCode::NOT_FOUND,
+            "CONNECTOR_NOT_FOUND",
+            format!(
+                "Connector '{name}' is a {} connector, which has no operations to invoke; query \
+                 its entities, for example client.connectors.{name}.<Entity>.findMany() \
+                 (POST /connectors/{name}/graphql).",
+                connector.kind
+            ),
+        );
+    }
     if connector.kind != FABRIC_SEMANTIC_MODEL {
         return not_supported(&connector.kind);
     }
@@ -98,7 +117,7 @@ async fn invoke(
     if let Some(refusal) = operation_refusal(connector, &operation) {
         return refusal;
     }
-    if runs_as_signed_in_user(connector) && !caller.is_authenticated() {
+    if runs_as_signed_in_user(connector, true) && !caller.is_authenticated() {
         return session_required(connector);
     }
     execute_query(&state, connector, &input).await
@@ -152,8 +171,21 @@ async fn execute_query(state: &Connectors, connector: &ConnectorDef, input: &Val
     .await
 }
 
-/// Category A connectors (`fabric-sqldatabase`, `fabric-warehouse`, `fabric-sqlanalytics`).
-async fn graphql(State(state): State<Arc<Connectors>>, Path(name): Path<String>) -> Response {
+/// Category A connectors (`fabric-sqldatabase`, `fabric-warehouse`, `fabric-sqlanalytics`):
+/// DAB-style GraphQL over the connector's Fabric SQL source (`crate::sql`).
+async fn graphql(
+    State(state): State<Arc<Connectors>>,
+    Path(name): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let authorization = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok());
+    let caller = match state.callers.resolve(bearer_token(authorization)) {
+        Ok(caller) => caller,
+        Err(_) => return invalid_token(),
+    };
     match state.find(&name) {
         None => connector_not_found(&state, &name),
         Some(connector) if connector.kind == FABRIC_SEMANTIC_MODEL => service_error(
@@ -164,7 +196,10 @@ async fn graphql(State(state): State<Arc<Connectors>>, Path(name): Path<String>)
                  endpoint; call its operations, for example client.connectors.{name}.executeQuery()."
             ),
         ),
-        Some(connector) => not_supported(&connector.kind),
+        Some(connector) => match state.sql.graphql(&name, &caller, &body).await {
+            Some(response) => response,
+            None => not_supported(&connector.kind),
+        },
     }
 }
 
@@ -215,17 +250,19 @@ fn operation_refusal(connector: &ConnectorDef, requested: &str) -> Option<Respon
     })
 }
 
-/// Delegated connectors (the semantic-model default) run as the signed-in user.
-fn runs_as_signed_in_user(connector: &ConnectorDef) -> bool {
-    connector
-        .auth_type
-        .as_deref()
-        .is_none_or(|auth| auth.eq_ignore_ascii_case("delegated"))
+/// Delegated connectors run as the signed-in user: semantic models by default
+/// (`delegated_by_default`), Category A connectors when `auth.type` says so (they default to
+/// `application`).
+pub(crate) fn runs_as_signed_in_user(connector: &ConnectorDef, delegated_by_default: bool) -> bool {
+    match connector.auth_type.as_deref() {
+        None => delegated_by_default,
+        Some(auth) => auth.eq_ignore_ascii_case("delegated"),
+    }
 }
 
 /// A service refusal, shaped like the deployed route's (`code`, `message`, `httpStatusCode`). The
 /// SDK throws it as `NetworkError(message, status)`.
-fn service_error(status: StatusCode, code: &str, message: String) -> Response {
+pub(crate) fn service_error(status: StatusCode, code: &str, message: String) -> Response {
     tracing::debug!(status = status.as_u16(), code, "connector request refused");
     let body = json!({ "code": code, "message": message, "httpStatusCode": status.as_u16() });
     (status, Json(body)).into_response()
@@ -249,7 +286,7 @@ fn invalid_token() -> Response {
 
 /// No signed-in user for a delegated connector: 401, as deployed, so a restored session refreshes
 /// and replays the call.
-fn session_required(connector: &ConnectorDef) -> Response {
+pub(crate) fn session_required(connector: &ConnectorDef) -> Response {
     service_error(
         StatusCode::UNAUTHORIZED,
         "DELEGATED_SESSION_EXPIRED",

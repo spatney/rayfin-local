@@ -10,6 +10,7 @@
 //! 3. Turn the helper's result into an [`AppModel`] with [`AppModel::from_analysis`].
 
 pub mod caller;
+pub mod connector;
 mod convert;
 mod model;
 mod policy;
@@ -72,5 +73,59 @@ impl AnalyzeInput {
     /// The JSON document the helper reads from its `--input` file.
     pub fn to_json(&self) -> serde_json::Value {
         serde_json::to_value(self).expect("AnalyzeInput serializes to JSON")
+    }
+}
+
+/// The input of [`ANALYZE_JS`] in connectors mode (serialized in camelCase): the entity classes
+/// of Category A connectors.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectorsAnalyzeInput {
+    mode: &'static str,
+    /// The project directory; the helper also runs there.
+    pub project_root: PathBuf,
+    /// The project's `rayfin/tsconfig.json`; `None` compiles with built-in defaults.
+    pub tsconfig_path: Option<PathBuf>,
+    /// Where the compiled JavaScript goes (emptied first; under `.rayfin-local/` inside the
+    /// project).
+    pub out_dir: PathBuf,
+    pub connectors: Vec<ConnectorSource>,
+    /// Echo the analyzer's log to the helper's stderr.
+    pub verbose: bool,
+}
+
+/// A connector whose entities [`ConnectorsAnalyzeInput`] analyzes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ConnectorSource {
+    /// The connector's `name` in `rayfin.yml`.
+    pub name: String,
+    /// Its entity files, normally `<project>/rayfin/connectors/<name>`.
+    pub dir: PathBuf,
+    /// The analyzer dialect of its type: `mssql` (`fabric-sqldatabase`), `fabric-warehouse` or
+    /// `fabric-sqlanalytics`.
+    pub dialect: String,
+}
+
+impl ConnectorsAnalyzeInput {
+    /// The usual layout: `rayfin/tsconfig.json` when it exists, and the compiled output in
+    /// `.rayfin-local/cache/compiled-connectors`.
+    pub fn for_project(project_root: &Path, connectors: Vec<ConnectorSource>) -> Self {
+        let tsconfig = project_root.join("rayfin").join("tsconfig.json");
+        Self {
+            mode: "connectors",
+            project_root: project_root.to_path_buf(),
+            tsconfig_path: tsconfig.is_file().then_some(tsconfig),
+            out_dir: project_root
+                .join(".rayfin-local")
+                .join("cache")
+                .join("compiled-connectors"),
+            connectors,
+            verbose: false,
+        }
+    }
+
+    /// The JSON document the helper reads from its `--input` file.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).expect("ConnectorsAnalyzeInput serializes to JSON")
     }
 }

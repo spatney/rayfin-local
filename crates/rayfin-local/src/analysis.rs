@@ -465,7 +465,12 @@ fn analysis_key(project: &Project, input: &AnalyzeInput) -> String {
 
 /// SHA-256 over `input`, the path, size and modification time of every file under `dirs`, the
 /// contents of `files` and `extra`.
-fn cache_key(input: &Value, dirs: &[PathBuf], files: &[PathBuf], extra: &[&str]) -> String {
+pub(crate) fn cache_key(
+    input: &Value,
+    dirs: &[PathBuf],
+    files: &[PathBuf],
+    extra: &[&str],
+) -> String {
     let mut hasher = Hasher::new();
     hasher.field(&CACHE_VERSION.to_le_bytes());
     hasher.field(input.to_string().as_bytes());
@@ -500,7 +505,7 @@ fn cache_key(input: &Value, dirs: &[PathBuf], files: &[PathBuf], extra: &[&str])
 /// The contents of the project files the analysis read (`sources.inputs`, relative to `root`),
 /// which may live outside `rayfin/data`: contents rather than modification times, so that a
 /// build that writes the same output again leaves the cache valid.
-fn inputs_fingerprint(root: &Path, inputs: &[String]) -> String {
+pub(crate) fn inputs_fingerprint(root: &Path, inputs: &[String]) -> String {
     let mut hasher = Hasher::new();
     for input in inputs {
         hasher.field(input.as_bytes());

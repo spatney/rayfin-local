@@ -242,6 +242,22 @@ pub struct Column {
     /// A single-column unique constraint (`unique: true`).
     pub unique: bool,
     pub origin: ColumnOrigin,
+    /// What the database says about the column of a Category A connector's source table
+    /// (`rayfin/connectors/<name>/metadata.json`); `None` for data entities and unknown columns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SourceColumn>,
+}
+
+/// A connector source column as `rayfin connector add` discovered it (`metadata.json`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceColumn {
+    /// The SQL type, lowercase, e.g. `int`, `nvarchar`, `datetime2`, `date`, `float`.
+    pub data_type: String,
+    /// The database fills it in and refuses writes: an identity, a computed column or a
+    /// server-managed one (`rowversion`, temporal period columns).
+    pub generated: bool,
+    /// It has a `DEFAULT`, so a create may leave it out.
+    pub has_default: bool,
 }
 
 /// Where a column comes from.
@@ -617,6 +633,16 @@ impl Entity {
             .iter()
             .find(|column| column.primary_key)
             .expect("from_analysis checks every entity has a primary key column")
+    }
+
+    /// The primary key's columns, in key order: `id` for data entities; for connector entities
+    /// the `Source({ primaryKey })` columns, which may be several or none (a keyless entity).
+    pub fn key_columns(&self) -> Vec<&Column> {
+        self.primary_key
+            .columns
+            .iter()
+            .filter_map(|name| self.column(name))
+            .collect()
     }
 
     /// The grants of `role` (`anonymous`/`authenticated`), if it has any.

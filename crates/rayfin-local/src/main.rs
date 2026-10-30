@@ -2,6 +2,7 @@
 
 mod analysis;
 mod commands;
+mod connectors;
 mod integrations;
 mod ports;
 mod reload;

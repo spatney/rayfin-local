@@ -1,0 +1,27 @@
+id: rayfin-local-fixture-connectors
+name: rayfin-local-fixture-connectors
+version: 1.0.0
+services:
+  auth:
+    enabled: true
+    password:
+      enabled: true
+  data:
+    enabled: false
+  functions:
+    enabled: false
+  storage:
+    enabled: false
+connectors:
+  - name: inventory
+    type: fabric-sqldatabase
+    config:
+      workspaceId: 00000000-0000-0000-0000-00000000aaaa
+      itemId: 00000000-0000-0000-0000-00000000cccc
+    auth:
+      type: application
+    operations:
+      - name: read
+      - name: create
+      - name: update
+      - name: delete

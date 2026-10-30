@@ -13,7 +13,9 @@ use anyhow::{Context as _, anyhow};
 use axum::Router;
 use ring::rand::{SecureRandom as _, SystemRandom};
 use rl_auth::{AuthService, AuthSettings};
-use rl_connectors::{ConnectorDef, ConnectorsConfig, DEFAULT_POWERBI_BASE_URL};
+use rl_connectors::{
+    ConnectorDef, ConnectorsConfig, DEFAULT_POWERBI_BASE_URL, SqlConnectorsConfig,
+};
 use rl_db::Db;
 use rl_frontend::{DevServer, DevServerConfig, RayfinEnv, StaticBuildConfig};
 use rl_functions::{FunctionsConfig, FunctionsService};
@@ -192,9 +194,11 @@ pub fn is_loopback(host: &str) -> bool {
         || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
-/// `POST /connector-invoke/<name>`: the `connectors:` of `rayfin.yml`, queried with the
-/// developer's Power BI token.
-pub fn connectors_router(ctx: &ServeContext<'_>) -> Router {
+/// `POST /connector-invoke/<name>` and `POST /connectors/<name>/graphql`: the `connectors:` of
+/// `rayfin.yml`, queried with the developer's Power BI token (semantic models) or over their
+/// Fabric SQL source with the developer's Entra token (Category A connectors, whose entities are
+/// analyzed here).
+pub async fn connectors_router(ctx: &ServeContext<'_>) -> Router {
     let powerbi_base_url = ctx
         .project
         .local_config()
@@ -204,12 +208,40 @@ pub fn connectors_router(ctx: &ServeContext<'_>) -> Router {
         .map(|url| url.trim().trim_end_matches('/'))
         .filter(|url| !url.is_empty())
         .unwrap_or(DEFAULT_POWERBI_BASE_URL);
+    let models =
+        crate::connectors::analyze(ctx.project, ctx.state, ctx.node, ctx.options.verbose).await;
     let config = ConnectorsConfig {
         connectors: connector_defs(&ctx.project.config().connectors),
         powerbi_base_url: powerbi_base_url.to_owned(),
         powerbi_scope: ctx.broker.scope_for(Audience::PowerBi),
+        sql: SqlConnectorsConfig {
+            models,
+            fabric_scope: ctx.broker.scope_for(Audience::Fabric),
+            sql_scope: ctx.broker.scope_for(Audience::Sql),
+            cache_dir: Some(ctx.state.cache_dir()),
+            ..SqlConnectorsConfig::default()
+        },
     };
     rl_connectors::router(config, ctx.callers(), ctx.tokens())
+}
+
+/// The banner's connectors: each with how it runs locally (`none` without connectors).
+pub fn connectors_summary(entries: &[ConnectorEntry]) -> String {
+    if entries.is_empty() {
+        return "none".to_owned();
+    }
+    entries
+        .iter()
+        .map(|entry| {
+            let kind = &entry.connector_type;
+            if rl_connectors::runs_locally(kind) {
+                format!("{} ({kind}, as you)", entry.name)
+            } else {
+                format!("{} ({kind}: Fabric only, answers 501)", entry.name)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// `rayfin.yml` `connectors:` as `rl-connectors` takes them. Declaring `all` allows every
