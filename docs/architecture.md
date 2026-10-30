@@ -135,7 +135,7 @@ docs/              this document, differences.md, development.md, embedding.md
 | `rl-connectors` | `/connector-invoke/<name>`: `fabric-semanticmodel` through Power BI; `/connectors/<name>/graphql`: SQL connectors over their Fabric items (TDS); 501 for other types. | `rl-model`, `rl-tokens`, `rl-graphql` |
 | `rl-storage` | `/api/storage/*` on the local file system, with `@blob` folder rules. | `rl-model`, `rl-db` |
 | `rl-frontend` | The app's Vite dev server or static build, with the local Rayfin environment. | `rl-node` |
-| `rl-server` | Router composition: `/rayfin.config.json`, CORS, publishable-key and Host checks, static hosting. | |
+| `rl-server` | Router composition: `/rayfin.config.json`, CORS, publishable-key and Host checks, static hosting; `RouterHandle`, which live reload swaps routers through. | |
 
 Two rules keep the feature crates independent of each other:
 
@@ -159,11 +159,24 @@ Two rules keep the feature crates independent of each other:
 
 ### While running
 
-- **Entity changes.** A watcher on `rayfin/data`, `rayfin/storage` and `rayfin.yml` waits for edits to settle (500 ms), then analyzes again, migrates the database, and switches the data API to the new model without a restart.
+`crates/rayfin-local/src/reload.rs` watches the project and applies its changes in place, on the same ports.
+It waits for edits to settle (500 ms), and handles one change at a time.
+
+- **Entity changes.** A watcher on `rayfin/data`, `rayfin/storage` and the files they import analyzes them again, migrates the database, and switches the data API to the new model without a restart.
+  When the storage folders change, the storage service is rebuilt.
   A failed analysis, or a change that would lose data, keeps the previous model and says why.
-  Changes to `rayfin.yml` and to the storage folders need a restart, and `serve` says so.
+- **Configuration changes.** `rayfin.yml` and `rayfin-local.toml` are read again and compared with what runs (`reload/changes.rs`).
+  The services whose settings changed are rebuilt: the auth service takes its new settings in place (`AuthService::set_settings`, keeping users, sessions, the signing key and the sign-in identity), the data API, storage and connectors get new routers, and the functions are stopped and started again.
+  A new `[auth] sign_in_as` switches the sign-in identity as the control API's `PUT /identity` does, unless `--sign-in-as` set it.
+  The backend's router is then rebuilt and swapped in (`rl_server::RouterHandle`): the listeners keep running, and each request goes to the router current when it arrives.
+  Changes that can't apply in place (where the frontend is, ports, the token source) are reported as needing a restart; a file that can't be read keeps the previous configuration.
+- **SQL connectors.** Changes in `rayfin/connectors/` analyze the connectors' entities again and rebuild their routes.
+- **Secret values.** Changes to `.rayfin-local/secrets.json` or the functions' `local.settings.json` restart only the function host, with the new values (`FunctionsService::restart_host`).
 - **Function changes.** The functions package's `build:watch` script (or the build command, when it has none) rebuilds it; the host restarts when the compiled output changes.
 - **Frontend changes.** Vite's hot module replacement, as usual.
+  When Vite stops by itself, `serve` starts it again on the same port, after 1, 2 and then 5 seconds, and gives up after a fourth stop within two minutes; a restarted Vite gets the run's sign-in secret too.
+
+`reload::ReloadHandle` applies all of these on demand.
 
 ### Shutdown
 
@@ -183,7 +196,10 @@ Programs such as Fabricator run `serve --json` as a child process; [embedding.md
 - **Stopping.** A thread reads stdin until it ends (`shutdown::StopListener`); `serve` listens to it, and to Ctrl+C, from the start, so a host that gives up during a slow start stops it too.
 - **Feature crates** report through hooks rather than knowing about events: `rl-functions` calls `FunctionsConfig::on_state` (building, ready, failed with the compiler's messages), the token sources handed to the services report the audiences without a token (`azure-sign-in`), and which connector types run locally is decided in one place, `integrations::connector_runs_locally`.
 - **Live state.** `events::live()` keeps the last `ready`, `schema`, `functions` and `vite` events, with or without `--json`, for the control API's `GET /status`.
+- **Reloading.** A configuration change that applied emits `config-changed`, then a new `ready` (`commands::serve::ready_event`, as at startup).
+  `ServeContext::reload` is the `reload::ReloadHandle` that applies the project's changes on demand.
 - **Control API.** `control.rs` serves `/.rayfin-local/control/*` when `RAYFIN_LOCAL_CONTROL_TOKEN` is set: `main` takes the token from the environment before anything else runs, so no child inherits it, and `serve` checks it before starting.
+  Its router is one of `commands::serve::Features::routers`, so it is built again, over the services that run then, each time live reload swaps in a new router.
   A guard layer answers only loopback peers that send no `Origin` and the token as a bearer token (compared as SHA-256 digests in constant time).
   The handlers use the services' own APIs: `rl-auth` for users, sessions and the sign-in identity, `rl-graphql`'s `admin` module for rows (formatted by the data API's SQL), and `rl_storage::clear`.
   `POST /reload` goes through `control::ReloadTrigger`; `NoReload` answers 501 `not-available`.
@@ -220,7 +236,8 @@ Under rayfin-local, the sign-in identity answers instead:
 
 - `serve` makes a random secret for the run and gives it only to `js/vite-dev.mjs` (`RAYFIN_LOCAL_SIGN_IN_SECRET`), which takes it out of its environment before the app's Vite config loads.
 - Its `rayfin-local:sign-in` plugin is a `pre` plugin, so its middleware comes before `rayfinLocalDev()`'s; it applies the same checks (a loopback peer, no foreign `Origin`) and asks the backend's `GET /.rayfin-local/dev/session-token` with the secret.
-- `rl_auth::AutoSignIn` holds the identity (`--sign-in-as`, `[auth] sign_in_as`, then the control API's `PUT /identity`), and the route issues a session for it, as a sign-in would.
+- `rl_auth::AutoSignIn` holds the identity (`--sign-in-as`, `[auth] sign_in_as`, then the control API's `PUT /identity` or a new `[auth] sign_in_as` while serving), and the route issues a session for it, as a sign-in would.
+  Live reload changes the auth service's settings in place, so the identity, the secret and the developer's account stay.
 - `developer` is the Entra user of a Power BI token that the broker gets without a prompt (`TokenSource::token_silently`: the environment, its cache, the Azure CLI, or the Rayfin CLI's cache), signed in as "Continue as" does; without one, `developer@example.com`.
   Without an Azure sign-in, asking takes a second or more, so after a failure it asks again only after five minutes or a switch of the identity.
 - Switching the identity revokes every session while it holds the identity's write lock, so no session for the old identity is issued during the switch.
@@ -365,7 +382,7 @@ Failures come back in the envelope the SDK's normalizer reads, so the app sees t
 
 SQL connectors (`fabric-sqldatabase`, `fabric-warehouse`, `fabric-sqlanalytics`) answer `/connectors/<name>/graphql` with the GraphQL API `rayfin up` would deploy for their entity classes:
 
-- At startup, the binary analyzes `rayfin/connectors/<name>/` with the project's `@microsoft/rayfin-core` (`js/analyze.mjs` in connectors mode), completes each model with the connector's `metadata.json`, and limits its grants to the connector's `operations`.
+- At startup, and again when they change, the binary analyzes `rayfin/connectors/<name>/` with the project's `@microsoft/rayfin-core` (`js/analyze.mjs` in connectors mode), completes each model with the connector's `metadata.json`, and limits its grants to the connector's `operations`.
 - `rl-graphql`'s front end (parsing, validation, planning, policies) runs on that schema, and its `tsql` module turns each root field into one T-SQL statement and runs it on a `SqlBackend`.
 - `rl-connectors` implements `SqlBackend` over TDS (`tiberius`, rustls on ring) with a small pool, after finding the item's server and database through the Fabric REST API; both calls use the developer's tokens.
 
@@ -439,6 +456,7 @@ rayfin-local is a development tool for one person, but it holds the keys to that
 - **SDK conformance**: the `sdk.rs` tests of `rl-auth`, `rl-graphql` and `rl-storage`, `rl-connectors`' `sdk_decode.rs` and `rl-functions`' `host.rs` drive rayfin-local with the real `@microsoft/rayfin-*` 1.36.2 packages from the fixture app, and skip when Node.js or the packages are missing.
 - **The host contract**: `crates/rayfin-local/tests/host_contract.rs` runs the built binary: `version --json`, fatal errors of `serve --json`, and a `serve --json` of the fixture app from its events to the end of stdin (it skips without the fixture's packages).
   `control_api.rs` drives the control API and automatic sign-in of the fixture app the same way.
+- **Live reload**: `crates/rayfin-local/tests/live_reload.rs` runs `serve --json` on a copy of the fixture app: `rayfin.yml` edits applied on the same ports, `secret set` restarting the function host, and Vite started again after it is killed.
 - **End to end**: Playwright drives the fixture app in `tests/e2e` (sign-in popup, data, functions, storage) and, optionally, the explorer app.
 
 [development.md](development.md) has the commands.

@@ -1,6 +1,7 @@
 //! Access tokens: ES256 JWTs shaped like the real service's, and their verification.
 
 use std::io;
+use std::sync::Arc;
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -56,7 +57,7 @@ impl std::fmt::Debug for AccessClaims {
 
 /// Mints and verifies the app's access tokens.
 pub(crate) struct Jwt {
-    key: SigningKey,
+    key: Arc<SigningKey>,
     issuer: String,
     audience: String,
     access_ttl_seconds: i64,
@@ -67,6 +68,15 @@ pub(crate) struct Jwt {
 
 impl Jwt {
     pub(crate) fn new(key: SigningKey, settings: &AuthSettings) -> Self {
+        Self::with_key(Arc::new(key), settings)
+    }
+
+    /// The same signing key with other settings.
+    pub(crate) fn with_settings(&self, settings: &AuthSettings) -> Self {
+        Self::with_key(Arc::clone(&self.key), settings)
+    }
+
+    fn with_key(key: Arc<SigningKey>, settings: &AuthSettings) -> Self {
         let custom_claims = settings
             .custom_claims
             .iter()

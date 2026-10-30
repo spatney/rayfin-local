@@ -112,7 +112,7 @@ impl AuthService {
                 .lock()
                 .is_some_and(|until| Instant::now() < until)
         };
-        let entra = if self.settings.entra_signin.enabled && !unavailable() {
+        let entra = if self.settings().entra_signin.enabled && !unavailable() {
             self.developer_identity_silently()
                 .await
                 .inspect_err(|failure| {
@@ -198,7 +198,7 @@ impl AuthService {
                 None,
             ));
         }
-        if !self.settings.enabled {
+        if !self.settings().enabled {
             return Err(Refusal::new(
                 StatusCode::NOT_FOUND,
                 "Sign-in is turned off for this app.",

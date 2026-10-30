@@ -447,6 +447,38 @@ async fn functions_get_the_caller_secrets_and_tokens() {
 }
 
 #[tokio::test]
+async fn new_secret_values_replace_only_the_host() {
+    let states = Arc::new(Mutex::new(Vec::new()));
+    let mut config = fixture_config().await;
+    let seen = Arc::clone(&states);
+    config.on_state = Some(Arc::new(move |state: &rl_functions::FunctionsState| {
+        seen.lock().unwrap().push(state.clone());
+    }));
+    let service = start(config, Arc::default()).await;
+    let router = service.router();
+    assert_eq!(invoke(&router, "counter", json!({})).await.output(), 1);
+    assert_eq!(invoke(&router, "counter", json!({})).await.output(), 2);
+
+    service
+        .restart_host(vec![("API_KEY".into(), "rotated".into())])
+        .await;
+    assert_eq!(
+        invoke(&router, "secret", json!({})).await.output(),
+        json!({"length": 7})
+    );
+    // A new host, with fresh module state.
+    assert_eq!(invoke(&router, "counter", json!({})).await.output(), 1);
+    assert!(
+        matches!(
+            states.lock().unwrap().last(),
+            Some(rl_functions::FunctionsState::Ready { names }) if names.contains(&"secret".to_owned())
+        ),
+        "{states:?}"
+    );
+    service.stop().await;
+}
+
+#[tokio::test]
 async fn a_timeout_answers_408_and_the_host_is_replaced() {
     let mut config = fixture_config().await;
     config.invoke_timeout = Duration::from_millis(1500);

@@ -134,17 +134,19 @@ impl AuthService {
     /// What the brokered routes answer when they are off: the SDK reads 400 as "not enabled"
     /// and 404 as "not available".
     fn brokered_unavailable(&self) -> ApiError {
-        if !self.settings.enabled {
+        let settings = self.settings();
+        if !settings.enabled {
             return ApiError::not_found();
         }
-        if !(self.settings.fabric_enabled && self.settings.external_entra_exchange) {
+        if !(settings.fabric_enabled && settings.external_entra_exchange) {
             return ApiError::mode_disabled(NOT_ENABLED);
         }
         ApiError::not_found()
     }
 
     async fn exchange_entra_token(&self, headers: &HeaderMap) -> Result<TokenResponse, ApiError> {
-        if !(self.settings.enabled && self.settings.entra_signin.enabled) {
+        let settings = self.settings();
+        if !(settings.enabled && settings.entra_signin.enabled) {
             return Err(self.brokered_unavailable());
         }
         self.warn_about_fabric_flags();
@@ -189,7 +191,8 @@ impl AuthService {
 
     /// Locally the exchange works without `externalEntraExchange`; say once that Fabric won't.
     fn warn_about_fabric_flags(&self) {
-        if self.settings.fabric_enabled && self.settings.external_entra_exchange {
+        let settings = self.settings();
+        if settings.fabric_enabled && settings.external_entra_exchange {
             return;
         }
         if !self.entra.warned.swap(true, Ordering::Relaxed) {
@@ -255,7 +258,8 @@ impl AuthService {
     }
 
     fn check_audience(&self, claims: &Map<String, Value>) -> Result<(), EntraTokenError> {
-        let accepted = &self.settings.entra_signin.audiences;
+        let settings = self.settings();
+        let accepted = &settings.entra_signin.audiences;
         let is_accepted = |aud: &str| {
             accepted.iter().any(|ok| {
                 ok.trim_end_matches('/')
@@ -279,13 +283,14 @@ impl AuthService {
     }
 
     fn tenant_allowed(&self, tenant: &str) -> bool {
-        let allowed = &self.settings.entra_signin.allowed_tenants;
+        let settings = self.settings();
+        let allowed = &settings.entra_signin.allowed_tenants;
         allowed.is_empty() || allowed.iter().any(|ok| ok.eq_ignore_ascii_case(tenant))
     }
 
     /// Whether the sign-in page offers "Continue as <you>".
     pub(crate) fn entra_portal_enabled(&self) -> bool {
-        self.settings.entra_signin.enabled && self.entra.tokens.is_some()
+        self.settings().entra_signin.enabled && self.entra.tokens.is_some()
     }
 
     /// The developer's identity, from a Power BI token minted for them, which must be a user's

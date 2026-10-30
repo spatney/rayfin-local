@@ -11,6 +11,7 @@ use std::sync::{Arc, OnceLock};
 use rl_node::{LineSink, Stream};
 use serde_json::Value;
 
+use crate::errors::HostError;
 use crate::events::{self, LogLevel, LogSource, WarningCode};
 
 #[derive(Clone, Copy)]
@@ -191,6 +192,16 @@ pub fn error(err: &anyhow::Error) {
     let _ = io::stderr().lock().write_all(out.as_bytes());
 }
 
+/// An error hosts can act on that leaves `serve` running: with `--json` an `error` event that
+/// isn't fatal (its code from [`HostError::classify`]), else `error: message` as [`error`]
+/// prints it.
+pub fn error_event(err: &anyhow::Error) {
+    if events::is_json() {
+        return events::emit(HostError::classify(err).event(false));
+    }
+    error(err);
+}
+
 /// The message of `err` and of each of its causes, leaving out those whose text the messages
 /// before already include.
 pub fn error_lines(err: &anyhow::Error) -> Vec<String> {
@@ -264,18 +275,33 @@ pub fn banner(banner: &Banner<'_>) {
         return;
     }
     let painter = Painter::stderr();
-    let width = banner
-        .rows
-        .iter()
-        .map(|(label, _)| label.len())
-        .max()
-        .unwrap_or(0)
-        + 2;
     let mut out = format!(
         "\n  {} is running locally\n\n",
         painter.paint(Color::Bold, banner.app_name)
     );
-    for (label, value) in &banner.rows {
+    out.push_str(&format_rows(&banner.rows, painter));
+    out.push_str(&format!(
+        "\n  {}\n\n",
+        painter.paint(Color::Dim, "Press Ctrl+C to stop.")
+    ));
+    let _ = io::stderr().lock().write_all(out.as_bytes());
+}
+
+/// Rows of the banner, such as those of the features that changed while serving.
+pub fn rows(rows: &[(&'static str, String)]) {
+    if events::is_json() || rows.is_empty() {
+        return;
+    }
+    let _ = io::stderr()
+        .lock()
+        .write_all(format_rows(rows, Painter::stderr()).as_bytes());
+}
+
+/// Labeled rows, the labels aligned and URLs in color.
+fn format_rows(rows: &[(&'static str, String)], painter: Painter) -> String {
+    let width = rows.iter().map(|(label, _)| label.len()).max().unwrap_or(0) + 2;
+    let mut out = String::new();
+    for (label, value) in rows {
         let label = painter.paint(Color::Bold, format_args!("{label:<width$}"));
         let value = if value.starts_with("http://") || value.starts_with("https://") {
             painter.paint(Color::Cyan, value)
@@ -284,9 +310,5 @@ pub fn banner(banner: &Banner<'_>) {
         };
         out.push_str(&format!("  {label}{value}\n"));
     }
-    out.push_str(&format!(
-        "\n  {}\n\n",
-        painter.paint(Color::Dim, "Press Ctrl+C to stop.")
-    ));
-    let _ = io::stderr().lock().write_all(out.as_bytes());
+    out
 }

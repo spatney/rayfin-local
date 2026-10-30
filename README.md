@@ -42,6 +42,7 @@ rayfin-local serve
 - [Secrets](#secrets)
 - [Local state and reset](#local-state-and-reset)
 - [Schema changes](#schema-changes)
+- [Live reload](#live-reload)
 - [Configuration file](#configuration-file)
 - [Commands and flags](#commands-and-flags)
 - [Troubleshooting](#troubleshooting)
@@ -51,7 +52,7 @@ rayfin-local serve
 
 - **Start without Fabric.** Run a Rayfin app before you have a workspace, a capacity or a deployment.
 - **Disposable data.** Each project gets its own SQLite database; start over with `--reset`.
-- **A fast loop.** Entity changes migrate the database while the app runs, functions rebuild and reload, and Vite hot-reloads the UI.
+- **A fast loop.** Entity changes migrate the database while the app runs, `rayfin.yml` changes apply without a restart, functions rebuild and reload, and Vite hot-reloads the UI.
 - **Production code, unmodified.** Your app, the Rayfin SDK, your entity decorators and your functions run as they are; rayfin-local implements the backend side of the SDK's contract.
 - **Real cloud data where you want it.** Functions and connectors call real Azure DevOps, Azure AI, Fabric and Power BI APIs and query real Fabric SQL databases, warehouses and Lakehouse SQL endpoints with your own Azure sign-in.
 - **Easy end-to-end tests.** One command starts the whole app, and tokens can be fixed with environment variables.
@@ -298,7 +299,8 @@ rayfin-local caches tokens in memory and never logs them.
 
 Functions read the secrets declared in `rayfin.yml` as `ctx.Secrets.<NAME>`.
 Locally, a secret's value comes from the environment, from `.rayfin-local/secrets.json`, or from the `Values` of `rayfin/functions/local.settings.json`, in that order.
-`rayfin-local secret set`, `secret list` and `secret delete` manage `.rayfin-local/secrets.json`, which is never committed; restart `serve` after changing a secret.
+`rayfin-local secret set`, `secret list` and `secret delete` manage `.rayfin-local/secrets.json`, which is never committed.
+A running `serve` picks up a changed value there or in `local.settings.json` by itself, and restarts only its function host with it.
 
 ## Local state and reset
 
@@ -331,9 +333,28 @@ Rebuilding the package yourself also counts as a change.
 - Changes that would lose data are refused with a list of exactly what would be lost: dropped entities or fields that hold values, values that can't be converted to a new type, required fields without a default.
   Restart with `serve --force-schema` to apply them anyway (a `serve` started with it also applies them as you edit), or `serve --reset` to start over.
 
-Changes to `rayfin.yml` itself (services, auth settings, connectors, secrets), to the storage folders and to SQL connectors' entities (`rayfin/connectors/`) apply on the next start; `serve` prints a reminder when it sees changes to `rayfin.yml` and the storage folders.
-
 `rayfin-local schema` prints the app model and the SQLite schema derived from `rayfin/data`.
+
+## Live reload
+
+While `serve` runs, it applies these changes in place, on the same ports, so the app's URLs don't change:
+
+| You change | What happens |
+| --- | --- |
+| The entities (`rayfin/data`, the files they import, the tsconfig files) | The database and the data API move to the new model (see [Schema changes](#schema-changes)). |
+| `rayfin.yml`: `services` (`auth`, `data`, `functions`, `storage`), `connectors`, `secrets`, `name` | The services whose settings changed are rebuilt: turned on or off, or started again with the new settings. Users, sessions, data, signing keys and the sign-in identity stay. |
+| The storage folders (`rayfin/storage`) | The storage service is rebuilt with the new folders. |
+| The SQL connectors' entities (`rayfin/connectors/<name>/`, `metadata.json`) | They are analyzed again, and the connectors' routes rebuilt. |
+| A secret's value (`secret set`, `secret delete`, `local.settings.json`) | Only the function host restarts, with the new values. |
+| `rayfin-local.toml`: `[auth]`, `[fabric]`, `[connectors]`, `[functions]` | As for `rayfin.yml`. A new `[auth] sign_in_as` (unless you passed `--sign-in-as`) signs every session out, so the app signs in again as the new identity. |
+
+`serve` prints what it applied, with the banner's rows that changed.
+A `rayfin.yml` or `rayfin-local.toml` that can't be read is reported, and the previous configuration stays in use until it is fixed.
+
+Some changes need a restart, and `serve` says so: moving the app's frontend (`services.staticHosting.path` or `root`, and with `--static` how it is built), and `[server]`, `[frontend]` and `[tokens]` in `rayfin-local.toml`.
+
+When the Vite dev server stops by itself, `serve` starts it again on the same port, after 1, 2 and then 5 seconds.
+After a fourth stop within two minutes it gives up and says so; the backend keeps running.
 
 ## Configuration file
 

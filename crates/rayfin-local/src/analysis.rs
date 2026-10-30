@@ -113,6 +113,10 @@ pub async fn reanalyze(
     verbose: bool,
     build: bool,
 ) -> anyhow::Result<AppModel> {
+    let services = &project.config().services;
+    if !services.data.enabled && !services.storage.enabled {
+        return Ok(empty_model(model_dialect(services.data.dialect())));
+    }
     let (model, cached, _) =
         load_model(project, state, node, verbose, &WHILE_SERVING, build).await?;
     if !cached {

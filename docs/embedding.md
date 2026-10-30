@@ -55,7 +55,7 @@ Every event has `v` (the contract version), `type` and `time` (RFC 3339, UTC, wi
 
 Events in the order a successful start emits them: `starting`, `analysis`, `schema`, `functions` (when the functions service is on), `vite` (unless `--no-frontend` or `--static`), `ready`.
 `log`, `warning` and `error` can come at any time.
-After `ready`, live changes emit `analysis`, `schema`, `functions`, `vite` and `config-changed` again.
+After `ready`, live changes emit `analysis`, `schema`, `functions`, `vite` and `config-changed` again, and a change that applies is followed by a new `ready`.
 The last event is always `stopped`.
 A failure before the project is found and read (`project-not-found`, an invalid `rayfin.yml`) emits only `error` and `stopped`.
 
@@ -103,6 +103,8 @@ The database was brought up to date with the model, or wasn't.
 `state` is `building`, `ready`, `failed` (with the build's `errors`, one string per compiler message, and the previous build keeps serving if there was one) or `off` (with the reason in `message`).
 With `failed`, `names` lists the functions that still run: those of the previous build, or of output the compiler emitted despite the errors (`tsc` does), which is loaded but stays `failed` until a build succeeds.
 `serve` starts without a `functions` event when the service is off (`--no-functions`, or `services.functions` disabled in `rayfin.yml`).
+Turning `services.functions` off while serving emits `off`; turning it on emits `building`, then `ready` or `failed`.
+New secret values restart the function host, which then emits `ready` again.
 
 ### `vite`
 
@@ -112,11 +114,14 @@ With `failed`, `names` lists the functions that still run: those of the previous
 
 `state` is `ready`, `exited` (it stopped on its own; `message` says how), `restarting` (rayfin-local is starting it again, with backoff) or `failed` (it could not start, or kept exiting; `message` says why).
 The URL never changes while `serve` runs: a restarted Vite takes the same port.
+After Vite exits, it is started again after 1, 2 and then 5 seconds: `restarting`, then `ready`, or the next `restarting` when that start fails (its `message` says why).
+When it stops a fourth time within two minutes (three restarts failed), rayfin-local stops trying and emits `failed`; the backend keeps running, and a restart of `serve` starts Vite again.
 
 ### `ready`
 
 Everything started.
 Hosts show the app once they see this event.
+It comes again after each `config-changed` that applied, with the new features; the URLs stay the same.
 
 ```json
 {
@@ -144,19 +149,26 @@ Hosts show the app once they see this event.
 - `appUrl` is `null` with `--no-frontend`; with `--static` it is the backend's origin.
 - `embedUrl` is `null` when the app has no Fabric sign-in, or no `appUrl`.
 - `signInAs` is the [automatic sign-in](#automatic-sign-in) identity: `{"kind":"developer"}`, `{"kind":"user","username":"ana@example.com"}` or `{"kind":"none"}`.
+- `features.data.enabled` is `false` while the data service is off, or when it was turned on while serving with a schema change that was refused.
 - `connectors[].supported` is `false` for connector types rayfin-local answers with 501.
 
 ### `config-changed`
 
-`rayfin.yml`, `rayfin-local.toml` or the secret values changed while serving.
+`rayfin.yml`, `rayfin-local.toml`, the storage folders, the SQL connectors' entities (`rayfin/connectors/`) or the secret values (`.rayfin-local/secrets.json`, the functions' `local.settings.json`) changed while serving.
 
 ```json
-{"v":1,"type":"config-changed","time":"…","applied":true,"restartRequired":false,"what":["services","connectors"],"message":null}
+{"v":1,"type":"config-changed","time":"…","applied":true,"restartRequired":false,"what":["storage","functions"],"message":null}
 ```
 
+- `what` lists what changed: `auth` (`services.auth`, `[auth]`), `name`, `data`, `functions` (`services.functions`, `[functions]`), `storage` (`services.storage`, the storage folders), `connectors` (the connectors, their entities, `[connectors]`), `secrets` (the declared secrets, their values) and `fabric` (`[fabric]`) apply while serving; `frontend` (`services.staticHosting` moving the app, `[frontend]`), `server` (`[server]`) and `tokens` (`[tokens]`) need a restart.
+  Settings set by a command-line flag don't count.
 - `applied: true`: the services were rebuilt on the same ports, and a new `ready` event follows with the new features.
-- `restartRequired: true`: the change can't be applied while running (for example the frontend's folder moved); `message` says what.
+  The listeners, the database, the users and their sessions, the signing keys and the [sign-in identity](#automatic-sign-in) (unless `[auth] sign_in_as` changed) stay, and so does the [control API](#control-api).
+  New secret values restart only the function host.
+- `restartRequired: true`: some of the change can't be applied while running (for example the frontend's folder moved); `message` says what.
+  Nothing of `rayfin.yml` or `rayfin-local.toml` applied then; `applied` tells whether something else did.
   Hosts restart `serve`.
+- A `rayfin.yml` or `rayfin-local.toml` that can't be read emits a `config-invalid` error that isn't fatal, and the previous configuration stays in use.
 
 ### `log`
 
@@ -184,7 +196,7 @@ A `fatal` error is followed by `stopped`; other errors leave `serve` running.
 | `node-missing` | error | Node.js was not found. |
 | `node-too-old` | error | Node.js is older than 20. `details`: `{"version"}`. |
 | `project-not-found` | error | No `rayfin/rayfin.yml` in the folder or its parents. |
-| `config-invalid` | error | `rayfin.yml`, `rayfin-local.toml`, `.rayfin-local/state.json`, the functions' folder, `package.json` or `local.settings.json`, or the control token is invalid. |
+| `config-invalid` | error | `rayfin.yml`, `rayfin-local.toml`, `.rayfin-local/state.json`, the functions' folder, `package.json` or `local.settings.json`, or the control token is invalid. Not fatal when `rayfin.yml` or `rayfin-local.toml` changes while serving: the previous configuration stays in use. |
 | `packages-missing` | error | The project's npm packages (or the functions') aren't installed. `details`: `{"dir"}`, the folder to run `npm install` in. For the functions' packages it is not fatal: it comes before their build, which then fails. |
 | `sdk-unsupported` | warning | The app's Rayfin packages are outside `sdk.supported`. `details`: `{"version","supported"}`. |
 | `analysis-failed` | error | The model could not be analyzed, or `rayfin-local.toml` refuses it (`[fabric] anonymous_data_access = false` and entities that grant `anonymous`). |
@@ -226,10 +238,11 @@ Under rayfin-local, the dev server answers that route itself, ahead of `rayfinLo
 | `none` | `none` | Nobody: the route answers 401 `{"error":"Automatic sign-in is off.","hint":"…"}`. |
 
 `[auth] sign_in_as` in `rayfin-local.toml` sets the identity too (`"developer"`, `"none"` or `"user:<username>"`); `--sign-in-as` wins.
+Changing it while `serve` runs switches the identity (a `config-changed` event with `auth` in `what`), unless `--sign-in-as` was given; other live changes keep the identity.
 When `developer` finds no Entra identity, it asks again after five minutes, or at once after `PUT /identity`, for example once the developer signed in to Azure.
 The answer is a session like any other, in the shape `fetchRayfinLocalSessionToken()` expects: `{"accessToken","tokenType","expiresIn","refreshToken","scope"}`.
 Failures are `{"error","hint"}`, which the page shows: 403 for requests from other machines or other origins, 404 when the app's auth is off (`services.auth.enabled: false`), 500 when signing in failed.
-Changing the identity (through the control API) revokes every local session, so an app that reloads signs in again as the new identity.
+Changing the identity (through the control API, or `[auth] sign_in_as` while `serve` runs) revokes every local session, so an app that reloads signs in again as the new identity.
 The dev server gets the session from the backend's `GET /.rayfin-local/dev/session-token`, which answers only rayfin-local's own dev server: loopback requests that carry a secret of the run, which no page and none of the app's code sees.
 
 ## Control API
@@ -243,6 +256,7 @@ With `RAYFIN_LOCAL_CONTROL_TOKEN` set, the backend serves `{apiUrl}/.rayfin-loca
 - Bodies are JSON; a route that takes one also takes an empty body, as `{}`.
   Errors are `{"error":{"code","message","hint"}}` with a 4xx or 5xx status; `code` is stable, and is one of `unauthorized` (401), `forbidden` (403), `invalid-request` (400), `invalid-order-by` (400), `user-not-found` (404), `entity-not-found` (404), `user-exists` (409), `rows-referenced` (409), `internal` (500), `not-available` (501) and `starting` (503).
 - Without the variable, these routes answer 404.
+- Live reload keeps them: they answer, with the same token, after every change it applies.
 
 | Method and path | Body | Answer |
 | --- | --- | --- |
@@ -286,7 +300,7 @@ Leave out `Authorization` to call as an anonymous user.
 
 `rayfin-local secret set <NAME>` reads the value from stdin when it isn't given as an argument; `secret delete <NAME>` removes it.
 `rayfin-local secret list --json` prints `{"secrets":[{"name","declared":true,"description":null,"source":"env"}]}` with `source` one of `env`, `local` (`.rayfin-local/secrets.json`), `settings` (`local.settings.json`) or `none`; values are never printed.
-A running `serve` picks up a change made with `secret set` or `secret delete` by itself (a `config-changed` event follows), so hosts don't restart it.
+A running `serve` picks up a change made with `secret set` or `secret delete` by itself and restarts only its function host (a `config-changed` event with `"what": ["secrets"]` follows), so hosts don't restart it.
 
 ## Doctor
 

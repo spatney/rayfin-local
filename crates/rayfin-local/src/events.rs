@@ -36,10 +36,6 @@ pub enum Event {
     Functions(Functions),
     Vite(Vite),
     Ready(Box<Ready>),
-    #[allow(
-        dead_code,
-        reason = "emitted once rayfin.yml changes apply while serving"
-    )]
     ConfigChanged(ConfigChanged),
     Log(Log),
     Warning(Warning),
@@ -109,10 +105,6 @@ pub enum FunctionsStatus {
     Building,
     Ready,
     Failed,
-    #[allow(
-        dead_code,
-        reason = "emitted once rayfin.yml changes apply while serving"
-    )]
     Off,
 }
 
@@ -129,7 +121,6 @@ pub struct Vite {
 pub enum ViteState {
     Ready,
     Exited,
-    #[allow(dead_code, reason = "emitted once Vite is restarted when it exits")]
     Restarting,
     Failed,
 }
@@ -645,23 +636,30 @@ pub fn emit(event: Event) {
     publish(&event, false);
 }
 
+/// [`emit`], returning the event's line, for answers that carry the event.
+pub fn emit_line(event: Event) -> Value {
+    let line = event.to_json(&now());
+    record(&event, &line, false);
+    line
+}
+
 /// Emits `stopped`, the last event: events emitted after it are dropped.
 pub fn finish(stopped: Stopped) {
     publish(&Event::Stopped(stopped), true);
 }
 
 fn publish(event: &Event, last: bool) {
-    let output = OUTPUT.get();
-    let kept = LiveState::keeps(event);
-    if output.is_none() && !kept {
-        return;
+    if OUTPUT.get().is_some() || LiveState::keeps(event) {
+        record(event, &event.to_json(&now()), last);
     }
-    let line = event.to_json(&now());
-    if kept {
-        live().record(&line);
+}
+
+fn record(event: &Event, line: &Value, last: bool) {
+    if LiveState::keeps(event) {
+        live().record(line);
     }
-    if let Some(output) = output {
-        output.write(&line, last);
+    if let Some(output) = OUTPUT.get() {
+        output.write(line, last);
     }
 }
 
@@ -929,13 +927,13 @@ mod tests {
         let changed = Event::ConfigChanged(ConfigChanged {
             applied: true,
             restart_required: false,
-            what: vec!["services".into(), "connectors".into()],
+            what: vec!["storage".into(), "functions".into()],
             message: None,
         });
         assert_eq!(
             line(changed),
             parse(
-                r#"{"v":1,"type":"config-changed","time":"2026-10-30T03:12:09.512Z","applied":true,"restartRequired":false,"what":["services","connectors"],"message":null}"#
+                r#"{"v":1,"type":"config-changed","time":"2026-10-30T03:12:09.512Z","applied":true,"restartRequired":false,"what":["storage","functions"],"message":null}"#
             )
         );
         let log = Event::Log(Log {

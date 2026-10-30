@@ -150,7 +150,8 @@ impl AuthService {
     /// The host page, under the sign-in page's CSP plus `frame-src` for the app; or a page that
     /// explains why it cannot frame the app.
     fn host_page(&self, headers: &HeaderMap, uri: &Uri) -> Result<Response, AuthError> {
-        if !self.settings.enabled {
+        let settings = self.settings();
+        if !settings.enabled {
             return notice(
                 StatusCode::NOT_FOUND,
                 "Sign-in is turned off",
@@ -190,7 +191,7 @@ impl AuthService {
         let csrf = self
             .portal
             .csrf_token(self.now_ms(), HOST_SESSION_LIFETIME_MS)?;
-        let app_name = self.settings.app_name.as_deref();
+        let app_name = settings.app_name.as_deref();
         let label = app_name.unwrap_or(&app.origin);
         let heading =
             app_name.map_or_else(|| "Sign in".to_owned(), |name| format!("Sign in to {name}"));
@@ -199,7 +200,7 @@ impl AuthService {
             "api": API_PATH,
             "appName": app_name,
             "authEnabled": true,
-            "signUp": self.settings.signup_enabled,
+            "signUp": settings.signup_enabled,
             "entra": self.entra_portal_enabled(),
             "embed": { "src": app.src, "origin": app.origin },
         });

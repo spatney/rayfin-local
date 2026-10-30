@@ -123,7 +123,7 @@ impl AuthService {
     /// An access token for `user` in a session of its own without a refresh token, for calls a
     /// host makes as the user; the session ends with the token.
     pub async fn issue_access_token(&self, user: &User) -> Result<TokenResponse, AuthError> {
-        let expires_at = self.now_ms() + self.jwt.access_ttl_seconds() * 1000;
+        let expires_at = self.now_ms() + self.jwt().access_ttl_seconds() * 1000;
         self.new_session(user, expires_at, false).await
     }
 
@@ -133,7 +133,7 @@ impl AuthService {
         expires_at: i64,
         refreshable: bool,
     ) -> Result<TokenResponse, AuthError> {
-        let jwt = Arc::clone(&self.jwt);
+        let jwt = self.jwt();
         let user_id = user.id.clone();
         let now = self.now_ms();
         self.db
@@ -169,11 +169,11 @@ impl AuthService {
         };
         let selector = selector.to_owned();
         let presented = refresh_token.to_owned();
-        let jwt = Arc::clone(&self.jwt);
+        let jwt = self.jwt();
         let now = self.now_ms();
         let lifetime = self.refresh_lifetime_ms();
         let absolute_lifetime = self
-            .settings
+            .settings()
             .session_absolute_lifetime_minutes
             .map(|minutes| i64::from(minutes) * 60_000);
         self.db
@@ -298,7 +298,7 @@ impl AuthService {
 
     /// Verifies an access token and that its session has not been signed out.
     pub(crate) fn verify_session_token(&self, token: &str) -> Result<AccessClaims, TokenError> {
-        let claims = self.jwt.verify(token, self.now_ms() / 1000)?;
+        let claims = self.jwt().verify(token, self.now_ms() / 1000)?;
         if self.revoked.contains(&claims.sid) {
             return Err(TokenError::Revoked);
         }
@@ -359,12 +359,12 @@ impl AuthService {
     }
 
     fn refresh_lifetime_ms(&self) -> i64 {
-        i64::from(self.settings.refresh_token_days) * 86_400_000
+        i64::from(self.settings().refresh_token_days) * 86_400_000
     }
 
     /// How long a signed-out session's access tokens can still be presented.
     fn revocation_window_ms(&self) -> i64 {
-        (self.jwt.access_ttl_seconds() + LEEWAY_SECONDS) * 1000
+        (self.jwt().access_ttl_seconds() + LEEWAY_SECONDS) * 1000
     }
 }
 

@@ -3,8 +3,10 @@
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
-use rl_server::{HEALTH_PATH, ServerConfig, bind, build_router, is_port_free, serve};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use axum::Router;
+use axum::routing::get as route_get;
+use rl_server::{HEALTH_PATH, RouterHandle, ServerConfig, bind, build_router, is_port_free, serve};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 fn config() -> ServerConfig {
@@ -106,4 +108,60 @@ async fn other_hosts_bind_just_that_address() {
             Ipv4Addr::new(127, 0, 0, 2)
         );
     }
+}
+
+/// `GET path` on a connection that stays open; the body of the answer.
+async fn get_keeping_alive(stream: &mut BufReader<TcpStream>, path: &str) -> String {
+    let request = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n");
+    stream
+        .get_mut()
+        .write_all(request.as_bytes())
+        .await
+        .unwrap();
+    let mut length = 0;
+    loop {
+        let mut line = String::new();
+        stream.read_line(&mut line).await.unwrap();
+        if line == "\r\n" {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            length = value.trim().parse().unwrap();
+        }
+    }
+    let mut body = vec![0; length];
+    stream.read_exact(&mut body).await.unwrap();
+    String::from_utf8(body).unwrap()
+}
+
+#[tokio::test]
+async fn a_replaced_router_answers_the_next_requests_on_the_same_connection() {
+    let listeners = bind("127.0.0.1", 0).await.unwrap();
+    let addr = listeners[0].local_addr().unwrap();
+    let answering =
+        |text: &'static str| Router::new().route("/which", route_get(move || async move { text }));
+    let handle = RouterHandle::new(answering("first"));
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(serve(handle.router(), listeners, async {
+        let _ = stopped.await;
+    }));
+
+    let mut stream = BufReader::new(TcpStream::connect(addr).await.unwrap());
+    assert_eq!(get_keeping_alive(&mut stream, "/which").await, "first");
+    handle.replace(answering("second"));
+    assert_eq!(get_keeping_alive(&mut stream, "/which").await, "second");
+    let full = build_router(config(), vec![]);
+    handle.replace(full);
+    let response = get(addr, HEALTH_PATH).await;
+    assert!(response.ends_with(r#"{"ok":true}"#), "{response}");
+    assert!(get(addr, "/which").await.starts_with("HTTP/1.1 404"));
+
+    stop.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .expect("serve stops after the shutdown signal")
+        .unwrap()
+        .unwrap();
 }

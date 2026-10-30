@@ -1,20 +1,22 @@
 //! How `serve` configures each feature service from the project.
 //!
 //! Each feature returns its router (state applied) for `rl_server::build_router`, or `None` when
-//! it is off. Features that start processes register them in [`StopHooks`].
+//! it is off. Live reload ([`crate::reload`]) builds them again when their settings change.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io;
 use std::net::IpAddr;
-use std::path::Path;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, anyhow};
 use axum::Router;
 use ring::rand::{SecureRandom as _, SystemRandom};
 use rl_auth::{AuthService, AuthSettings};
 use rl_connectors::{
-    ConnectorDef, ConnectorsConfig, DEFAULT_POWERBI_BASE_URL, SqlConnectorsConfig,
+    ConnectorDef, ConnectorsConfig, DEFAULT_POWERBI_BASE_URL, SqlConnectorModel,
+    SqlConnectorsConfig,
 };
 use rl_db::Db;
 use rl_frontend::{DevServer, DevServerConfig, RayfinEnv, StaticBuildConfig};
@@ -29,6 +31,7 @@ use rl_storage::StorageConfig;
 use rl_tokens::{
     Audience, RayfinCliConfig, TokenBroker, TokenBrokerConfig, TokenMode, TokenSource,
 };
+use serde_json::json;
 use tokio::sync::oneshot;
 
 use crate::analysis::SourcesStamp;
@@ -37,6 +40,7 @@ use crate::events::{
     self, EntityChanges, ErrorCode, Event, Functions, FunctionsStatus, Schema, Vite, ViteState,
     WarningCode,
 };
+use crate::reload::ReloadHandle;
 use crate::shutdown::StopHooks;
 use crate::tokens;
 use crate::ui;
@@ -67,6 +71,11 @@ pub struct ServeContext<'a> {
     pub frontend_port: Option<u16>,
     /// The run's secret for automatic sign-in, which the dev server sends the backend.
     pub sign_in_secret: &'a str,
+    /// `RAYFIN_LOCAL_CONTROL_TOKEN`, which turns on the host's control API (`None` when unset).
+    pub control_token: Option<&'a str>,
+    /// Applies `rayfin.yml`, the entities, the connectors and the secret values now, on demand
+    /// (see [`ReloadHandle::reload`]): what the control API's `POST /reload` calls.
+    pub reload: ReloadHandle,
 }
 
 impl ServeContext<'_> {
@@ -208,11 +217,20 @@ pub fn is_loopback(host: &str) -> bool {
         || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
+/// The SQL connectors' entities, analyzed ([`crate::connectors::analyze`]); empty without SQL
+/// connectors.
+pub async fn connector_models(ctx: &ServeContext<'_>) -> HashMap<String, SqlConnectorModel> {
+    crate::connectors::analyze(ctx.project, ctx.state, ctx.node, ctx.options.verbose).await
+}
+
 /// `POST /connector-invoke/<name>` and `POST /connectors/<name>/graphql`: the `connectors:` of
 /// `rayfin.yml`, queried with the developer's Power BI token (semantic models) or over their
-/// Fabric SQL source with the developer's Entra token (Category A connectors, whose entities are
-/// analyzed here).
-pub async fn connectors_router(ctx: &ServeContext<'_>) -> Router {
+/// Fabric SQL source with the developer's Entra token (Category A connectors, whose entities
+/// `models` has from [`connector_models`]).
+pub fn connectors_router(
+    ctx: &ServeContext<'_>,
+    models: HashMap<String, SqlConnectorModel>,
+) -> Router {
     let powerbi_base_url = ctx
         .project
         .local_config()
@@ -222,8 +240,6 @@ pub async fn connectors_router(ctx: &ServeContext<'_>) -> Router {
         .map(|url| url.trim().trim_end_matches('/'))
         .filter(|url| !url.is_empty())
         .unwrap_or(DEFAULT_POWERBI_BASE_URL);
-    let models =
-        crate::connectors::analyze(ctx.project, ctx.state, ctx.node, ctx.options.verbose).await;
     let config = ConnectorsConfig {
         connectors: connector_defs(&ctx.project.config().connectors),
         powerbi_base_url: powerbi_base_url.to_owned(),
@@ -237,6 +253,25 @@ pub async fn connectors_router(ctx: &ServeContext<'_>) -> Router {
         },
     };
     rl_connectors::router(config, ctx.callers(), ctx.tokens())
+}
+
+/// Tells hosts about each connector whose type runs only on Fabric (`connector-unsupported`).
+pub fn warn_unsupported_connectors(entries: &[ConnectorEntry]) {
+    for connector in entries {
+        let kind = connector.connector_type.as_str();
+        if !connector_runs_locally(kind) {
+            events::warning(
+                WarningCode::ConnectorUnsupported,
+                format!(
+                    "Connector {} is a {kind} connector, which runs only on Fabric: its calls \
+                     answer 501 locally.",
+                    connector.name
+                ),
+                None,
+                json!({ "name": connector.name, "type": kind }),
+            );
+        }
+    }
 }
 
 /// The banner's connectors: each with how it runs locally (`none` without connectors).
@@ -379,12 +414,39 @@ fn signing_key(path: &Path) -> anyhow::Result<[u8; 32]> {
     Ok(key)
 }
 
-/// Builds the functions and starts their host (`None` with `--no-functions` or when
-/// `services.functions` is off). A failed build still starts: invocations answer 503 until a
-/// fixed build is seen.
+/// The functions service that runs (none with `--no-functions` or `services.functions` off),
+/// shared by live reload, which replaces it, and the stop hook that stops it. Cheap to clone.
+#[derive(Clone, Default)]
+pub struct FunctionsSlot(Arc<Mutex<Option<Arc<FunctionsService>>>>);
+
+impl FunctionsSlot {
+    pub fn new(service: Option<Arc<FunctionsService>>) -> Self {
+        Self(Arc::new(Mutex::new(service)))
+    }
+
+    pub fn get(&self) -> Option<Arc<FunctionsService>> {
+        lock(&self.0).clone()
+    }
+
+    /// Puts `service` in; returns the one it replaces.
+    pub fn replace(&self, service: Option<Arc<FunctionsService>>) -> Option<Arc<FunctionsService>> {
+        std::mem::replace(&mut *lock(&self.0), service)
+    }
+
+    /// Stops the service that runs.
+    pub async fn stop(&self) {
+        if let Some(service) = self.replace(None) {
+            service.stop().await;
+        }
+    }
+}
+
+/// Builds the functions and starts their host with `secrets` (`None` with `--no-functions` or
+/// when `services.functions` is off). A failed build still starts: invocations answer 503 until
+/// a fixed build is seen. The caller stops the service ([`FunctionsSlot::stop`]).
 pub async fn start_functions(
     ctx: &ServeContext<'_>,
-    hooks: &mut StopHooks,
+    secrets: &SecretValues,
 ) -> anyhow::Result<Option<Arc<FunctionsService>>> {
     let functions = &ctx.project.config().services.functions;
     if ctx.options.no_functions || !functions.enabled {
@@ -405,7 +467,8 @@ pub async fn start_functions(
         .filter(|command| !command.trim().is_empty());
     config.workspace_id = data.workspace_id.clone();
     config.item_id = data.item_id.clone();
-    config.secrets = function_secrets(ctx);
+    secrets.warn_missing(ctx);
+    config.secrets = secrets.declared.clone();
     config.inspect_port = ctx
         .options
         .inspect
@@ -437,11 +500,6 @@ pub async fn start_functions(
                 functions_dir.display()
             )
         })?;
-    let host = Arc::clone(&service);
-    hooks.add(
-        "the function host",
-        move || async move { host.stop().await },
-    );
     Ok(Some(service))
 }
 
@@ -506,51 +564,73 @@ fn missing_packages(functions_dir: &Path) -> Option<Vec<String>> {
     (!missing.is_empty()).then_some(missing)
 }
 
-/// The values of the secrets `rayfin.yml` declares: from the environment, else from
-/// `.rayfin-local/secrets.json`. The function host reads `local.settings.json` itself; secrets
-/// with no value in any of them are reported.
-fn function_secrets(ctx: &ServeContext<'_>) -> Vec<(String, String)> {
-    let declared = &ctx.project.config().secrets;
-    if declared.is_empty() {
-        return Vec::new();
-    }
-    let stored = ctx.state.load_secrets().unwrap_or_else(|err| {
-        ui::warn(format_args!(
-            "Could not read the local secret values: {err}"
-        ));
-        BTreeMap::new()
-    });
-    let functions_dir = ctx.project.functions_dir();
-    let settings = match rl_functions::host::local_settings_values(functions_dir) {
-        Ok(values) => values.into_iter().map(|(name, _)| name).collect(),
-        Err(err) => {
-            tracing::debug!("could not read local.settings.json: {err}");
-            BTreeSet::new()
+/// What the function host gets for the secrets: the values of the secrets `rayfin.yml` declares
+/// (from the environment, else `.rayfin-local/secrets.json`), and the `Values` of the functions'
+/// `local.settings.json`, which the host reads itself. Kept to see them change; never logged.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct SecretValues {
+    /// The declared secrets that have a value, with it.
+    pub declared: Vec<(String, String)>,
+    settings: Vec<(String, String)>,
+    /// The declared secrets without a value in any of them.
+    missing: Vec<String>,
+}
+
+impl SecretValues {
+    /// Reads them now.
+    pub fn read(ctx: &ServeContext<'_>) -> Self {
+        let functions_dir = ctx.project.functions_dir();
+        let settings =
+            rl_functions::host::local_settings_values(functions_dir).unwrap_or_else(|err| {
+                tracing::debug!("could not read local.settings.json: {err}");
+                Vec::new()
+            });
+        let declared = &ctx.project.config().secrets;
+        if declared.is_empty() {
+            return Self {
+                settings,
+                ..Self::default()
+            };
         }
-    };
-    let (values, missing) = resolve_secrets(
-        declared.iter().map(|secret| secret.name.as_str()),
-        |name| std::env::var(name).ok(),
-        &stored,
-        &settings,
-    );
-    let settings_file = functions_dir.join("local.settings.json");
-    let settings_file = settings_file
-        .strip_prefix(ctx.project.root())
-        .unwrap_or(&settings_file)
-        .to_string_lossy()
-        .replace('\\', "/");
-    for name in missing {
-        ui::warning(
-            WarningCode::SecretMissing,
-            format_args!(
-                "secret {name} has no local value: add it to {settings_file} Values or run \
-                 `rayfin-local secret set {name}`"
-            ),
-            serde_json::json!({ "name": name }),
+        let stored = ctx.state.load_secrets().unwrap_or_else(|err| {
+            ui::warn(format_args!(
+                "Could not read the local secret values: {err}"
+            ));
+            BTreeMap::new()
+        });
+        let names: BTreeSet<String> = settings.iter().map(|(name, _)| name.clone()).collect();
+        let (declared, missing) = resolve_secrets(
+            declared.iter().map(|secret| secret.name.as_str()),
+            |name| std::env::var(name).ok(),
+            &stored,
+            &names,
         );
+        Self {
+            declared,
+            settings,
+            missing,
+        }
     }
-    values
+
+    /// Tells about each declared secret without a local value (`secret-missing`).
+    pub fn warn_missing(&self, ctx: &ServeContext<'_>) {
+        let settings_file = ctx.project.functions_dir().join("local.settings.json");
+        let settings_file = settings_file
+            .strip_prefix(ctx.project.root())
+            .unwrap_or(&settings_file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        for name in &self.missing {
+            ui::warning(
+                WarningCode::SecretMissing,
+                format_args!(
+                    "secret {name} has no local value: add it to {settings_file} Values or run \
+                     `rayfin-local secret set {name}`"
+                ),
+                json!({ "name": name }),
+            );
+        }
+    }
 }
 
 /// Each named secret's value: `env`, else `stored`. Also returns the secrets with a value in
@@ -624,8 +704,8 @@ pub async fn static_site(ctx: &ServeContext<'_>) -> anyhow::Result<Option<Static
     }))
 }
 
-/// Starts the app's Vite dev server; returns its URL. When Vite exits on its own, the backend
-/// keeps running.
+/// Starts the app's Vite dev server; returns its URL. When Vite exits on its own it is started
+/// again on the same port ([`supervise_dev_server`]); the backend keeps running meanwhile.
 pub async fn start_frontend(
     ctx: &ServeContext<'_>,
     hooks: &mut StopHooks,
@@ -633,27 +713,26 @@ pub async fn start_frontend(
     let Some(port) = ctx.frontend_port else {
         return Ok(None);
     };
-    let server = DevServer::start(DevServerConfig {
+    let launch = ViteLaunch {
         node: ctx.node.clone(),
         frontend_dir: ctx.project.frontend_dir().to_path_buf(),
         cache_dir: ctx.state.cache_dir(),
         host: dev_server_host(ctx.host).to_owned(),
-        port,
         backend_origin: ctx.api_origin.to_owned(),
         env: rl_frontend::frontend_env(&rayfin_env(ctx)),
-        sign_in_secret: Some(ctx.sign_in_secret.to_owned()),
-        sink: ui::child_sink(),
-    })
-    .await
-    .context("Could not start the app's Vite dev server")
-    .inspect_err(|err| {
-        events::emit(Event::Vite(Vite {
-            state: ViteState::Failed,
-            url: None,
-            version: None,
-            message: Some(ui::error_lines(err).join("\n")),
-        }));
-    })?;
+        sign_in_secret: ctx.sign_in_secret.to_owned(),
+    };
+    let server = DevServer::start(launch.config(port))
+        .await
+        .context("Could not start the app's Vite dev server")
+        .inspect_err(|err| {
+            events::emit(Event::Vite(Vite {
+                state: ViteState::Failed,
+                url: None,
+                version: None,
+                message: Some(ui::error_lines(err).join("\n")),
+            }));
+        })?;
     ui::step(format_args!(
         "Vite {} dev server on {}",
         server.vite_version(),
@@ -671,6 +750,7 @@ pub async fn start_frontend(
     let supervisor = tokio::spawn(supervise_dev_server(
         server,
         stopped,
+        launch,
         ctx.api_origin.to_owned(),
         ready,
     ));
@@ -681,36 +761,151 @@ pub async fn start_frontend(
     Ok(Some(url))
 }
 
-/// Stops the dev server when `stop` fires, or reports that it exited by itself (`running` is the
-/// `vite` event it started with).
+/// How the app's Vite dev server starts: the first time, and again after it stopped.
+struct ViteLaunch {
+    node: NodeRuntime,
+    frontend_dir: PathBuf,
+    cache_dir: PathBuf,
+    host: String,
+    backend_origin: String,
+    env: Vec<(String, String)>,
+    /// The run's secret for automatic sign-in: a restarted Vite signs the app in too.
+    sign_in_secret: String,
+}
+
+impl ViteLaunch {
+    fn config(&self, port: u16) -> DevServerConfig {
+        DevServerConfig {
+            node: self.node.clone(),
+            frontend_dir: self.frontend_dir.clone(),
+            cache_dir: self.cache_dir.clone(),
+            host: self.host.clone(),
+            port,
+            backend_origin: self.backend_origin.clone(),
+            env: self.env.clone(),
+            sign_in_secret: Some(self.sign_in_secret.clone()),
+            sink: ui::child_sink(),
+        }
+    }
+}
+
+/// Runs the dev server until `stop` fires. When it exits by itself, it is started again on the
+/// same port after a pause ([`RestartBackoff`]), until it stops a fourth time within two minutes:
+/// then it is left stopped (`vite` `failed`). `running` is the `vite` event it started with.
 async fn supervise_dev_server(
     mut server: DevServer,
-    stop: oneshot::Receiver<()>,
+    mut stop: oneshot::Receiver<()>,
+    launch: ViteLaunch,
     api_origin: String,
     running: Vite,
 ) {
-    tokio::select! {
-        exit = server.wait_exit() => {
-            let how = match exit {
-                Ok(status) => status.to_string(),
-                Err(err) => err.to_string(),
+    let port = server.port();
+    let mut backoff = RestartBackoff::default();
+    loop {
+        let exit = tokio::select! {
+            exit = server.wait_exit() => exit,
+            _ = &mut stop => {
+                if let Err(err) = server.stop().await {
+                    tracing::warn!("could not stop the Vite dev server: {err}");
+                }
+                return;
+            }
+        };
+        let how = match exit {
+            Ok(status) => status.to_string(),
+            Err(err) => err.to_string(),
+        };
+        let mut problem = format!("The Vite dev server stopped ({how}).");
+        events::emit(Event::Vite(Vite {
+            state: ViteState::Exited,
+            message: Some(problem.clone()),
+            ..running.clone()
+        }));
+        server = loop {
+            let Some(pause) = backoff.next(Instant::now()) else {
+                let message = format!(
+                    "{problem} It stopped {} times within {} minutes, so rayfin-local no longer \
+                     starts it again. The backend keeps running on {api_origin}; fix the problem \
+                     in Vite's output, then restart rayfin-local.",
+                    RestartBackoff::DELAYS.len() + 1,
+                    RestartBackoff::WINDOW.as_secs() / 60
+                );
+                events::emit(Event::Vite(Vite {
+                    state: ViteState::Failed,
+                    message: Some(message.clone()),
+                    ..running.clone()
+                }));
+                ui::error(&anyhow!(message));
+                let _ = (&mut stop).await;
+                return;
             };
+            let seconds = pause.as_secs();
             events::emit(Event::Vite(Vite {
-                state: ViteState::Exited,
-                message: Some(format!("The Vite dev server stopped ({how}).")),
-                ..running
+                state: ViteState::Restarting,
+                message: Some(format!("{problem} Starting it again in {seconds} s.")),
+                ..running.clone()
             }));
             ui::warn(format_args!(
-                "The Vite dev server stopped ({how}). The backend keeps running on {api_origin}; \
-                 to start the app again, stop rayfin-local with Ctrl+C and run \
-                 `rayfin-local serve` again."
+                "{problem} Starting it again on port {port} in {seconds} s."
             ));
-        }
-        _ = stop => {
-            if let Err(err) = server.stop().await {
-                tracing::warn!("could not stop the Vite dev server: {err}");
+            tokio::select! {
+                () = tokio::time::sleep(pause) => {}
+                _ = &mut stop => return,
             }
+            let started = tokio::select! {
+                started = DevServer::start(launch.config(port)) => started,
+                _ = &mut stop => return,
+            };
+            match started {
+                Ok(server) => break server,
+                Err(err) => {
+                    let err = anyhow::Error::new(err);
+                    problem = format!(
+                        "The Vite dev server could not start again: {}",
+                        ui::error_lines(&err).join(" ")
+                    );
+                }
+            }
+        };
+        ui::step(format_args!(
+            "Vite dev server running again on {}",
+            server.url()
+        ));
+        events::emit(Event::Vite(Vite {
+            url: Some(server.url().to_owned()),
+            ..running.clone()
+        }));
+    }
+}
+
+/// When to start Vite again after it stopped by itself: 1, 2 and then 5 seconds after its first,
+/// second and third stop within [`Self::WINDOW`]. A fourth stop within it (three restarts that
+/// failed or didn't last) gives up.
+#[derive(Debug, Default)]
+struct RestartBackoff {
+    /// When it stopped, within the window.
+    stops: VecDeque<Instant>,
+}
+
+impl RestartBackoff {
+    const WINDOW: Duration = Duration::from_secs(120);
+    const DELAYS: [Duration; 3] = [
+        Duration::from_secs(1),
+        Duration::from_secs(2),
+        Duration::from_secs(5),
+    ];
+
+    /// Records a stop at `now`; returns the pause before starting it again, or `None` to give up.
+    fn next(&mut self, now: Instant) -> Option<Duration> {
+        while self
+            .stops
+            .front()
+            .is_some_and(|stop| now.duration_since(*stop) >= Self::WINDOW)
+        {
+            self.stops.pop_front();
         }
+        self.stops.push_back(now);
+        Self::DELAYS.get(self.stops.len() - 1).copied()
     }
 }
 
@@ -724,6 +919,10 @@ fn dev_server_host(host: &str) -> &str {
     } else {
         host
     }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -832,5 +1031,24 @@ connectors:
             [("BOTH", "env"), ("ENV", "env"), ("STORED", "stored")]
         );
         assert_eq!(missing, ["EMPTY"]);
+    }
+
+    #[test]
+    fn vite_restarts_back_off_then_give_up_after_three_failures_in_two_minutes() {
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let mut backoff = RestartBackoff::default();
+        let pauses: Vec<_> = [0, 10, 20, 30]
+            .into_iter()
+            .map(|seconds| backoff.next(at(seconds)).map(|pause| pause.as_secs()))
+            .collect();
+        assert_eq!(pauses, [Some(1), Some(2), Some(5), None]);
+
+        // Stops further apart than two minutes don't add up.
+        let mut backoff = RestartBackoff::default();
+        assert_eq!(backoff.next(at(0)), Some(Duration::from_secs(1)));
+        assert_eq!(backoff.next(at(100)), Some(Duration::from_secs(2)));
+        assert_eq!(backoff.next(at(130)), Some(Duration::from_secs(2)));
+        assert_eq!(backoff.next(at(400)), Some(Duration::from_secs(1)));
     }
 }
