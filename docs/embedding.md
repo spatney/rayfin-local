@@ -68,6 +68,7 @@ A failure before the project is found and read (`project-not-found`, an invalid 
 ### `analysis`
 
 The app model was analyzed (at start, and after each live change of the entity sources).
+With a data package (`services.data.buildCommand`), its build command runs first, as at start, after changes of its sources or of `services.data`, and for `POST /reload`; a failed build is an `analysis` with `ok: false`.
 
 ```json
 {"v":1,"type":"analysis","time":"…","ok":true,"sdk":{"version":"1.36.2","supported":true},"entities":["Note","Tag"],"storageFolders":[],"message":null}
@@ -271,7 +272,7 @@ With `RAYFIN_LOCAL_CONTROL_TOKEN` set, the backend serves `{apiUrl}/.rayfin-loca
 | `GET /entities/{name}/rows?offset=0&limit=50&orderBy=<field>&desc=false` | | `{"columns":[{"name","type","key":bool}],"rows":[{…}],"total":12}`. Every row, regardless of permissions; values formatted as the data API formats them. `columns` are the entity's fields with their GraphQL type (`UUID`, `String`, `Int`, `Decimal`, `Boolean` or `DateTime`); `key` marks the primary key. Rows are ordered by `orderBy`, then by the primary key. `limit` is 1 to 500 (default 50). 400 for other values or an unknown `orderBy`; 404 `entity-not-found`. |
 | `DELETE /entities/{name}/rows` | | `{"deleted":12}`. 409 `rows-referenced` when other entities' rows still refer to them; the message says which, and how many. |
 | `POST /data/reset` | | `{"ok":true}`. Deletes every entity's rows, the local users and their sessions, and the stored files, without a restart. The identity stays: a `user` identity's user is created again at its next automatic sign-in. |
-| `POST /reload` | `{"forceSchema":false}` | Reads `rayfin.yml`, `rayfin-local.toml`, the entities, the SQL connectors' entities and the secret values again and applies them now, as after an edit (`forceSchema`: also a schema change that loses data). Answers `{"schema":<schema event>,"config":<config-changed event or null>}`, the events it also emits; a change that would lose data answers 200 with a `refused` `schema` event. A reload in progress finishes first, and one asked for before `ready` waits for the start. A `rayfin.yml` or `rayfin-local.toml` that can't be read answers 422 `config-invalid`, and entities that can't be analyzed 422 `analysis-failed`; what could be read is applied all the same. 503 `stopping` once `serve` stops. |
+| `POST /reload` | `{"forceSchema":false}` | Reads `rayfin.yml`, `rayfin-local.toml`, the entities, the SQL connectors' entities and the secret values again and applies them now, as after an edit, running the data build command (`services.data.buildCommand`) first, as a start does (`forceSchema`: also a schema change that loses data). Answers `{"schema":<schema event>,"config":<config-changed event or null>}`, the events it also emits; a change that would lose data answers 200 with a `refused` `schema` event. A reload in progress finishes first, and one asked for before `ready` waits for the start. A `rayfin.yml` or `rayfin-local.toml` that can't be read answers 422 `config-invalid`, and entities that can't be built or analyzed 422 `analysis-failed`; what could be read is applied all the same. 503 `stopping` once `serve` stops. |
 
 A <a id="users"></a>**user** is `{"id","username","email","createdAt","signIn":["password","entra"],"developer":bool}`:
 

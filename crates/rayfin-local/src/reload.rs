@@ -3,8 +3,11 @@
 //! - **Entities and storage folders.** When the entity or storage sources change (or other files
 //!   they import, or their tsconfig), the app is analyzed again, the database brought up to date
 //!   and the data API switched to the new model; the storage service is rebuilt when its folders
-//!   change. Changes to the sources of a data package with a build command (or of the workspace
-//!   packages whose build output it imports) run the build command first. A failed build or
+//!   change. The data build command (`services.data.buildCommand`) runs first, as when `serve`
+//!   starts, after changes to the sources of the data package (or of the workspace packages whose
+//!   build output it imports), to the data settings in `rayfin.yml`, and for a reload on request.
+//!   The data package's sources are followed from the moment `rayfin.yml` turns the data service
+//!   on, so that a failed build or analysis is tried again on the next save. A failed build or
 //!   analysis, or a change that would lose data (without `--force-schema`), leaves the previous
 //!   model in use.
 //! - **`rayfin.yml` and `rayfin-local.toml`.** The feature services whose settings changed are
@@ -87,10 +90,11 @@ pub struct ReloadOutcome {
 
 impl ReloadHandle {
     /// Reads `rayfin.yml`, `rayfin-local.toml`, the entities, the SQL connectors' entities and
-    /// the secret values again, now, and applies them. `force_schema` also applies a schema
-    /// change that loses data, as `--force-schema` does. A reload in progress finishes first, and
-    /// a request made before `serve` has started waits until it has. Returns the `schema` event,
-    /// and the `config-changed` event when something changed; both are emitted too.
+    /// the secret values again, now, and applies them, running the data build command first as
+    /// `serve` does when it starts. `force_schema` also applies a schema change that loses data,
+    /// as `--force-schema` does. A reload in progress finishes first, and a request made before
+    /// `serve` has started waits until it has. Returns the `schema` event, and the
+    /// `config-changed` event when something changed; both are emitted too.
     ///
     /// Fails, leaving the previous configuration and model in use, when `rayfin.yml` or
     /// `rayfin-local.toml` can't be read (code `config-invalid`) or the entities can't be
@@ -171,6 +175,7 @@ pub fn start(ctx: &ServeContext<'_>, serving: Serving, requests: Requests, hooks
         watch: None,
         force: ctx.options.force_schema,
         verbose: ctx.options.verbose,
+        built: false,
     };
     let messages = ctx.reload.messages.clone();
     match Watch::new(ctx.project, ctx.state, messages.clone()) {
@@ -244,7 +249,7 @@ struct Batch {
     connectors_folder: bool,
     secrets: bool,
     functions: bool,
-    /// Read everything again, and start what didn't start before.
+    /// Read everything again, build the data package, and start what didn't start before.
     everything: bool,
 }
 
@@ -442,12 +447,7 @@ impl Package {
 /// (unless it is the project itself), and the workspace packages that hold files the analysis
 /// read (`files`, such as their build output) other than the project's root package.
 fn packages(project: &Project, files: &HashSet<PathBuf>) -> Vec<Package> {
-    let data = &project.config().services.data;
-    let has_build = data
-        .build_command
-        .as_deref()
-        .is_some_and(|command| !command.trim().is_empty());
-    if !data.enabled || !has_build {
+    if analysis::data_build_command(project).is_none() {
         return Vec::new();
     }
     let root = project.root();
@@ -604,8 +604,11 @@ impl Watch {
         }
     }
 
-    /// Follows the folders of a changed configuration (`services.*.path`).
+    /// Follows the folders of a changed configuration (`services.*.path`), and the packages the
+    /// data build command compiles as it has them now: those of a data service it just turned on
+    /// are followed before its first build or analysis, which may fail.
     fn follow_project(&mut self, project: &Project, state: &LocalState) {
+        self.follow_packages(project);
         let paths = Paths::of(project, state);
         if self.sources.paths() == paths {
             return;
@@ -629,7 +632,6 @@ impl Watch {
     /// the packages the data build command compiles.
     fn follow_files(&mut self, project: &Project, inputs: &[String]) {
         let files = self.sources.outside_files(project.root(), inputs);
-        let packages = packages(project, &files);
         let dirs: BTreeSet<PathBuf> = files
             .iter()
             .filter_map(|file| file.parent())
@@ -644,6 +646,25 @@ impl Watch {
                 ));
             }
         }
+        *self
+            .sources
+            .files
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = files;
+        self.follow_packages(project);
+    }
+
+    /// Follows the sources of the packages the data build command compiles: the data package,
+    /// and the workspace packages of the files the last analysis read.
+    fn follow_packages(&mut self, project: &Project) {
+        let packages = packages(
+            project,
+            &self
+                .sources
+                .files
+                .read()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
         for (dir, mode) in packages.iter().flat_map(Package::folders) {
             if let Err(err) = self.watch_dir(&dir, mode) {
                 ui::warn(format_args!(
@@ -651,11 +672,6 @@ impl Watch {
                 ));
             }
         }
-        *self
-            .sources
-            .files
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = files;
         *self
             .sources
             .packages
@@ -706,6 +722,9 @@ struct Reloader {
     /// `--force-schema`: apply changes that lose data.
     force: bool,
     verbose: bool,
+    /// The data build command ran in the last reload: what it wrote in the packages is no edit
+    /// to build again for.
+    built: bool,
 }
 
 /// What a reload changes.
@@ -793,7 +812,6 @@ impl Reloader {
                     other => carried.push_back(other),
                 }
             }
-            let built = batch.build;
             match request {
                 Some(Request { force, reply }) => {
                     let batch = Batch {
@@ -813,7 +831,7 @@ impl Reloader {
                     let _ = self.apply(batch, self.force).await;
                 }
             }
-            if built {
+            if std::mem::take(&mut self.built) {
                 // What the build wrote in the packages is no edit to build again for.
                 while let Ok(Some(message)) = tokio::time::timeout(DEBOUNCE, messages.recv()).await
                 {
@@ -876,12 +894,12 @@ impl Reloader {
         if let Some(identity) = update.sign_in_as.take() {
             self.switch_sign_in_as(identity).await;
         }
+        // As `serve` does at start: a new data service, or new data settings, need the data
+        // package built before it is analyzed, and so does a reload on request.
+        let build = batch.build || everything || update.renew_data_api;
         let mut schema = None;
-        if batch.model || batch.build || batch.folder || everything || update.analyze {
-            match self
-                .reload_model(batch.build, force, update.renew_data_api)
-                .await
-            {
+        if batch.model || build || batch.folder || everything || update.analyze {
+            match self.reload_model(build, force, update.renew_data_api).await {
                 Ok(reloaded) => {
                     schema = reloaded.schema;
                     if reloaded.data_api {
@@ -1027,6 +1045,7 @@ impl Reloader {
         renew_api: bool,
     ) -> anyhow::Result<ModelReload> {
         let project = &self.live.project;
+        self.built |= build && analysis::data_build_command(project).is_some();
         let reanalyzed = analysis::reanalyze(
             project,
             &self.run.state,
@@ -1564,6 +1583,45 @@ mod tests {
                     skipped: BTreeSet::from([at("packages/shared/dist")]),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn a_data_package_is_followed_once_rayfin_yml_turns_the_data_service_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let write = |path: &str, text: &str| {
+            let path = dir.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        let config = |enabled: bool| {
+            format!(
+                "services:\n  data:\n    enabled: {enabled}\n    path: packages/data\n    \
+                 buildCommand: npm run build\n"
+            )
+        };
+        write("rayfin/rayfin.yml", &config(false));
+        write(
+            "packages/data/package.json",
+            r#"{"exports": "./dist/index.js"}"#,
+        );
+        write("packages/data/src/note.ts", "export class Note {}\n");
+        let project = Project::load(dir.path()).unwrap();
+        let state = LocalState::load_or_create(&project).unwrap();
+        let (messages, _requests) = mpsc::unbounded_channel();
+        let mut watch = Watch::new(&project, &state, messages).unwrap();
+        watch.follow_files(&project, &[]);
+        let source = project.data_service_root().join("src").join("note.ts");
+        let edit = EventKind::Modify(ModifyKind::Any);
+        assert_eq!(watch.sources.classify(&source, &edit), None);
+
+        // Its first build or analysis may fail: a fixed source is built again all the same.
+        write("rayfin/rayfin.yml", &config(true));
+        let project = Project::load(dir.path()).unwrap();
+        watch.follow_project(&project, &state);
+        assert_eq!(
+            watch.sources.classify(&source, &edit),
+            Some(Change::Package)
         );
     }
 }

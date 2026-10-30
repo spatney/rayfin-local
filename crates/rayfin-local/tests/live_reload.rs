@@ -1,7 +1,8 @@
 //! Live reload of the built binary (`serve --json`) on a copy of the fixture app: `rayfin.yml`
-//! edits applied on the same ports, new secret values restarting only the function host, the
-//! Vite dev server started again after it is killed (still signing the app in), and a host's
-//! control API and automatic sign-in across changes, with `POST /reload`.
+//! edits applied on the same ports, a data package built before its entities are analyzed again,
+//! new secret values restarting only the function host, the Vite dev server started again after
+//! it is killed (still signing the app in), and a host's control API and automatic sign-in across
+//! changes, with `POST /reload`.
 //!
 //! They need Node.js and the fixture's npm packages (`npm ci` in `tests/fixtures/apps/basic` and
 //! in its `rayfin/functions`); without them they print a note and pass.
@@ -886,6 +887,138 @@ fn a_reload_on_request_answers_a_refused_schema_change_and_forces_it() {
     let (status, labels) = graphql(&api_url, &key, &token, "{ labels { items { name } } }");
     assert_eq!(status, 200, "{labels}");
     assert_eq!(labels["data"]["labels"]["items"], json!([]), "{labels}");
+
+    assert_eq!(serve.close_stdin().code(), Some(0), "{}", serve.report());
+}
+
+/// The data service of the fixture, off, with its entities in a data package that `tsc` builds,
+/// as in Rayfin's templates (which turn storage off too: it needs the data service).
+const DATA_PACKAGE_SERVICES: [(&str, &str); 2] = [
+    (
+        "  data:\n    enabled: true\n    dialect: mssql\n",
+        "  data:\n    enabled: false\n    dialect: mssql\n    path: packages/data\n    \
+         buildCommand: node ../../node_modules/typescript/bin/tsc -p .\n",
+    ),
+    (
+        "  storage:\n    enabled: true",
+        "  storage:\n    enabled: false",
+    ),
+];
+
+const DATA_PACKAGE_JSON: &str = r#"{
+  "name": "live-reload-data",
+  "private": true,
+  "type": "module",
+  "exports": { ".": { "import": "./dist/index.js" } }
+}"#;
+
+const DATA_PACKAGE_TSCONFIG: &str = r#"{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "ESNext.Decorators"],
+    "types": [],
+    "strict": true,
+    "skipLibCheck": true,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src"]
+}"#;
+
+const NOTE: &str = "\
+import { entity, role, uuid, text } from '@microsoft/rayfin-core';
+
+@entity()
+@role('authenticated', ['create', 'read', 'update', 'delete'])
+export class Note {
+  @uuid() id!: string;
+  @text({ max: 100 }) title!: string;
+}
+";
+
+#[test]
+fn a_data_package_is_built_before_its_entities_are_analyzed_again() {
+    let Some(app) = App::copy() else {
+        return;
+    };
+    let package = app.path().join("packages").join("data");
+    std::fs::create_dir_all(package.join("src")).unwrap();
+    std::fs::write(package.join("package.json"), DATA_PACKAGE_JSON).unwrap();
+    std::fs::write(package.join("tsconfig.json"), DATA_PACKAGE_TSCONFIG).unwrap();
+    std::fs::write(package.join("src").join("index.ts"), NOTE).unwrap();
+    app.edit_config(&DATA_PACKAGE_SERVICES);
+    let mut serve = Serve::start_hosted(
+        app.path(),
+        &["--no-functions", "--no-frontend", "--port", "0"],
+    );
+    let ready = serve.next("ready");
+    assert_eq!(ready["features"]["data"]["enabled"], false, "{ready}");
+    let api_url = ready["apiUrl"].as_str().unwrap().to_owned();
+    let analysis = |ok: bool| move |event: &Value| event["type"] == "analysis" && event["ok"] == ok;
+    let (off, on) = ("  data:\n    enabled: false", "  data:\n    enabled: true");
+
+    // Turning the data service on builds the package before analyzing it, as a start does.
+    app.edit_config(&[(off, on)]);
+    let analyzed = serve.until("the analysis of the built package", STEP, |event| {
+        event["type"] == "analysis"
+    });
+    assert_eq!(analyzed["ok"], true, "{analyzed}");
+    assert_eq!(analyzed["entities"], json!(["Note"]), "{analyzed}");
+    let ready = serve.next("ready");
+    assert_eq!(
+        ready["features"]["data"]["entities"],
+        json!(["Note"]),
+        "{ready}"
+    );
+
+    // A package that doesn't build when the service comes on is followed: fixing it applies it.
+    app.edit_config(&[(on, off)]);
+    let ready = serve.next("ready");
+    assert_eq!(ready["features"]["data"]["enabled"], false, "{ready}");
+    let source = package.join("src").join("index.ts");
+    std::fs::write(&source, "export class Note {\n").unwrap();
+    app.edit_config(&[(off, on)]);
+    let failed = serve.until("the failed build", STEP, analysis(false));
+    let message = failed["message"].as_str().unwrap();
+    assert!(
+        message.contains("services.data.buildCommand") && message.contains("failed"),
+        "{failed}"
+    );
+    serve.next("ready");
+    // Changes to the package right after a build are taken for what the build wrote.
+    std::thread::sleep(Duration::from_secs(2));
+    let with_body = NOTE.replace(
+        "  @text({ max: 100 }) title!: string;\n",
+        "  @text({ max: 100 }) title!: string;\n  @text({ optional: true }) body?: string;\n",
+    );
+    std::fs::write(&source, with_body).unwrap();
+    serve.until("the analysis of the fixed package", STEP, analysis(true));
+    let ready = serve.next("ready");
+    assert_eq!(
+        ready["features"]["data"]["entities"],
+        json!(["Note"]),
+        "{ready}"
+    );
+
+    // A reload on request builds the package too.
+    std::fs::remove_file(package.join("dist").join("index.js")).unwrap();
+    let unbuilt = serve.until("the analysis without a build", STEP, analysis(false));
+    assert!(
+        unbuilt["message"]
+            .as_str()
+            .unwrap()
+            .contains("has not been built"),
+        "{unbuilt}"
+    );
+    let (status, reloaded) = control(&api_url, "POST", "/reload", Some(&json!({})));
+    assert_eq!(status, 200, "{reloaded}");
+    assert_eq!(reloaded["schema"]["result"], "unchanged", "{reloaded}");
+    let (status, now) = control(&api_url, "GET", "/status", None);
+    assert_eq!(status, 200, "{now}");
+    assert_eq!(now["analysis"]["ok"], true, "{now}");
+    assert!(package.join("dist").join("index.js").is_file());
 
     assert_eq!(serve.close_stdin().code(), Some(0), "{}", serve.report());
 }

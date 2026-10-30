@@ -256,13 +256,7 @@ async fn build_data_package(
     project: &Project,
     advice: &Advice,
 ) -> anyhow::Result<Option<SystemTime>> {
-    let data = &project.config().services.data;
-    let Some(command) = data
-        .build_command
-        .as_deref()
-        .map(str::trim)
-        .filter(|command| data.enabled && !command.is_empty())
-    else {
+    let Some(command) = data_build_command(project) else {
         return Ok(None);
     };
     let dir = project.data_service_root();
@@ -295,6 +289,16 @@ async fn build_data_package(
         "Built the data package ({shown}: `{command}`)"
     ));
     Ok(Some(SystemTime::now()))
+}
+
+/// `services.data.buildCommand`, when the data service is on and has one: what runs in the data
+/// package before the analysis.
+pub(crate) fn data_build_command(project: &Project) -> Option<&str> {
+    let data = &project.config().services.data;
+    data.build_command
+        .as_deref()
+        .map(str::trim)
+        .filter(|command| data.enabled && !command.is_empty())
 }
 
 /// What the analysis reads, for messages: the data package (when the entities come from its
