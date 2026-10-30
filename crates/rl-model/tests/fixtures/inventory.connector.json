@@ -1,0 +1,848 @@
+{
+  "name": "inventory",
+  "dialect": "mssql",
+  "entities": [
+    {
+      "name": "AuditEntry",
+      "tableName": "AuditEntries",
+      "fields": [
+        {
+          "name": "at",
+          "originalName": "at",
+          "dbType": "DATETIME2",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "date",
+            "jsType": "Date",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "action",
+          "originalName": "action",
+          "dbType": "NVARCHAR(50)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "max": 50,
+            "isOptional": false,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "detail",
+          "originalName": "detail",
+          "dbType": "NVARCHAR(400)",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "max": 400,
+            "isOptional": true,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        }
+      ],
+      "permissions": {
+        "authenticated": [
+          "read"
+        ]
+      },
+      "primaryKeyColumns": [],
+      "source": {
+        "schema": "dbo",
+        "table": "audit_log"
+      }
+    },
+    {
+      "name": "Category",
+      "tableName": "Categories",
+      "fields": [
+        {
+          "name": "categoryId",
+          "originalName": "categoryId",
+          "dbType": "INT",
+          "nullable": false,
+          "primaryKey": true,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "columnName": "category_id",
+            "format": "int",
+            "jsType": "number",
+            "isSystemType": false
+          },
+          "columnName": "category_id"
+        },
+        {
+          "name": "name",
+          "originalName": "name",
+          "dbType": "NVARCHAR(100)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "max": 100,
+            "isOptional": false,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "description",
+          "originalName": "description",
+          "dbType": "NVARCHAR(400)",
+          "nullable": true,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "max": 400,
+            "isOptional": true,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "products",
+          "originalName": "products",
+          "dbType": "RELATIONSHIP_ARRAY",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "foreignKey": {
+            "referencedEntity": "Product"
+          },
+          "isRelationship": true,
+          "relationshipType": "one-to-many",
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "relationship": {
+              "type": "many",
+              "sourceFields": [
+                "categoryId"
+              ],
+              "targetFields": [
+                "categoryId"
+              ],
+              "target": "Product"
+            }
+          },
+          "sourceFields": [
+            "categoryId"
+          ],
+          "targetFields": [
+            "categoryId"
+          ]
+        }
+      ],
+      "permissions": {
+        "anonymous": [
+          {
+            "action": "read",
+            "fields": {
+              "include": [
+                "categoryId",
+                "name"
+              ]
+            }
+          }
+        ],
+        "authenticated": [
+          "read"
+        ]
+      },
+      "primaryKeyColumns": [
+        "category_id"
+      ],
+      "source": {
+        "schema": "dbo",
+        "table": "categories"
+      }
+    },
+    {
+      "name": "Product",
+      "tableName": "Products",
+      "fields": [
+        {
+          "name": "productId",
+          "originalName": "productId",
+          "dbType": "UNIQUEIDENTIFIER",
+          "nullable": false,
+          "primaryKey": true,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "columnName": "product_id",
+            "format": "uuid",
+            "jsType": "string",
+            "isSystemType": false
+          },
+          "columnName": "product_id"
+        },
+        {
+          "name": "categoryId",
+          "originalName": "categoryId",
+          "dbType": "INT",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "columnName": "category_id",
+            "format": "int",
+            "jsType": "number",
+            "isSystemType": false
+          },
+          "columnName": "category_id"
+        },
+        {
+          "name": "name",
+          "originalName": "name",
+          "dbType": "NVARCHAR(200)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "max": 200,
+            "isOptional": false,
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "price",
+          "originalName": "price",
+          "dbType": "DECIMAL(10,2)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "precision": 10,
+            "scale": 2,
+            "isOptional": false,
+            "format": "decimal",
+            "jsType": "number",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "inStock",
+          "originalName": "inStock",
+          "dbType": "BIT",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "columnName": "in_stock",
+            "format": "boolean",
+            "jsType": "boolean",
+            "isSystemType": false
+          },
+          "columnName": "in_stock"
+        },
+        {
+          "name": "createdAt",
+          "originalName": "createdAt",
+          "dbType": "DATETIME2",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "columnName": "created_at",
+            "format": "date",
+            "jsType": "Date",
+            "isSystemType": false
+          },
+          "columnName": "created_at"
+        },
+        {
+          "name": "ownerEmail",
+          "originalName": "ownerEmail",
+          "dbType": "NVARCHAR(320)",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "max": 320,
+            "isOptional": false,
+            "columnName": "owner_email",
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          },
+          "columnName": "owner_email"
+        },
+        {
+          "name": "category",
+          "originalName": "category",
+          "dbType": "RELATIONSHIP_SINGLE",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "foreignKey": {
+            "referencedEntity": "Category"
+          },
+          "isRelationship": true,
+          "relationshipType": "many-to-one",
+          "generatedForeignKeyColumn": "category_id",
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "relationship": {
+              "type": "one",
+              "sourceFields": [
+                "categoryId"
+              ],
+              "targetFields": [
+                "categoryId"
+              ],
+              "target": "Category"
+            }
+          },
+          "sourceFields": [
+            "categoryId"
+          ],
+          "targetFields": [
+            "categoryId"
+          ]
+        },
+        {
+          "name": "stockLevels",
+          "originalName": "stockLevels",
+          "dbType": "RELATIONSHIP_ARRAY",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "foreignKey": {
+            "referencedEntity": "StockLevel"
+          },
+          "isRelationship": true,
+          "relationshipType": "one-to-many",
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "relationship": {
+              "type": "many",
+              "sourceFields": [
+                "productId"
+              ],
+              "targetFields": [
+                "productId"
+              ],
+              "target": "StockLevel"
+            }
+          },
+          "sourceFields": [
+            "productId"
+          ],
+          "targetFields": [
+            "productId"
+          ]
+        }
+      ],
+      "permissions": {
+        "anonymous": [
+          {
+            "action": "read",
+            "fields": {
+              "exclude": [
+                "ownerEmail"
+              ],
+              "include": [
+                "*"
+              ]
+            }
+          }
+        ],
+        "authenticated": [
+          {
+            "action": "update",
+            "policy": {
+              "database": "@claims.email eq @item.ownerEmail"
+            }
+          },
+          {
+            "action": "delete",
+            "policy": {
+              "database": "@claims.email eq @item.ownerEmail"
+            }
+          },
+          "create",
+          "read"
+        ]
+      },
+      "primaryKeyColumns": [
+        "product_id"
+      ],
+      "source": {
+        "schema": "sales",
+        "table": "products"
+      }
+    },
+    {
+      "name": "StockLevel",
+      "tableName": "StockLevels",
+      "fields": [
+        {
+          "name": "productId",
+          "originalName": "productId",
+          "dbType": "UNIQUEIDENTIFIER",
+          "nullable": false,
+          "primaryKey": true,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "columnName": "product_id",
+            "format": "uuid",
+            "jsType": "string",
+            "isSystemType": false
+          },
+          "columnName": "product_id"
+        },
+        {
+          "name": "warehouseCode",
+          "originalName": "warehouseCode",
+          "dbType": "NVARCHAR(10)",
+          "nullable": false,
+          "primaryKey": true,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "max": 10,
+            "isOptional": false,
+            "columnName": "warehouse_code",
+            "format": "text",
+            "jsType": "string",
+            "isSystemType": false
+          },
+          "columnName": "warehouse_code"
+        },
+        {
+          "name": "quantity",
+          "originalName": "quantity",
+          "dbType": "INT",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "isRelationship": false,
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "format": "int",
+            "jsType": "number",
+            "isSystemType": false
+          }
+        },
+        {
+          "name": "product",
+          "originalName": "product",
+          "dbType": "RELATIONSHIP_SINGLE",
+          "nullable": false,
+          "primaryKey": false,
+          "unique": false,
+          "foreignKey": {
+            "referencedEntity": "Product"
+          },
+          "isRelationship": true,
+          "relationshipType": "many-to-one",
+          "generatedForeignKeyColumn": "product_id",
+          "originalFieldMetadata": {
+            "isOptional": false,
+            "relationship": {
+              "type": "one",
+              "sourceFields": [
+                "productId"
+              ],
+              "targetFields": [
+                "productId"
+              ],
+              "target": "Product"
+            }
+          },
+          "sourceFields": [
+            "productId"
+          ],
+          "targetFields": [
+            "productId"
+          ]
+        }
+      ],
+      "permissions": {
+        "authenticated": [
+          "create",
+          "read",
+          "update",
+          "delete"
+        ]
+      },
+      "primaryKeyColumns": [
+        "product_id",
+        "warehouse_code"
+      ],
+      "source": {
+        "schema": "sales",
+        "table": "stock_levels"
+      }
+    }
+  ],
+  "config": {
+    "$schema": "https://github.com/Azure/data-api-builder/releases/download/v1.5.56/dab.draft.schema.json",
+    "entities": {
+      "AuditEntry": {
+        "source": "dbo.audit_log",
+        "permissions": [
+          {
+            "role": "authenticated",
+            "actions": [
+              "read"
+            ]
+          }
+        ],
+        "x-schema": {
+          "fields": {
+            "at": {
+              "dbType": "DATETIME2",
+              "nullable": false
+            },
+            "action": {
+              "dbType": "NVARCHAR(50)",
+              "nullable": false
+            },
+            "detail": {
+              "dbType": "NVARCHAR(400)",
+              "nullable": true
+            }
+          },
+          "constraints": {}
+        }
+      },
+      "Category": {
+        "source": "dbo.categories",
+        "permissions": [
+          {
+            "role": "anonymous",
+            "actions": [
+              {
+                "action": "read",
+                "fields": {
+                  "include": [
+                    "categoryId",
+                    "name"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "role": "authenticated",
+            "actions": [
+              "read"
+            ]
+          }
+        ],
+        "x-schema": {
+          "fields": {
+            "category_id": {
+              "dbType": "INT",
+              "nullable": false
+            },
+            "name": {
+              "dbType": "NVARCHAR(100)",
+              "nullable": false
+            },
+            "description": {
+              "dbType": "NVARCHAR(400)",
+              "nullable": true
+            }
+          },
+          "constraints": {
+            "primaryKey": {
+              "name": "PK_Categories",
+              "columns": [
+                "category_id"
+              ]
+            }
+          }
+        },
+        "keyFields": [
+          "category_id"
+        ],
+        "relationships": {
+          "products": {
+            "cardinality": "many",
+            "target.entity": "Product",
+            "source.fields": [
+              "category_id"
+            ],
+            "target.fields": [
+              "category_id"
+            ]
+          }
+        },
+        "mappings": {
+          "category_id": "categoryId"
+        }
+      },
+      "Product": {
+        "source": "sales.products",
+        "permissions": [
+          {
+            "role": "anonymous",
+            "actions": [
+              {
+                "action": "read",
+                "fields": {
+                  "exclude": [
+                    "ownerEmail"
+                  ],
+                  "include": [
+                    "*"
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "role": "authenticated",
+            "actions": [
+              {
+                "action": "update",
+                "policy": {
+                  "database": "@claims.email eq @item.ownerEmail"
+                }
+              },
+              {
+                "action": "delete",
+                "policy": {
+                  "database": "@claims.email eq @item.ownerEmail"
+                }
+              },
+              "create",
+              "read"
+            ]
+          }
+        ],
+        "x-schema": {
+          "fields": {
+            "product_id": {
+              "dbType": "UNIQUEIDENTIFIER",
+              "nullable": false
+            },
+            "category_id": {
+              "dbType": "INT",
+              "nullable": false
+            },
+            "name": {
+              "dbType": "NVARCHAR(200)",
+              "nullable": false
+            },
+            "price": {
+              "dbType": "DECIMAL(10,2)",
+              "nullable": false
+            },
+            "in_stock": {
+              "dbType": "BIT",
+              "nullable": false
+            },
+            "created_at": {
+              "dbType": "DATETIME2",
+              "nullable": false
+            },
+            "owner_email": {
+              "dbType": "NVARCHAR(320)",
+              "nullable": false
+            }
+          },
+          "constraints": {
+            "primaryKey": {
+              "name": "PK_Products",
+              "columns": [
+                "product_id"
+              ]
+            },
+            "foreignKeys": [
+              {
+                "name": "FK_Products_category_id",
+                "columns": [
+                  "category_id"
+                ],
+                "referencedTable": "dbo.categories",
+                "referencedColumns": [
+                  "category_id"
+                ]
+              }
+            ]
+          }
+        },
+        "keyFields": [
+          "product_id"
+        ],
+        "relationships": {
+          "category": {
+            "cardinality": "one",
+            "target.entity": "Category",
+            "source.fields": [
+              "category_id"
+            ],
+            "target.fields": [
+              "category_id"
+            ]
+          },
+          "stockLevels": {
+            "cardinality": "many",
+            "target.entity": "StockLevel",
+            "source.fields": [
+              "product_id"
+            ],
+            "target.fields": [
+              "product_id"
+            ]
+          }
+        },
+        "mappings": {
+          "product_id": "productId",
+          "category_id": "categoryId",
+          "in_stock": "inStock",
+          "created_at": "createdAt",
+          "owner_email": "ownerEmail"
+        }
+      },
+      "StockLevel": {
+        "source": "sales.stock_levels",
+        "permissions": [
+          {
+            "role": "authenticated",
+            "actions": [
+              "create",
+              "read",
+              "update",
+              "delete"
+            ]
+          }
+        ],
+        "x-schema": {
+          "fields": {
+            "product_id": {
+              "dbType": "UNIQUEIDENTIFIER",
+              "nullable": false
+            },
+            "warehouse_code": {
+              "dbType": "NVARCHAR(10)",
+              "nullable": false
+            },
+            "quantity": {
+              "dbType": "INT",
+              "nullable": false
+            }
+          },
+          "constraints": {
+            "primaryKey": {
+              "name": "PK_StockLevels",
+              "columns": [
+                "product_id",
+                "warehouse_code"
+              ]
+            },
+            "foreignKeys": [
+              {
+                "name": "FK_StockLevels_product_id",
+                "columns": [
+                  "product_id"
+                ],
+                "referencedTable": "sales.products",
+                "referencedColumns": [
+                  "product_id"
+                ]
+              }
+            ]
+          }
+        },
+        "keyFields": [
+          "product_id",
+          "warehouse_code"
+        ],
+        "relationships": {
+          "product": {
+            "cardinality": "one",
+            "target.entity": "Product",
+            "source.fields": [
+              "product_id"
+            ],
+            "target.fields": [
+              "product_id"
+            ]
+          }
+        },
+        "mappings": {
+          "product_id": "productId",
+          "warehouse_code": "warehouseCode"
+        }
+      }
+    }
+  },
+  "policies": [
+    {
+      "entity": "Product",
+      "role": "authenticated",
+      "index": 0,
+      "action": "update",
+      "text": "@claims.email eq @item.ownerEmail",
+      "check": {
+        "op": "eq",
+        "lhs": {
+          "claim": "email"
+        },
+        "rhs": {
+          "field": "ownerEmail"
+        }
+      }
+    },
+    {
+      "entity": "Product",
+      "role": "authenticated",
+      "index": 1,
+      "action": "delete",
+      "text": "@claims.email eq @item.ownerEmail",
+      "check": {
+        "op": "eq",
+        "lhs": {
+          "claim": "email"
+        },
+        "rhs": {
+          "field": "ownerEmail"
+        }
+      }
+    }
+  ],
+  "sources": [
+    "rayfin/connectors/inventory/AuditEntry.ts",
+    "rayfin/connectors/inventory/Category.ts",
+    "rayfin/connectors/inventory/Product.ts",
+    "rayfin/connectors/inventory/schema.ts",
+    "rayfin/connectors/inventory/StockLevel.ts"
+  ]
+}

@@ -2,6 +2,7 @@
 
 mod analysis;
 mod commands;
+mod connectors;
 mod errors;
 mod events;
 mod integrations;

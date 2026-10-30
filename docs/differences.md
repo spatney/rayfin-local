@@ -19,9 +19,11 @@ The biggest difference is identity: everything that reaches Fabric or Azure runs
 | Data API and storage | The signed-in app user. | The signed-in local user. |
 | Functions' `ctx.Tokens.<Audience>` | The app's identity (for Fabric apps, the owner of the app item). | You: your Azure CLI or Rayfin CLI login, or `RAYFIN_LOCAL_TOKEN_<AUDIENCE>`. |
 | Delegated connectors (`fabric-semanticmodel`) | The signed-in user, on behalf of. | You, with your Power BI token. |
+| SQL connectors (`fabric-sqldatabase`, `fabric-warehouse`, `fabric-sqlanalytics`) | The app's identity (`auth: application`, the default) or the signed-in user (`auth: delegated`). | You, with your Entra token for the database, whatever `auth.type` says. The app's `@role` grants and policies still apply to the signed-in local user. |
 | "Sign in with Fabric" | The user's Fabric account. | A local user, or you with "Continue as". |
 
 So locally a function or a query can reach what your account can reach, which may be more or less than the app's identity or its users.
+Security that a database enforces itself (its permissions, row-level security) applies to you, not to the app's user.
 Keep the backend on loopback (the default `--host 127.0.0.1`): any other address lets other machines act as you.
 
 ## Auth (`client.auth`)
@@ -77,13 +79,18 @@ rayfin-local builds your functions package and runs it on your Node.js, with the
 | Limits | Differs | The 250-second timeout (408) is the UDF ceiling, and results over 30 MiB fail with `ResponseTooLarge`, as deployed. Request bodies over 30 MiB get 413, a limit of rayfin-local's own. |
 | Logs | Differs | `console.*` output goes to `serve`'s output, prefixed `[fn]`, not to Fabric's monitoring. |
 
-## Connectors (`client.connectors`, `/connector-invoke/<name>`)
+## Connectors (`client.connectors`, `/connector-invoke/<name>`, `/connectors/<name>/graphql`)
 
 | Feature | Status | Notes |
 | --- | --- | --- |
 | `fabric-semanticmodel` queries | Differs | Sent to the real semantic model through Power BI, as you rather than the signed-in user. The app user must still be signed in, as deployed. Results, DAX errors and Power BI failures reach the SDK in the shapes it normalizes on Fabric. |
 | `fabric-semanticmodel` with an Azure CLI token | Differs | Power BI refuses `executeDaxQueries` (Arrow) to tokens without a dataset scope, which includes every Azure CLI token, so these queries run through `executeQueries` (JSON). Columns then have no `dataType` (the SDK reports `'unknown'`), DateTimes lose their milliseconds, and empty results have no columns. Results are capped at 100,000 rows (an `overflow` error beyond that), and `culture`, `schemaOnly` and `queryTimeout` are ignored. |
-| Category A SQL connectors (`fabric-sqldatabase`, `fabric-warehouse`, `fabric-sqlanalytics`: `/connectors/<name>/graphql`) | Not supported | Answer 501 `not_supported`. |
+| Category A SQL connectors (`fabric-sqldatabase`, `fabric-warehouse`, `fabric-sqlanalytics`): queries, keys, relationships, filters, `orderBy`, cursor pagination | Differs | The DAB-style GraphQL API that `rayfin up` would deploy, answered by rayfin-local over the connector's real Fabric item. They run as you, with your Entra token, even for `auth: application` connectors (see [Who acts](#who-acts)); a `delegated` connector still needs a signed-in user. [sql-connectors.md](sql-connectors.md) has the details. |
+| Category A mutations | Differs | Run as you on the real item. A SQL database answers the row, a Warehouse `DbOperationResult`, and a SQL analytics endpoint has no mutations, as on Fabric. A create on a keyless entity of a SQL database answers `null` (the row is written). |
+| Category A `@role` grants, field lists and policies | Supported | Enforced by rayfin-local in every statement, against the signed-in local user, as for data entities. Grants beyond the connector's `operations:` (which `rayfin up` refuses) are dropped with a warning. |
+| Category A values and errors | Differs | DAB's formats and error codes. Scalars follow the entity decorators (`@int` is `Int` even on a `bigint` column, where Fabric's DAB says `Long`). Statements the database refuses answer DAB's `DatabaseOperationFailed` with the server's message as `extensions.detail`, which Fabric hides; a database that can't be reached or refuses your sign-in answers a GraphQL error that says what to do. |
+| Category A aggregations (`groupBy`, `aggregate`) | Not supported | Answer an error that names them. |
+| Category A setup checks | Differs | Entity names that are reserved or collide across connectors are not refused as `rayfin up` refuses them. Changes to the connector's entities need a restart of `serve`. |
 | `kusto` and other connector types | Not supported | Answer 501 `not_supported`. |
 
 ## Storage (`/api/storage/*`)

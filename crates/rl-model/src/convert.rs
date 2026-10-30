@@ -197,6 +197,29 @@ struct RuleJson {
 /// The system entity every app may reference but no app database contains.
 const SYSTEM_USER: &str = "User";
 
+/// What the entity conversion reads: the analyzer's entities, the DAB config and the policy
+/// trees, of the app's data or of one connector.
+struct Analysis<'a> {
+    entities: &'a [AnalyzedEntity],
+    config: &'a DabConfig,
+    policies: &'a [PolicyRecord],
+    /// A Category A connector's entities: keys are optional (keyless entities) and may span
+    /// several columns of any type.
+    connector: bool,
+}
+
+/// One element of `connectors` in the result of `js/analyze.mjs` (connectors mode).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConnectorOutput {
+    entities: Vec<AnalyzedEntity>,
+    config: DabConfig,
+    #[serde(default)]
+    policies: Vec<PolicyRecord>,
+    #[serde(default)]
+    sources: Vec<String>,
+}
+
 impl AppModel {
     /// Builds the model from the `result` of `js/analyze.mjs`.
     pub fn from_analysis(analysis: &Value) -> Result<AppModel, ModelError> {
@@ -205,11 +228,17 @@ impl AppModel {
         let dialect = Dialect::parse(&output.dialect).ok_or_else(|| {
             ModelError::Malformed(format!("unknown dialect `{}`", output.dialect))
         })?;
+        let view = Analysis {
+            entities: &output.entities,
+            config: &output.config,
+            policies: &output.policies,
+            connector: false,
+        };
         let entities = output
             .config
             .entities
             .iter()
-            .map(|(name, dab)| entity(&output, name, dab))
+            .map(|(name, dab)| entity(&view, name, dab))
             .collect::<Result<Vec<_>, _>>()?;
         let storage = output.storage.as_ref().map(storage).transpose()?;
         Ok(AppModel {
@@ -223,9 +252,44 @@ impl AppModel {
             diagnostics: output.diagnostics,
         })
     }
+
+    /// Builds the model of one Category A connector from an element of `connectors` in the
+    /// result of `js/analyze.mjs` in connectors mode (its `ConnectorSchemaAnalyzer` entities, its
+    /// `ConnectorConfigGenerator` DAB config and its policy trees). The entities' tables are the
+    /// connector's source objects (`schema.table`), and their keys are `Source({ primaryKey })`:
+    /// any columns, or none.
+    pub fn from_connector_analysis(connector: &Value) -> Result<AppModel, ModelError> {
+        let output = ConnectorOutput::deserialize(connector)
+            .map_err(|e| ModelError::Malformed(e.to_string()))?;
+        let view = Analysis {
+            entities: &output.entities,
+            config: &output.config,
+            policies: &output.policies,
+            connector: true,
+        };
+        let entities = output
+            .config
+            .entities
+            .iter()
+            .map(|(name, dab)| entity(&view, name, dab))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(AppModel {
+            core_version: None,
+            typescript_version: None,
+            dialect: Dialect::Mssql,
+            feature_flags: None,
+            entities,
+            storage: None,
+            sources: Sources {
+                data: output.sources,
+                ..Sources::default()
+            },
+            diagnostics: Vec::new(),
+        })
+    }
 }
 
-fn entity(output: &Output, name: &str, dab: &DabEntity) -> Result<Entity, ModelError> {
+fn entity(output: &Analysis<'_>, name: &str, dab: &DabEntity) -> Result<Entity, ModelError> {
     let error = |message: String| ModelError::Entity {
         entity: name.to_owned(),
         message,
@@ -236,10 +300,15 @@ fn entity(output: &Output, name: &str, dab: &DabEntity) -> Result<Entity, ModelE
         .find(|e| e.name == name)
         .ok_or_else(|| error("missing from the analyzer's entities".into()))?;
     let constraints = &dab.x_schema.constraints;
-    let primary_key = constraints
-        .primary_key
-        .clone()
-        .ok_or_else(|| error("has no primary key".into()))?;
+    let primary_key = match (&constraints.primary_key, output.connector) {
+        (Some(key), _) => key.clone(),
+        // A keyless connector entity (`Source({ primaryKey: [] })`).
+        (None, true) => Key {
+            name: String::new(),
+            columns: Vec::new(),
+        },
+        (None, false) => return Err(error("has no primary key".into())),
+    };
 
     let mut columns = Vec::with_capacity(dab.x_schema.fields.len());
     for (column, x) in &dab.x_schema.fields {
@@ -257,9 +326,19 @@ fn entity(output: &Output, name: &str, dab: &DabEntity) -> Result<Entity, ModelE
                 .iter()
                 .any(|key| key.columns.len() == 1 && &key.columns[0] == column),
             origin,
+            source: None,
         });
     }
-    if !columns.iter().any(|c| c.primary_key) {
+    let keyless = output.connector && primary_key.columns.is_empty();
+    let missing_key = if output.connector {
+        primary_key
+            .columns
+            .iter()
+            .any(|key| !columns.iter().any(|c| &c.name == key))
+    } else {
+        !columns.iter().any(|c| c.primary_key)
+    };
+    if !keyless && missing_key {
         return Err(error(format!(
             "primary key column {:?} is not a column",
             primary_key.columns
@@ -320,7 +399,7 @@ fn entity(output: &Output, name: &str, dab: &DabEntity) -> Result<Entity, ModelE
 
 /// The decorator (typed) and origin of an `x-schema` column.
 fn column_source(
-    output: &Output,
+    output: &Analysis<'_>,
     entity: &str,
     analyzed: &AnalyzedEntity,
     column: &str,
@@ -432,7 +511,7 @@ fn field_kind(meta: &FieldMetadata) -> Result<FieldKind, String> {
 }
 
 fn relationship(
-    output: &Output,
+    output: &Analysis<'_>,
     columns: &[Column],
     name: &str,
     rel: &DabRelationship,
@@ -471,7 +550,7 @@ fn relationship(
 }
 
 fn role_permission(
-    output: &Output,
+    output: &Analysis<'_>,
     entity: &str,
     perm: &DabPermission,
     columns: &[Column],
@@ -551,7 +630,7 @@ fn field_access(value: &Value) -> Result<FieldAccess, String> {
 }
 
 fn entity_policy(
-    output: &Output,
+    output: &Analysis<'_>,
     entity: &str,
     role: &str,
     index: usize,

@@ -63,7 +63,8 @@ They print a `skipped: …` note and pass when Node.js or the packages they need
 | `rl-graphql` `tests/sdk.rs` | The SDK's data client against the GraphQL API, signed in through `rl-auth`, on the reference app's model. | The SDK |
 | `rl-connectors` `tests/sdk_decode.rs` | The SDK's `fabricSemanticModel()` through rayfin-local, compared with its direct path to the same mock Power BI. | The SDK |
 | `rl-storage` `tests/sdk.rs` | The SDK's `StorageFolderClient` against the storage routes. | `npm install` in `crates/rl-storage/tests/sdk` |
-| `rl-model` `tests/analyze_js.rs` | `js/analyze.mjs` on the fixture app, against the golden analysis. | `npm install` in `tests/fixtures/apps/basic` |
+| `rl-model` `tests/analyze_js.rs` | `js/analyze.mjs` on the fixture app, against the golden analysis; in connectors mode on the `connectors` fixture app. | `npm install` in `tests/fixtures/apps/basic` and `tests/fixtures/apps/connectors` |
+| `rl-connectors` `tests/sql_sdk.rs` | The SDK's Category A connector client (`createConnectorsApi` with the entity classes, for a SQL database, a Warehouse and a SQL analytics endpoint) through rayfin-local on a real SQL Server. | `npm install` in `tests/fixtures/apps/connectors`, and [SQL Server](#sql-server-tests) |
 | `rl-functions` `tests/host.rs`, `tests/invoke.rs` | The function host and the invoke routes on `tests/fixtures/functions/basic`, which they install and build on first use; also the reference app's functions when present. | Node.js and npm |
 | `rl-frontend` `tests/vite.rs` | The Vite dev server and the static build, on copies of the reference app and small Vite apps. | The reference app |
 | `rayfin-local` `tests/host_contract.rs` | `serve --json` of the fixture app ([embedding.md](embedding.md)): its events from `starting` to `ready`, the app and the backend answering, and a clean stop when stdin closes. | `npm ci` in `tests/fixtures/apps/basic` |
@@ -80,6 +81,25 @@ These variables point the tests at what they need:
 
 The defaults are relative to this repository's folder: they expect `fabric-apps` checked out beside it.
 
+### SQL Server tests
+
+`rl-connectors`' `sql_server.rs` and `sql_sdk.rs` run the SQL connectors against a real SQL Server, and print a `skipped: …` note and pass without one.
+Each test creates its own database and drops it at the end.
+Start SQL Server 2022 in Docker, then point the tests at it with `RAYFIN_LOCAL_TEST_MSSQL` (`host,port;user;password`):
+
+```sh
+docker run -d --name rayfin-local-mssql -p 127.0.0.1:14330:1433 \
+  -e ACCEPT_EULA=Y -e "MSSQL_SA_PASSWORD=<a strong password>" \
+  mcr.microsoft.com/mssql/server:2022-latest
+RAYFIN_LOCAL_TEST_MSSQL="127.0.0.1,14330;sa;<the password>" \
+  cargo test -p rl-connectors --test sql_server --test sql_sdk
+docker rm -f rayfin-local-mssql
+```
+
+SQL Server takes a few seconds to accept logins after the container starts.
+`sql_sdk.rs` also needs the `connectors` fixture's packages (`npm ci` in `tests/fixtures/apps/connectors`).
+CI's `sql-connectors` job runs both on Linux, with a SQL Server service container.
+
 ### Ignored tests
 
 Tests that need a signed-in Azure CLI, the network or a browser are `#[ignore]`d.
@@ -92,6 +112,7 @@ Run them explicitly; they print no tokens and no identity.
 | `cargo test -p rl-auth --test entra_smoke -- --ignored --nocapture` | The Entra exchange with your real Power BI token. |
 | `cargo test -p rl-tokens --test smoke -- --ignored --nocapture` | Tokens from your Azure CLI. |
 | `cargo test -p rl-connectors --test real_power_bi -- --ignored --nocapture` | A query against the reference app's semantic model in the real Power BI, as you. |
+| `cargo test -p rl-connectors --test real_fabric_sql -- --ignored --nocapture` | A read-only query of `INFORMATION_SCHEMA.TABLES` in a real Fabric SQL database, as you; `RAYFIN_LOCAL_REAL_SQL="<workspace id>;<item id>[;<connector type>]"` picks the item. |
 | `cargo test -p rl-functions --test invoke -- --ignored` | The reference app's functions with your tokens. |
 | `cargo test -p rl-project --test rayfin_yml -- --ignored --nocapture` | Parsing every app's `rayfin.yml` in the `fabric-apps` repository (`RAYFIN_APPS_DIR` points at its `apps` folder). |
 
@@ -132,8 +153,10 @@ npm run test:explorer             # the reference app, with your real tokens (az
 | Fixture | Used for |
 | --- | --- |
 | `tests/fixtures/apps/basic` | The end-to-end app: every service, with one button per scenario. Its [README](../tests/fixtures/apps/basic/README.md) lists the scenarios and how to regenerate its generated files. |
+| `tests/fixtures/apps/connectors` | An app with one SQL connector, `inventory`: entity classes, `metadata.json` and `@role` policies, for the connector analysis and the SQL Server tests. |
 | `tests/fixtures/functions/basic` | A functions package for the function host's tests. |
 | `crates/rl-model/tests/fixtures/*.analysis.json` | Golden analyses of the fixture app and the reference app. |
+| `crates/rl-model/tests/fixtures/inventory.connector.json` | The golden connector analysis of the `connectors` fixture app. |
 | `crates/rl-functions/tests/fixtures/` | Small functions packages for build and host edge cases. |
 
 ## Conventions

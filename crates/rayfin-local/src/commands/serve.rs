@@ -654,7 +654,7 @@ async fn start_features(
     };
     let mut routers = vec![
         Arc::clone(ctx.auth).router(),
-        guarded(integrations::connectors_router(ctx)),
+        guarded(integrations::connectors_router(ctx).await),
     ];
     for connector in &ctx.project.config().connectors {
         let kind = connector.connector_type.as_str();
@@ -784,16 +784,7 @@ fn banner_rows(
         None if ctx.options.no_functions => "off (--no-functions)".to_owned(),
         None => "off (services.functions is disabled in rayfin.yml)".to_owned(),
     };
-    let connectors = if config.connectors.is_empty() {
-        "none".to_owned()
-    } else {
-        config
-            .connectors
-            .iter()
-            .map(|connector| connector.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
+    let connectors = integrations::connectors_summary(&config.connectors);
     let folders = integrations::storage_folders(ctx.model);
     let storage = if features.storage {
         format!(

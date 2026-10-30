@@ -47,12 +47,14 @@ pub mod plan;
 pub mod policy;
 pub mod schema;
 pub mod sql;
+pub mod tsql;
 mod validate;
 mod value;
 
 use std::sync::Arc;
 
 use axum::Router;
+use axum::response::Response;
 use axum::routing::get;
 use parking_lot::RwLock;
 use rl_db::Db;
@@ -60,6 +62,22 @@ use rl_model::{AppModel, Caller, CallerResolver};
 
 pub use coerce::Input;
 pub use exec::{Outcome, Request};
+
+/// Reads a `POST` body as Hot Chocolate's request parser does; `Err` is its `400` answer. For
+/// other GraphQL routes over the same front end (connectors).
+pub fn read_request(body: &[u8]) -> Result<Request, Box<Response>> {
+    http::read_request(body)
+}
+
+/// The HTTP response of an [`Outcome`], with the data API's status policy.
+pub fn outcome_response(outcome: Outcome) -> Response {
+    http::respond(outcome)
+}
+
+/// The `401` for a bearer token that is malformed, expired or revoked.
+pub fn invalid_token_response() -> Response {
+    http::invalid_token()
+}
 
 /// The data API's options (`services.data` in `rayfin.yml`, DAB's runtime options).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,7 +108,11 @@ pub(crate) struct Snapshot {
 
 impl Snapshot {
     fn new(model: Arc<AppModel>) -> Self {
-        let schema = schema::Schema::build(&model);
+        Self::with_options(model, schema::SchemaOptions::default())
+    }
+
+    pub(crate) fn with_options(model: Arc<AppModel>, options: schema::SchemaOptions) -> Self {
+        let schema = schema::Schema::build_with(&model, options);
         Self { model, schema }
     }
 }

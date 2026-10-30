@@ -185,6 +185,26 @@ pub struct Schema {
     pub mutation_type: Option<String>,
     /// Object type name → entity index.
     pub entity_types: HashMap<String, usize>,
+    pub options: SchemaOptions,
+}
+
+/// What a schema's mutations return, which depends on the database behind it (DAB's
+/// `DatabaseType`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mutations {
+    /// The written row, read back: the data API, and Fabric SQL databases (MSSQL).
+    #[default]
+    Row,
+    /// `DbOperationResult { result }`: Fabric Warehouse (DWSQL), which has no `OUTPUT` clause.
+    OperationResult,
+    /// No mutations: a read-only source (a Lakehouse's SQL analytics endpoint).
+    None,
+}
+
+/// How [`Schema::build_with`] shapes the schema.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SchemaOptions {
+    pub mutations: Mutations,
 }
 
 pub const QUERY: &str = "Query";
@@ -193,11 +213,17 @@ pub const ORDER_BY_ENUM: &str = "OrderBy";
 impl Schema {
     /// DAB's schema for `model` (queries; mutations and aggregations extend it).
     pub fn build(model: &AppModel) -> Self {
+        Self::build_with(model, SchemaOptions::default())
+    }
+
+    /// [`Schema::build`] with `options`.
+    pub fn build_with(model: &AppModel, options: SchemaOptions) -> Self {
         let mut schema = Schema {
             types: IndexMap::new(),
             query_type: QUERY.into(),
             mutation_type: None,
             entity_types: HashMap::new(),
+            options,
         };
         for builtin in ["String", "Boolean", "Int", "Float", "ID"] {
             schema.add(TypeDef::Scalar(builtin.into(), None));
@@ -230,7 +256,9 @@ impl Schema {
             if access::readable_by_anyone(entity) {
                 let (list, by_pk) = query_fields_of(index, entity);
                 query_fields.insert(list.name.clone(), list);
-                query_fields.insert(by_pk.name.clone(), by_pk);
+                if let Some(by_pk) = by_pk {
+                    query_fields.insert(by_pk.name.clone(), by_pk);
+                }
             }
         }
         schema.add(TypeDef::Object(ObjectDef {
@@ -338,7 +366,9 @@ fn list_arguments(type_name: &str) -> IndexMap<String, InputValueDef> {
     .collect()
 }
 
-fn query_fields_of(index: usize, entity: &Entity) -> (FieldDef, FieldDef) {
+/// The list query and, when the entity has a key, the by-key query: one argument per key column
+/// (DAB's `_by_pk`; `id` for data entities).
+fn query_fields_of(index: usize, entity: &Entity) -> (FieldDef, Option<FieldDef>) {
     let names = &entity.graphql;
     let mut list = field(
         &names.list_query,
@@ -350,6 +380,10 @@ fn query_fields_of(index: usize, entity: &Entity) -> (FieldDef, FieldDef) {
         Resolver::List(index),
     );
     list.args = list_arguments(&names.type_name);
+    let keys = entity.key_columns();
+    if keys.is_empty() {
+        return (list, None);
+    }
     let mut by_pk = field(
         &names.by_pk_query,
         Some(&format!(
@@ -359,16 +393,17 @@ fn query_fields_of(index: usize, entity: &Entity) -> (FieldDef, FieldDef) {
         TypeRef::named(&names.type_name),
         Resolver::ByPk(index),
     );
-    let pk = entity.primary_key_column();
-    let pk_type = TypeRef::named(pk.kind.graphql_scalar()).non_null();
-    by_pk.args.insert(
-        pk.field.clone(),
-        InputValueDef {
-            description: None,
-            ..input(&pk.field, "", pk_type)
-        },
-    );
-    (list, by_pk)
+    for key in keys {
+        let key_type = TypeRef::named(key.kind.graphql_scalar()).non_null();
+        by_pk.args.insert(
+            key.field.clone(),
+            InputValueDef {
+                description: None,
+                ..input(&key.field, "", key_type)
+            },
+        );
+    }
+    (list, Some(by_pk))
 }
 
 /// The scalar fields some role may read, then the exposed relationships.

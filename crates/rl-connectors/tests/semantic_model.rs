@@ -477,6 +477,17 @@ async fn other_connector_types_answer_501() {
     );
 
     let graphql = json!({ "query": "{ products { items { id } } }" });
+    let invoke = execute_query(json!({ "query": "SELECT 1" }));
+    let (status, _, body) = post(&app, "/connector-invoke/warehouse", Some(SESSION), invoke).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert!(
+        json_body(&body)["message"]
+            .as_str()
+            .unwrap()
+            .contains("POST /connectors/warehouse/graphql"),
+        "{}",
+        json_body(&body)
+    );
     let (status, _, body) = post(
         &app,
         "/connectors/warehouse/graphql",
@@ -484,11 +495,13 @@ async fn other_connector_types_answer_501() {
         graphql.clone(),
     )
     .await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    // A Category A connector runs locally once its entities are analyzed (`rl_connectors::sql`).
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(json_body(&body)["code"], "CONNECTOR_MISCONFIGURED");
     assert_eq!(
         json_body(&body)["message"],
-        "Connector type 'fabric-warehouse' isn't supported by rayfin-local yet; deploy with \
-         `npx rayfin up` to use it."
+        "Connector 'warehouse' can't run locally: The entities of connector 'warehouse' weren't \
+         analyzed; restart rayfin-local."
     );
 
     let (status, ..) = post(&app, "/connectors/nope/graphql", Some(SESSION), graphql).await;

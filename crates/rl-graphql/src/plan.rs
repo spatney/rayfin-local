@@ -565,6 +565,33 @@ pub fn connection_plan(
     })
 }
 
+/// Each key column of `entity` (table alias `alias`) equal to its argument in `args`: `id` for
+/// data entities, every `Source({ primaryKey })` column for a connector's. A missing argument
+/// matches nothing.
+pub fn key_predicate(
+    entity: &Entity,
+    alias: &str,
+    args: &HashMap<String, Input>,
+) -> Result<Pred, GraphQlError> {
+    let preds = entity
+        .key_columns()
+        .into_iter()
+        .map(|key| {
+            let value = match args.get(&key.field) {
+                Some(Input::Scalar(json)) => codec::encode_operand(&key.kind, json)
+                    .map_err(|e| GraphQlError::dab(e.to_string(), codes::BAD_REQUEST))?,
+                _ => SqlValue::Null,
+            };
+            Ok(Pred::Cmp(
+                Operand::column(alias, &key.name),
+                CmpOp::Eq,
+                Operand::Value(value),
+            ))
+        })
+        .collect::<Result<Vec<_>, GraphQlError>>()?;
+    Ok(Pred::all(preds))
+}
+
 /// `target.<target column> = source.<source column>` for each column pair of `rel`.
 pub fn join_pred(
     model: &AppModel,
@@ -849,8 +876,11 @@ pub fn order_keys(
             desc: direction == "DESC",
         });
     }
-    for (column, def) in entity.columns.iter().enumerate() {
-        if def.primary_key && !keys.iter().any(|k| k.column == column) {
+    for name in &entity.primary_key.columns {
+        let Some(column) = entity.columns.iter().position(|c| &c.name == name) else {
+            continue;
+        };
+        if !keys.iter().any(|k| k.column == column) {
             keys.push(OrderKey {
                 column,
                 desc: false,
@@ -891,8 +921,10 @@ fn keyset(
             return Err(invalid());
         }
     }
-    let pk = entity.primary_key_column();
-    if require_pk && !by_name.contains_key(pk.field.as_str()) {
+    // Keyless connector entities have no key to require.
+    if let Some(pk) = entity.key_columns().first().filter(|_| require_pk)
+        && !by_name.contains_key(pk.field.as_str())
+    {
         return Err(bad(format!(
             "Pagination token is not well formed because it is missing an expected field: {}",
             pk.field

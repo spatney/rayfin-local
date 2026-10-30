@@ -486,6 +486,18 @@ pub(crate) fn output_datetime(stored: &str) -> String {
     format!("{}Z", &stored[..23])
 }
 
+/// A date-time in the stored format (UTC, 100 ns, `YYYY-MM-DDTHH:MM:SS.fffffffZ`), from the
+/// formats [`encode`] accepts for dates: RFC 3339 with `Z` or an offset, or `YYYY-MM-DD`. For
+/// databases that format dates themselves (connectors' SQL Server).
+pub fn normalize_datetime(text: &str) -> Option<String> {
+    parse_datetime(text)
+}
+
+/// A stored date-time ([`normalize_datetime`]) as DAB emits it (`YYYY-MM-DDTHH:MM:SS.fffZ`).
+pub fn datetime_output(stored: &str) -> String {
+    output_datetime(stored)
+}
+
 /// A JSON number as a `DECIMAL`: `None` beyond .NET's `decimal` range (Hot Chocolate's
 /// `Decimal` rejects it). With `scale`, rounded as SQL Server stores it in `DECIMAL(p,scale)`.
 fn decimal_from_number(number: &Number, scale: Option<u32>) -> Option<f64> {
@@ -841,6 +853,7 @@ mod tests {
             primary_key: name == "id",
             unique: false,
             origin: rl_model::ColumnOrigin::Declared,
+            source: None,
         };
         let Some(SqlValue::Text(id)) = generated_default(&column("id", FieldKind::Uuid, None))
         else {

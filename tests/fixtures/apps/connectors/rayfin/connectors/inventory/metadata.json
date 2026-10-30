@@ -1,0 +1,63 @@
+{
+  "source": "inventory",
+  "connector": "fabric-sqldatabase",
+  "connectionString": "fixture-server.database.fabric.microsoft.com,1433",
+  "discoveredAt": "2026-10-01T00:00:00.000Z",
+  "schemas": [
+    {
+      "schemaName": "dbo",
+      "tables": [
+        {
+          "tableName": "categories",
+          "columns": [
+            { "columnName": "category_id", "dataType": "int", "isNullable": false, "precision": 10, "scale": 0, "identity": { "seed": 1, "increment": 1 } },
+            { "columnName": "name", "dataType": "nvarchar", "isNullable": false, "maxLength": 100 },
+            { "columnName": "description", "dataType": "nvarchar", "isNullable": true, "maxLength": 400 }
+          ],
+          "primaryKeyColumns": ["category_id"]
+        },
+        {
+          "tableName": "audit_log",
+          "columns": [
+            { "columnName": "at", "dataType": "datetimeoffset", "isNullable": false, "datePrecision": 7 },
+            { "columnName": "action", "dataType": "nvarchar", "isNullable": false, "maxLength": 50 },
+            { "columnName": "detail", "dataType": "nvarchar", "isNullable": true, "maxLength": 400 }
+          ]
+        }
+      ]
+    },
+    {
+      "schemaName": "sales",
+      "tables": [
+        {
+          "tableName": "products",
+          "columns": [
+            { "columnName": "product_id", "dataType": "uniqueidentifier", "isNullable": false, "default": "(newid())" },
+            { "columnName": "category_id", "dataType": "int", "isNullable": false, "precision": 10, "scale": 0 },
+            { "columnName": "name", "dataType": "nvarchar", "isNullable": false, "maxLength": 200 },
+            { "columnName": "price", "dataType": "decimal", "isNullable": false, "precision": 10, "scale": 2 },
+            { "columnName": "in_stock", "dataType": "bit", "isNullable": false },
+            { "columnName": "created_at", "dataType": "datetime2", "isNullable": false, "datePrecision": 7, "default": "(sysutcdatetime())" },
+            { "columnName": "owner_email", "dataType": "nvarchar", "isNullable": false, "maxLength": 320 }
+          ],
+          "primaryKeyColumns": ["product_id"],
+          "foreignKeys": [
+            { "constraintName": "FK_products_categories", "columnName": "category_id", "referencedTableSchema": "dbo", "referencedTableName": "categories", "referencedColumnName": "category_id" }
+          ]
+        },
+        {
+          "tableName": "stock_levels",
+          "columns": [
+            { "columnName": "product_id", "dataType": "uniqueidentifier", "isNullable": false },
+            { "columnName": "warehouse_code", "dataType": "nvarchar", "isNullable": false, "maxLength": 10 },
+            { "columnName": "quantity", "dataType": "int", "isNullable": false, "precision": 10, "scale": 0 }
+          ],
+          "primaryKeyColumns": ["product_id", "warehouse_code"],
+          "foreignKeys": [
+            { "constraintName": "FK_stock_levels_products", "columnName": "product_id", "referencedTableSchema": "sales", "referencedTableName": "products", "referencedColumnName": "product_id" }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -32,11 +32,17 @@ pub(crate) async fn post(
         Ok(caller) => caller,
         Err(response) => return *response,
     };
-    let request = match parse_body(&body) {
+    let request = match read_request(&body) {
         Ok(request) => request,
-        Err(error) => return graphql(StatusCode::BAD_REQUEST, errors_body(&[error])),
+        Err(response) => return *response,
     };
     respond(api.execute(&caller, request).await)
+}
+
+/// The request in a `POST` body, or the `400` answer to an unreadable one.
+pub(crate) fn read_request(body: &[u8]) -> Result<Request, Box<Response>> {
+    parse_body(body)
+        .map_err(|error| Box::new(graphql(StatusCode::BAD_REQUEST, errors_body(&[error]))))
 }
 
 pub(crate) async fn get(
@@ -81,15 +87,18 @@ fn resolve(api: &DataApi, headers: &HeaderMap) -> Result<Caller, Box<Response>> 
         .and_then(|v| v.to_str().ok());
     api.callers
         .resolve(bearer_token(authorization))
-        .map_err(|_| {
-            Box::new(unauthorized(
-                "Bearer error=\"invalid_token\"",
-                json!({
-                    "error": "invalid_token",
-                    "error_description": "The access token is invalid or has expired.",
-                }),
-            ))
-        })
+        .map_err(|_| Box::new(invalid_token()))
+}
+
+/// `401 invalid_token`: the SDK refreshes the session and replays the call.
+pub(crate) fn invalid_token() -> Response {
+    unauthorized(
+        "Bearer error=\"invalid_token\"",
+        json!({
+            "error": "invalid_token",
+            "error_description": "The access token is invalid or has expired.",
+        }),
+    )
 }
 
 fn query_missing() -> GraphQlError {
@@ -134,7 +143,7 @@ fn parse_body(body: &[u8]) -> Result<Request, GraphQlError> {
     })
 }
 
-fn respond(outcome: Outcome) -> Response {
+pub(crate) fn respond(outcome: Outcome) -> Response {
     match outcome {
         Outcome::Graphql { status, body } => {
             graphql(StatusCode::from_u16(status).unwrap_or(StatusCode::OK), body)

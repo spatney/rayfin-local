@@ -37,3 +37,45 @@ jobs:
           node-version: 22
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
+
+  sql-connectors:
+    # Category A (SQL) connectors against a real SQL Server: crates/rl-connectors/tests/sql_server.rs
+    # and sql_sdk.rs (the real SDK, from the connectors fixture's packages). The password only
+    # guards this job's throwaway container.
+    runs-on: ubuntu-latest
+    services:
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: Rl1-${{ github.run_id }}-ci
+        ports:
+          - 1433:1433
+    env:
+      MSSQL_SA_PASSWORD: Rl1-${{ github.run_id }}-ci
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the connectors fixture's packages
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: tests/fixtures/apps/connectors
+      - name: Wait for SQL Server
+        run: |
+          for attempt in $(seq 1 60); do
+            if docker exec ${{ job.services.mssql.id }} /opt/mssql-tools18/bin/sqlcmd -S localhost \
+                -U sa -P "$MSSQL_SA_PASSWORD" -C -Q "SELECT 1" > /dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "SQL Server didn't start"
+          exit 1
+      - run: cargo test -p rl-connectors --test sql_server --test sql_sdk
+        env:
+          RAYFIN_LOCAL_TEST_MSSQL: localhost,1433;sa;${{ env.MSSQL_SA_PASSWORD }}

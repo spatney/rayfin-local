@@ -9,7 +9,10 @@ use std::{
     process::Command,
 };
 
-use rl_model::{ANALYZE_JS, AnalyzeInput, AppModel, Dialect};
+use rl_model::connector::ConnectorsAnalysis;
+use rl_model::{
+    ANALYZE_JS, AnalyzeInput, AppModel, ConnectorSource, ConnectorsAnalyzeInput, Dialect,
+};
 use serde_json::Value;
 
 fn fixture_project() -> PathBuf {
@@ -31,14 +34,14 @@ fn node() -> Option<OsString> {
 }
 
 /// Runs the helper in `project` and returns its output document.
-fn run(node: &OsString, project: &Path, input: &AnalyzeInput, scratch: &Path) -> Value {
+fn run(node: &OsString, project: &Path, input: &Value, scratch: &Path) -> Value {
     let _ = fs::remove_dir_all(scratch);
     fs::create_dir_all(scratch).unwrap();
     let script = scratch.join("analyze.mjs");
     fs::write(&script, ANALYZE_JS).unwrap();
     let input_file = scratch.join("input.json");
     let output_file = scratch.join("output.json");
-    fs::write(&input_file, input.to_json().to_string()).unwrap();
+    fs::write(&input_file, input.to_string()).unwrap();
     let status = Command::new(node)
         .arg(&script)
         .arg("--input")
@@ -80,7 +83,7 @@ fn analyze_js_reproduces_the_golden_analysis() {
     let scratch = Path::new(env!("CARGO_TARGET_TMPDIR")).join("rl-model-analyze-golden");
     let mut input = AnalyzeInput::for_project(&project, Dialect::Mssql, true);
     input.out_dir = scratch.join("compiled");
-    let output = run(&node, &project, &input, &scratch);
+    let output = run(&node, &project, &input.to_json(), &scratch);
     assert_eq!(output["ok"], true, "{output}");
     let golden: Value = serde_json::from_str(include_str!("fixtures/basic.analysis.json")).unwrap();
     assert!(
@@ -104,9 +107,68 @@ fn analyze_js_writes_inside_a_project_only_under_rayfin_local() {
     let scratch = Path::new(env!("CARGO_TARGET_TMPDIR")).join("rl-model-analyze-outdir");
     let mut input = AnalyzeInput::for_project(&project, Dialect::Mssql, false);
     input.out_dir = project.join("rayfin").join("compiled");
-    let output = run(&node, &project, &input, &scratch);
+    let output = run(&node, &project, &input.to_json(), &scratch);
     assert_eq!(output["ok"], false, "{output}");
     let message = output["error"]["message"].as_str().unwrap();
     assert!(message.contains(".rayfin-local"), "{message}");
     assert!(!input.out_dir.exists());
+}
+
+/// The `connectors` fixture app (the `inventory` SQL connector), with its packages installed.
+fn connectors_prerequisites() -> Option<(OsString, PathBuf)> {
+    let project = fixture_project().parent().unwrap().join("connectors");
+    if !project
+        .join("node_modules")
+        .join("@microsoft")
+        .join("rayfin-connectors")
+        .is_dir()
+    {
+        eprintln!("skipped: run `npm install` in {}", project.display());
+        return None;
+    }
+    let Some(node) = node() else {
+        eprintln!("skipped: Node.js was not found (set RAYFIN_LOCAL_NODE)");
+        return None;
+    };
+    Some((node, project))
+}
+
+#[test]
+fn analyze_js_reproduces_the_golden_connector_analysis() {
+    let Some((node, project)) = connectors_prerequisites() else {
+        return;
+    };
+    let scratch = Path::new(env!("CARGO_TARGET_TMPDIR")).join("rl-model-analyze-connectors");
+    let source = |name: &str| ConnectorSource {
+        name: name.to_owned(),
+        dir: project.join("rayfin").join("connectors").join(name),
+        dialect: "mssql".to_owned(),
+    };
+    let mut input =
+        ConnectorsAnalyzeInput::for_project(&project, vec![source("inventory"), source("missing")]);
+    input.out_dir = scratch.join("compiled");
+    let output = run(&node, &project, &input.to_json(), &scratch);
+    assert_eq!(output["ok"], true, "{output}");
+    let connectors = &output["result"]["connectors"];
+    let golden: Value =
+        serde_json::from_str(include_str!("fixtures/inventory.connector.json")).unwrap();
+    assert!(
+        connectors[0] == golden,
+        "analyze.mjs output differs from tests/fixtures/inventory.connector.json; if the change \
+         is intended, regenerate it. Output:\n{}",
+        serde_json::to_string_pretty(&connectors[0]).unwrap()
+    );
+    let message = connectors[1]["error"]["message"].as_str().unwrap();
+    assert!(message.contains("rayfin/connectors/missing"), "{message}");
+    let analysis = ConnectorsAnalysis::from_result(&output["result"]).unwrap();
+    assert!(analysis.connectors[0].model.is_ok());
+    assert!(analysis.connectors[1].model.is_err());
+    assert!(
+        analysis
+            .inputs
+            .iter()
+            .any(|input| input.ends_with("inventory/Product.ts")),
+        "{:?}",
+        analysis.inputs
+    );
 }
