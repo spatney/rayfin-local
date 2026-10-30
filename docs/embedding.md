@@ -239,7 +239,7 @@ Under rayfin-local, the dev server answers that route itself, ahead of `rayfinLo
 
 `[auth] sign_in_as` in `rayfin-local.toml` sets the identity too (`"developer"`, `"none"` or `"user:<username>"`); `--sign-in-as` wins.
 Changing it while `serve` runs switches the identity (a `config-changed` event with `auth` in `what`), unless `--sign-in-as` was given; other live changes keep the identity.
-When `developer` finds no Entra identity, it asks again after five minutes, or at once after `PUT /identity`, for example once the developer signed in to Azure.
+When `developer` finds no Entra identity, it asks again after five minutes, or at once when the identity is set again (`PUT /identity`), for example once the developer signed in to Azure.
 The answer is a session like any other, in the shape `fetchRayfinLocalSessionToken()` expects: `{"accessToken","tokenType","expiresIn","refreshToken","scope"}`.
 Failures are `{"error","hint"}`, which the page shows: 403 for requests from other machines or other origins, 404 when the app's auth is off (`services.auth.enabled: false`), 500 when signing in failed.
 Changing the identity (through the control API, or `[auth] sign_in_as` while `serve` runs) revokes every local session, so an app that reloads signs in again as the new identity.
@@ -254,13 +254,13 @@ With `RAYFIN_LOCAL_CONTROL_TOKEN` set, the backend serves `{apiUrl}/.rayfin-loca
 - Requests with an `Origin` header (from a browser) get 403, and CORS never allows these routes.
   They need no publishable key.
 - Bodies are JSON; a route that takes one also takes an empty body, as `{}`.
-  Errors are `{"error":{"code","message","hint"}}` with a 4xx or 5xx status; `code` is stable, and is one of `unauthorized` (401), `forbidden` (403), `invalid-request` (400), `invalid-order-by` (400), `user-not-found` (404), `entity-not-found` (404), `user-exists` (409), `rows-referenced` (409), `internal` (500), `not-available` (501) and `starting` (503).
+  Errors are `{"error":{"code","message","hint"}}` with a 4xx or 5xx status; `code` is stable, and is one of `unauthorized` (401), `forbidden` (403), `invalid-request` (400), `invalid-order-by` (400), `user-not-found` (404), `entity-not-found` (404), `user-exists` (409), `rows-referenced` (409), `config-invalid` (422), `analysis-failed` (422), `internal` (500), `starting` (503) and `stopping` (503).
 - Without the variable, these routes answer 404.
 - Live reload keeps them: they answer, with the same token, after every change it applies.
 
 | Method and path | Body | Answer |
 | --- | --- | --- |
-| `GET /status` | | The `ready` payload (without `v`, `type`, `time`) plus `"state":"running"`, `"schema"` (the last `schema` event), `"functions"` (the last `functions` event) and `"vite"` (the last `vite` event). `signInAs` is the identity as it is now. 503 `starting` before `ready`. |
+| `GET /status` | | The `ready` payload (without `v`, `type`, `time`) plus `"state":"running"`, `"analysis"` (the last `analysis` event), `"schema"` (the last `schema` event), `"functions"` (the last `functions` event) and `"vite"` (the last `vite` event). `signInAs`, `features.data.entities` and `features.functions.names` are as they are now: the identity may have changed since the last `ready`, and changed entities and rebuilt functions apply without a new `ready`. 503 `starting` before `ready`. |
 | `GET /identity` | | `{"kind":"developer","user":{…}}`, `{"kind":"user","user":{…}}` or `{"kind":"none","user":null}`. `user` is the [user](#users) the identity signs in as: for `developer`, the account it signed in as last in this run (`null` until first used); for `user`, `null` while that user doesn't exist. |
 | `PUT /identity` | `{"kind":"developer"}`, `{"kind":"user","user":"<username or id>","create":true}` or `{"kind":"none"}` | The new identity, as `GET /identity`. Revokes every local session. A missing user is 404 `user-not-found` unless `create` is `true` (default `false`), which creates it without a password. |
 | `GET /users` | | `{"users":[user, …]}`, oldest first. |
@@ -271,7 +271,7 @@ With `RAYFIN_LOCAL_CONTROL_TOKEN` set, the backend serves `{apiUrl}/.rayfin-loca
 | `GET /entities/{name}/rows?offset=0&limit=50&orderBy=<field>&desc=false` | | `{"columns":[{"name","type","key":bool}],"rows":[{…}],"total":12}`. Every row, regardless of permissions; values formatted as the data API formats them. `columns` are the entity's fields with their GraphQL type (`UUID`, `String`, `Int`, `Decimal`, `Boolean` or `DateTime`); `key` marks the primary key. Rows are ordered by `orderBy`, then by the primary key. `limit` is 1 to 500 (default 50). 400 for other values or an unknown `orderBy`; 404 `entity-not-found`. |
 | `DELETE /entities/{name}/rows` | | `{"deleted":12}`. 409 `rows-referenced` when other entities' rows still refer to them; the message says which, and how many. |
 | `POST /data/reset` | | `{"ok":true}`. Deletes every entity's rows, the local users and their sessions, and the stored files, without a restart. The identity stays: a `user` identity's user is created again at its next automatic sign-in. |
-| `POST /reload` | `{"forceSchema":false}` | Reads `rayfin.yml`, the entities and the secret values again and applies them now. Answers `{"schema":<schema event>,"config":<config-changed event or null>}`, or 501 `not-available` when this rayfin-local can't reload on request. |
+| `POST /reload` | `{"forceSchema":false}` | Reads `rayfin.yml`, `rayfin-local.toml`, the entities, the SQL connectors' entities and the secret values again and applies them now, as after an edit (`forceSchema`: also a schema change that loses data). Answers `{"schema":<schema event>,"config":<config-changed event or null>}`, the events it also emits; a change that would lose data answers 200 with a `refused` `schema` event. A reload in progress finishes first, and one asked for before `ready` waits for the start. A `rayfin.yml` or `rayfin-local.toml` that can't be read answers 422 `config-invalid`, and entities that can't be analyzed 422 `analysis-failed`; what could be read is applied all the same. 503 `stopping` once `serve` stops. |
 
 A <a id="users"></a>**user** is `{"id","username","email","createdAt","signIn":["password","entra"],"developer":bool}`:
 

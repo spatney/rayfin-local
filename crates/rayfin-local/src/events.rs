@@ -1,6 +1,6 @@
 //! The host contract's events (`serve --json`, docs/embedding.md): one JSON object per line on
-//! stdout, and the live state a host reads back (the last `ready`, `schema`, `functions` and
-//! `vite` events).
+//! stdout, and the live state a host reads back (the last `ready`, `analysis`, `schema`,
+//! `functions` and `vite` events).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
@@ -631,7 +631,7 @@ pub fn is_json() -> bool {
 }
 
 /// Emits `event`: written with `--json`, and kept in the [`live`] state when it is a `ready`,
-/// `schema`, `functions` or `vite` event.
+/// `analysis`, `schema`, `functions` or `vite` event.
 pub fn emit(event: Event) {
     publish(&event, false);
 }
@@ -692,8 +692,8 @@ pub fn live() -> LiveState {
     LIVE.get_or_init(LiveState::default).clone()
 }
 
-/// The last `ready`, `schema`, `functions` and `vite` events, as emitted (with or without
-/// `--json`): what the control API's `GET /status` reports. Cheap to clone.
+/// The last `ready`, `analysis`, `schema`, `functions` and `vite` events, as emitted (with or
+/// without `--json`): what the control API's `GET /status` reports. Cheap to clone.
 #[derive(Clone, Debug, Default)]
 pub struct LiveState(Arc<Mutex<Snapshot>>);
 
@@ -701,6 +701,7 @@ pub struct LiveState(Arc<Mutex<Snapshot>>);
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Snapshot {
     pub ready: Option<Value>,
+    pub analysis: Option<Value>,
     pub schema: Option<Value>,
     pub functions: Option<Value>,
     pub vite: Option<Value>,
@@ -710,7 +711,11 @@ impl LiveState {
     fn keeps(event: &Event) -> bool {
         matches!(
             event,
-            Event::Ready(_) | Event::Schema(_) | Event::Functions(_) | Event::Vite(_)
+            Event::Ready(_)
+                | Event::Analysis(_)
+                | Event::Schema(_)
+                | Event::Functions(_)
+                | Event::Vite(_)
         )
     }
 
@@ -718,6 +723,7 @@ impl LiveState {
         let mut snapshot = lock(&self.0);
         let slot = match line["type"].as_str() {
             Some("ready") => &mut snapshot.ready,
+            Some("analysis") => &mut snapshot.analysis,
             Some("schema") => &mut snapshot.schema,
             Some("functions") => &mut snapshot.functions,
             Some("vite") => &mut snapshot.vite,
@@ -731,8 +737,8 @@ impl LiveState {
     }
 
     /// `GET /status` of the control API: the `ready` payload (without `v`, `type` and `time`),
-    /// `"state": "running"`, and the last `schema`, `functions` and `vite` events (`null` when
-    /// there was none). `None` before `ready`.
+    /// `"state": "running"`, and the last `analysis`, `schema`, `functions` and `vite` events
+    /// (`null` when there was none). `None` before `ready`.
     pub fn status(&self) -> Option<Value> {
         let snapshot = self.snapshot();
         let Some(Value::Object(ready)) = snapshot.ready else {
@@ -744,6 +750,7 @@ impl LiveState {
             .collect();
         status.insert("state".into(), "running".into());
         for (key, event) in [
+            ("analysis", snapshot.analysis),
             ("schema", snapshot.schema),
             ("functions", snapshot.functions),
             ("vite", snapshot.vite),
@@ -1093,6 +1100,16 @@ mod tests {
         assert_eq!(live.status(), None);
         live.record(&line(Event::Ready(Box::new(ready()))));
         live.record(&line(schema(SchemaResult::Refused)));
+        live.record(&line(Event::Analysis(Analysis {
+            ok: false,
+            sdk: Sdk {
+                version: None,
+                supported: true,
+            },
+            entities: Vec::new(),
+            storage_folders: Vec::new(),
+            message: Some("Note.ts(3,1): error TS1005: ';' expected.".into()),
+        })));
         live.record(&line(Event::Log(Log {
             source: LogSource::RayfinLocal,
             level: LogLevel::Info,
@@ -1103,6 +1120,7 @@ mod tests {
         assert_eq!(status["apiUrl"], "http://localhost:7171");
         assert!(status.get("type").is_none() && status.get("time").is_none());
         assert_eq!(status["schema"]["result"], "refused");
+        assert_eq!(status["analysis"]["ok"], false);
         assert_eq!(status["functions"], Value::Null);
         assert_eq!(live.snapshot().vite, None);
     }

@@ -176,7 +176,7 @@ It waits for edits to settle (500 ms), and handles one change at a time.
 - **Frontend changes.** Vite's hot module replacement, as usual.
   When Vite stops by itself, `serve` starts it again on the same port, after 1, 2 and then 5 seconds, and gives up after a fourth stop within two minutes; a restarted Vite gets the run's sign-in secret too.
 
-`reload::ReloadHandle` applies all of these on demand.
+`reload::ReloadHandle` applies all of these on demand: the control API's `POST /reload` calls it.
 
 ### Shutdown
 
@@ -195,14 +195,14 @@ Programs such as Fabricator run `serve --json` as a child process; [embedding.md
   Fatal errors are classified in `errors.rs`: an error tagged at the stage that failed (`errors::Coded`, which shows as the error it wraps), else the first error of a known type in the chain (`ProjectError`, `NodeError`, `SchemaError`, `FrontendError`, …), else `internal`.
 - **Stopping.** A thread reads stdin until it ends (`shutdown::StopListener`); `serve` listens to it, and to Ctrl+C, from the start, so a host that gives up during a slow start stops it too.
 - **Feature crates** report through hooks rather than knowing about events: `rl-functions` calls `FunctionsConfig::on_state` (building, ready, failed with the compiler's messages), the token sources handed to the services report the audiences without a token (`azure-sign-in`), and which connector types run locally is decided in one place, `integrations::connector_runs_locally`.
-- **Live state.** `events::live()` keeps the last `ready`, `schema`, `functions` and `vite` events, with or without `--json`, for the control API's `GET /status`.
+- **Live state.** `events::live()` keeps the last `ready`, `analysis`, `schema`, `functions` and `vite` events, with or without `--json`, for the control API's `GET /status`, which reads the identity, the served entities (`DataApi::model`) and the loaded functions (`FunctionsSlot`) as they are now: entity changes and function rebuilds bring no new `ready`.
 - **Reloading.** A configuration change that applied emits `config-changed`, then a new `ready` (`commands::serve::ready_event`, as at startup).
-  `ServeContext::reload` is the `reload::ReloadHandle` that applies the project's changes on demand.
+  `ServeContext::reload` is the `reload::ReloadHandle` the control API's `POST /reload` calls.
 - **Control API.** `control.rs` serves `/.rayfin-local/control/*` when `RAYFIN_LOCAL_CONTROL_TOKEN` is set: `main` takes the token from the environment before anything else runs, so no child inherits it, and `serve` checks it before starting.
   Its router is one of `commands::serve::Features::routers`, so it is built again, over the services that run then, each time live reload swaps in a new router.
   A guard layer answers only loopback peers that send no `Origin` and the token as a bearer token (compared as SHA-256 digests in constant time).
   The handlers use the services' own APIs: `rl-auth` for users, sessions and the sign-in identity, `rl-graphql`'s `admin` module for rows (formatted by the data API's SQL), and `rl_storage::clear`.
-  `POST /reload` goes through `control::ReloadTrigger`; `NoReload` answers 501 `not-available`.
+  `POST /reload` goes through `control::ReloadTrigger`, which `reload::ReloadHandle` implements; its failures answer with the code `errors::HostError::classify` gives them (`config-invalid`, `analysis-failed`), or `stopping` (`reload::Stopping`).
 
 ## Requests
 
@@ -456,7 +456,7 @@ rayfin-local is a development tool for one person, but it holds the keys to that
 - **SDK conformance**: the `sdk.rs` tests of `rl-auth`, `rl-graphql` and `rl-storage`, `rl-connectors`' `sdk_decode.rs` and `rl-functions`' `host.rs` drive rayfin-local with the real `@microsoft/rayfin-*` 1.36.2 packages from the fixture app, and skip when Node.js or the packages are missing.
 - **The host contract**: `crates/rayfin-local/tests/host_contract.rs` runs the built binary: `version --json`, fatal errors of `serve --json`, and a `serve --json` of the fixture app from its events to the end of stdin (it skips without the fixture's packages).
   `control_api.rs` drives the control API and automatic sign-in of the fixture app the same way.
-- **Live reload**: `crates/rayfin-local/tests/live_reload.rs` runs `serve --json` on a copy of the fixture app: `rayfin.yml` edits applied on the same ports, `secret set` restarting the function host, and Vite started again after it is killed.
+- **Live reload**: `crates/rayfin-local/tests/live_reload.rs` runs `serve --json` on a copy of the fixture app: `rayfin.yml` edits applied on the same ports, `secret set` restarting the function host, Vite started again after it is killed, and the control API, its `POST /reload` and automatic sign-in across changes.
 - **End to end**: Playwright drives the fixture app in `tests/e2e` (sign-in popup, data, functions, storage) and, optionally, the explorer app.
 
 [development.md](development.md) has the commands.

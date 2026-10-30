@@ -29,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::Duration;
 
-use anyhow::{Context as _, anyhow};
+use anyhow::Context as _;
 use notify::event::ModifyKind;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use rl_auth::{AuthService, SignInAs};
@@ -88,15 +88,14 @@ pub struct ReloadOutcome {
 impl ReloadHandle {
     /// Reads `rayfin.yml`, `rayfin-local.toml`, the entities, the SQL connectors' entities and
     /// the secret values again, now, and applies them. `force_schema` also applies a schema
-    /// change that loses data, as `--force-schema` does. A reload in progress finishes first.
-    /// Returns the `schema` event, and the `config-changed` event when something changed; both
-    /// are emitted too.
+    /// change that loses data, as `--force-schema` does. A reload in progress finishes first, and
+    /// a request made before `serve` has started waits until it has. Returns the `schema` event,
+    /// and the `config-changed` event when something changed; both are emitted too.
     ///
     /// Fails, leaving the previous configuration and model in use, when `rayfin.yml` or
     /// `rayfin-local.toml` can't be read (code `config-invalid`) or the entities can't be
     /// analyzed (`analysis-failed`); `errors::HostError::classify` gives the code. The changes
-    /// that could be read are still applied. Also fails while `serve` stops.
-    #[allow(dead_code, reason = "called by the control API's POST /reload")]
+    /// that could be read are still applied. Fails with [`Stopping`] once `serve` stops.
     pub async fn reload(&self, force_schema: bool) -> anyhow::Result<ReloadOutcome> {
         let (reply, answer) = oneshot::channel();
         let request = Request {
@@ -105,14 +104,15 @@ impl ReloadHandle {
         };
         self.messages
             .send(Message::Reload(request))
-            .map_err(|_| stopping())?;
-        answer.await.map_err(|_| stopping())?
+            .map_err(|_| Stopping)?;
+        answer.await.map_err(|_| Stopping)?
     }
 }
 
-fn stopping() -> anyhow::Error {
-    anyhow!("rayfin-local is stopping, so it can't reload the project.")
-}
+/// Why [`ReloadHandle::reload`] can't reload: `serve` stops (or failed to start).
+#[derive(Debug, thiserror::Error)]
+#[error("rayfin-local is stopping, so it can't reload the project.")]
+pub struct Stopping;
 
 /// The requests of a [`ReloadHandle`], waiting for [`start`].
 pub struct Requests(mpsc::UnboundedReceiver<Message>);
@@ -205,7 +205,6 @@ enum Message {
     /// A watched file changed.
     Changed(Change),
     /// [`ReloadHandle::reload`].
-    #[allow(dead_code, reason = "sent by the control API's POST /reload")]
     Reload(Request),
 }
 
@@ -1278,6 +1277,7 @@ mod tests {
     use std::collections::HashMap;
 
     use axum::Router;
+    use rl_model::CallerResolver as _;
 
     use super::*;
     use crate::errors::HostError;
@@ -1391,10 +1391,32 @@ mod tests {
         let invalid = reload.reload(true).await.unwrap_err();
         assert_eq!(HostError::classify(&invalid).code, ErrorCode::ConfigInvalid);
         assert!(auth.settings().password_enabled);
+        std::fs::write(&config, AUTH_ONLY).unwrap();
+
+        // The identity a host chose stays across changes, until `[auth] sign_in_as` changes,
+        // which switches it and signs everyone out.
+        auth.set_sign_in_as(SignInAs::User("bob".into()));
+        let bob = auth.find_or_create_user("bob").await.unwrap();
+        let session = auth.issue_session(&bob).await.unwrap();
+        let restored = reload.reload(false).await.unwrap();
+        assert_eq!(
+            restored.config.unwrap()["what"],
+            serde_json::json!(["auth"])
+        );
+        assert_eq!(auth.sign_in_as(), SignInAs::User("bob".into()));
+        let as_ana = "[auth]\nsign_in_as = \"user:ana@example.com\"\n";
+        std::fs::write(dir.path().join("rayfin-local.toml"), as_ana).unwrap();
+        let switched = reload.reload(false).await.unwrap();
+        assert_eq!(
+            switched.config.unwrap()["what"],
+            serde_json::json!(["auth"])
+        );
+        assert_eq!(auth.sign_in_as(), SignInAs::User("ana@example.com".into()));
+        assert!(auth.resolve(Some(&session.access_token)).is_err());
 
         hooks.run(Duration::from_secs(5)).await;
         let stopped = reload.reload(false).await.unwrap_err();
-        assert!(stopped.to_string().contains("stopping"), "{stopped}");
+        assert!(stopped.is::<Stopping>(), "{stopped}");
         stop.send(()).unwrap();
         server.await.unwrap().unwrap();
     }

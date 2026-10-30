@@ -28,38 +28,32 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use crate::events::{self, LiveState};
+use crate::errors::HostError;
+use crate::events::{self, ErrorCode, LiveState};
+use crate::integrations::FunctionsSlot;
+use crate::reload::{ReloadHandle, ReloadOutcome, Stopping};
 
 /// The rows `GET /entities/{name}/rows` reads without `limit`.
 const DEFAULT_ROWS: u32 = 50;
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// What `POST /reload` asks of live reload.
+/// What `POST /reload` asks of live reload ([`ReloadHandle`]).
 pub trait ReloadTrigger: Send + Sync + 'static {
-    /// Reads `rayfin.yml`, the entities and the secret values again and applies them now;
-    /// `force_schema` applies a schema change that loses data. `None` when this run can't reload
-    /// on request.
-    fn reload(&self, force_schema: bool) -> BoxFuture<'_, Option<Reloaded>>;
+    /// Reads `rayfin.yml`, `rayfin-local.toml`, the entities, the SQL connectors' entities and
+    /// the secret values again and applies them now; `force_schema` applies a schema change that
+    /// loses data. Fails as [`ReloadHandle::reload`] does.
+    fn reload(&self, force_schema: bool) -> BoxFuture<'_, anyhow::Result<ReloadOutcome>>;
 }
 
-/// What a reload did: its `schema` event and its `config-changed` event (`None` when the
-/// configuration didn't change), as their lines have them (`Event::to_json`).
-pub struct Reloaded {
-    pub schema: Value,
-    pub config: Option<Value>,
-}
-
-/// For runs whose live reload can't be asked to reload: `POST /reload` answers 501.
-pub struct NoReload;
-
-impl ReloadTrigger for NoReload {
-    fn reload(&self, _force_schema: bool) -> BoxFuture<'_, Option<Reloaded>> {
-        Box::pin(async { None })
+impl ReloadTrigger for ReloadHandle {
+    fn reload(&self, force_schema: bool) -> BoxFuture<'_, anyhow::Result<ReloadOutcome>> {
+        Box::pin(ReloadHandle::reload(self, force_schema))
     }
 }
 
-/// What the control API works on.
+/// What the control API works on: the services of the router it is part of, which live reload
+/// builds again with each change.
 pub struct Control {
     /// The host's secret (`RAYFIN_LOCAL_CONTROL_TOKEN`).
     pub token: String,
@@ -67,6 +61,8 @@ pub struct Control {
     pub db: Db,
     /// The data API (`None` when `services.data` is off): the served model and its rows.
     pub data: Option<Arc<DataApi>>,
+    /// The functions that run, for `GET /status`.
+    pub functions: FunctionsSlot,
     /// Where the stored files are (`.rayfin-local/storage`).
     pub storage_dir: PathBuf,
     pub reload: Arc<dyn ReloadTrigger>,
@@ -148,6 +144,34 @@ impl ApiError {
             format!("rayfin-local failed: {error}."),
         )
         .hint("See rayfin-local's log, then retry.")
+    }
+
+    /// Why `POST /reload` failed: the project's files can't be read or analyzed (what could be
+    /// read was applied all the same), or `serve` stops.
+    fn reload_failed(error: &anyhow::Error) -> Self {
+        if error.is::<Stopping>() {
+            return Self::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "stopping",
+                error.to_string(),
+            )
+            .hint("Start rayfin-local again; it reads the project when it starts.");
+        }
+        let failure = HostError::classify(error);
+        let (code, hint) = match failure.code {
+            ErrorCode::ConfigInvalid => (
+                "config-invalid",
+                "Fix rayfin/rayfin.yml or rayfin-local.toml as the message says, then reload \
+                 again; the previous configuration stays in use until then.",
+            ),
+            ErrorCode::AnalysisFailed => (
+                "analysis-failed",
+                "Fix the entities as the message says, then reload again; the previous model \
+                 stays in use until then.",
+            ),
+            _ => return Self::internal(format!("{error:#}")),
+        };
+        Self::new(StatusCode::UNPROCESSABLE_ENTITY, code, failure.message).hint(hint)
     }
 }
 
@@ -319,9 +343,22 @@ async fn status(State(control): AppState) -> Result<Json<Value>, ApiError> {
         )
         .hint("Ask again after the `ready` event."));
     };
-    // The identity as it is now: the host may have changed it since `ready`.
+    // As they are now: the host may have changed the identity since `ready`, and changes of the
+    // entities and rebuilt functions apply without a new `ready`.
     status["signInAs"] = serde_json::to_value(events::SignInAs::of(&control.auth.sign_in_as()))
         .unwrap_or(Value::Null);
+    if let Some(data) = &control.data {
+        let entities: Vec<String> = data
+            .model()
+            .entities
+            .iter()
+            .map(|entity| entity.name.clone())
+            .collect();
+        status["features"]["data"]["entities"] = json!(entities);
+    }
+    if let Some(functions) = control.functions.get() {
+        status["features"]["functions"]["names"] = json!(functions.functions());
+    }
     Ok(Json(status))
 }
 
@@ -565,23 +602,14 @@ struct ReloadRequest {
     force_schema: bool,
 }
 
-async fn reload(State(control): AppState, bytes: Bytes) -> Result<Json<Value>, ApiError> {
+async fn reload(State(control): AppState, bytes: Bytes) -> Result<Json<ReloadOutcome>, ApiError> {
     let request: ReloadRequest = body(&bytes)?;
-    match control.reload.reload(request.force_schema).await {
-        Some(reloaded) => Ok(Json(
-            json!({ "schema": reloaded.schema, "config": reloaded.config }),
-        )),
-        None => Err(ApiError::new(
-            StatusCode::NOT_IMPLEMENTED,
-            "not-available",
-            "This rayfin-local can't reload on request.",
-        )
-        .hint(
-            "It reloads the entities by itself when their files change; restart `serve` for \
-             rayfin.yml and secret changes (with --force-schema to apply a schema change that \
-             loses data).",
-        )),
-    }
+    control
+        .reload
+        .reload(request.force_schema)
+        .await
+        .map(Json)
+        .map_err(|error| ApiError::reload_failed(&error))
 }
 
 #[cfg(test)]

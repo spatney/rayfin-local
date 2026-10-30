@@ -753,20 +753,25 @@ impl Features {
                 .get()
                 .map(|service| guarded(service.router())),
         );
-        routers.extend(ctx.control_token.map(|token| control_router(ctx, token)));
+        routers.extend(
+            ctx.control_token
+                .map(|token| control_router(ctx, token, &self.functions)),
+        );
         routers
     }
 }
 
-/// The host's control API (docs/embedding.md), answering `token`, over the services `ctx` has.
-fn control_router(ctx: &ServeContext<'_>, token: &str) -> Router {
+/// The host's control API (docs/embedding.md), answering `token`, over the services `ctx` has
+/// and `functions`; `POST /reload` goes to live reload.
+fn control_router(ctx: &ServeContext<'_>, token: &str, functions: &FunctionsSlot) -> Router {
     control::Control {
         token: token.to_owned(),
         auth: Arc::clone(ctx.auth),
         db: ctx.db.clone(),
         data: ctx.data_api.clone(),
+        functions: functions.clone(),
         storage_dir: ctx.state.storage_dir(),
-        reload: Arc::new(control::NoReload),
+        reload: Arc::new(ctx.reload.clone()),
         live: events::live(),
     }
     .router()

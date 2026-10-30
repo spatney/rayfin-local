@@ -52,7 +52,7 @@ const HOST: Sender<'static> = Sender {
 };
 
 async fn harness() -> Harness {
-    harness_with(Arc::new(NoReload)).await
+    harness_with(Arc::new(FakeReload::default())).await
 }
 
 async fn harness_with(reload: Arc<dyn ReloadTrigger>) -> Harness {
@@ -80,6 +80,7 @@ async fn harness_with(reload: Arc<dyn ReloadTrigger>) -> Harness {
         auth: Arc::clone(&auth),
         db: db.clone(),
         data: Some(Arc::new(data)),
+        functions: FunctionsSlot::default(),
         storage_dir: storage_dir.clone(),
         reload,
         live: live.clone(),
@@ -235,7 +236,7 @@ fn secrets_compare_whole() {
 }
 
 #[tokio::test]
-async fn the_status_is_the_ready_payload_with_the_identity_as_it_is_now() {
+async fn the_status_is_the_ready_payload_with_the_identity_and_entities_as_they_are_now() {
     let h = harness().await;
     let starting = h.call(Method::GET, "/status", None).await;
     assert_eq!(starting.status, StatusCode::SERVICE_UNAVAILABLE);
@@ -244,16 +245,24 @@ async fn the_status_is_the_ready_payload_with_the_identity_as_it_is_now() {
     h.live.record(&json!({
         "v": 1, "type": "ready", "time": "2026-10-30T03:12:09.512Z",
         "apiUrl": "http://localhost:7171", "signInAs": { "kind": "developer" },
+        "features": { "data": { "enabled": true, "entities": ["Old"] } },
     }));
     h.live
         .record(&json!({ "v": 1, "type": "schema", "result": "applied" }));
+    h.live
+        .record(&json!({ "v": 1, "type": "analysis", "ok": true }));
     let status = h.call(Method::GET, "/status", None).await;
     assert_eq!(status.status, StatusCode::OK);
     assert_eq!(status.body["state"], "running");
     assert_eq!(status.body["apiUrl"], "http://localhost:7171");
     assert_eq!(status.body["schema"]["result"], "applied");
+    assert_eq!(status.body["analysis"]["ok"], true);
     assert_eq!(status.body["functions"], Value::Null);
     assert!(status.body.get("type").is_none());
+    // The entities the data API serves, which changed since `ready`.
+    let entities = status.body["features"]["data"]["entities"].clone();
+    assert!(entities.as_array().unwrap().contains(&json!("Category")));
+    assert!(!entities.as_array().unwrap().contains(&json!("Old")));
 
     h.auth
         .switch_sign_in_as(SignInAs::User("ana@example.com".into()))
@@ -512,38 +521,69 @@ async fn rows_are_cleared_unless_others_refer_to_them_and_the_data_is_reset() {
     assert_eq!(std::fs::read_dir(&objects).unwrap().count(), 0);
 }
 
-/// Records each reload and answers as live reload would.
+/// Records each reload and answers what it is told to, or as live reload would.
 #[derive(Default)]
-struct FakeReload(Mutex<Vec<bool>>);
+struct FakeReload {
+    forced: Mutex<Vec<bool>>,
+    answers: Mutex<Vec<anyhow::Result<ReloadOutcome>>>,
+}
 
 impl ReloadTrigger for FakeReload {
-    fn reload(&self, force_schema: bool) -> BoxFuture<'_, Option<Reloaded>> {
-        self.0.lock().unwrap().push(force_schema);
-        let result = if force_schema { "applied" } else { "unchanged" };
-        Box::pin(async move {
-            Some(Reloaded {
+    fn reload(&self, force_schema: bool) -> BoxFuture<'_, anyhow::Result<ReloadOutcome>> {
+        self.forced.lock().unwrap().push(force_schema);
+        let result = if force_schema { "applied" } else { "refused" };
+        let answer = self.answers.lock().unwrap().pop().unwrap_or_else(|| {
+            Ok(ReloadOutcome {
                 schema: json!({ "v": 1, "type": "schema", "result": result, "live": true }),
                 config: None,
             })
-        })
+        });
+        Box::pin(async move { answer })
     }
 }
 
 #[tokio::test]
-async fn reloads_go_to_live_reload_when_it_can_reload() {
-    let h = harness().await;
-    let answer = h.call(Method::POST, "/reload", None).await;
-    assert_eq!(answer.status, StatusCode::NOT_IMPLEMENTED);
-    assert_eq!(code(&answer), "not-available");
-    assert!(answer.body["error"]["hint"].is_string());
-
+async fn reloads_answer_their_events_or_why_they_failed() {
     let reload = Arc::new(FakeReload::default());
     let h = harness_with(Arc::clone(&reload) as Arc<dyn ReloadTrigger>).await;
+    let refused = h.call(Method::POST, "/reload", None).await;
+    assert_eq!(refused.status, StatusCode::OK, "{}", refused.body);
+    assert_eq!(refused.body["schema"]["result"], "refused");
+    assert_eq!(refused.body["config"], Value::Null);
     let forced = json!({ "forceSchema": true });
-    let answer = h.call(Method::POST, "/reload", Some(forced)).await;
-    assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
-    assert_eq!(answer.body["schema"]["result"], "applied");
-    assert_eq!(answer.body["config"], Value::Null);
-    h.call(Method::POST, "/reload", None).await;
-    assert_eq!(*reload.0.lock().unwrap(), [true, false]);
+    let applied = h.call(Method::POST, "/reload", Some(forced)).await;
+    assert_eq!(applied.body["schema"]["result"], "applied");
+    assert_eq!(*reload.forced.lock().unwrap(), [false, true]);
+
+    let failures = [
+        (
+            crate::errors::coded(ErrorCode::ConfigInvalid, json!({}), anyhow::anyhow!("bad")),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "config-invalid",
+        ),
+        (
+            crate::errors::coded(ErrorCode::AnalysisFailed, json!({}), anyhow::anyhow!("TS")),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "analysis-failed",
+        ),
+        (
+            anyhow::Error::new(Stopping),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "stopping",
+        ),
+        (
+            anyhow::anyhow!("the reloader broke"),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+        ),
+    ];
+    for (failure, status, expected) in failures {
+        let message = failure.to_string();
+        reload.answers.lock().unwrap().push(Err(failure));
+        let answer = h.call(Method::POST, "/reload", None).await;
+        assert_eq!((answer.status, code(&answer)), (status, expected));
+        let said = answer.body["error"]["message"].as_str().unwrap();
+        assert!(said.contains(&message), "{said}");
+        assert!(answer.body["error"]["hint"].is_string(), "{}", answer.body);
+    }
 }

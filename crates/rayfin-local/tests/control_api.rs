@@ -272,8 +272,9 @@ async fn a_host_drives_the_app_and_signs_it_in_as_anyone() {
     assert_eq!(status, StatusCode::UNAUTHORIZED, "switching signed ana out");
 
     let (status, reload) = host.call(Method::POST, "/reload", Some(json!({}))).await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-    assert_eq!(reload["error"]["code"], "not-available");
+    assert_eq!(status, StatusCode::OK, "{reload}");
+    assert_eq!(reload["schema"]["result"], "unchanged", "{reload}");
+    assert_eq!(reload["config"], Value::Null, "{reload}");
 
     let (status, reset) = host.call(Method::POST, "/data/reset", None).await;
     assert_eq!((status, reset), (StatusCode::OK, json!({ "ok": true })));

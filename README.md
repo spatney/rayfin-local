@@ -350,6 +350,7 @@ While `serve` runs, it applies these changes in place, on the same ports, so the
 
 `serve` prints what it applied, with the banner's rows that changed.
 A `rayfin.yml` or `rayfin-local.toml` that can't be read is reported, and the previous configuration stays in use until it is fixed.
+Programs that run rayfin-local can also apply all of these on request, with the control API's `POST /reload` (see [docs/embedding.md](docs/embedding.md#control-api)).
 
 Some changes need a restart, and `serve` says so: moving the app's frontend (`services.staticHosting.path` or `root`, and with `--static` how it is built), and `[server]`, `[frontend]` and `[tokens]` in `rayfin-local.toml`.
 

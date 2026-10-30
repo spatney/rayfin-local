@@ -1,6 +1,7 @@
 //! Live reload of the built binary (`serve --json`) on a copy of the fixture app: `rayfin.yml`
-//! edits applied on the same ports, new secret values restarting only the function host, and the
-//! Vite dev server started again after it is killed.
+//! edits applied on the same ports, new secret values restarting only the function host, the
+//! Vite dev server started again after it is killed (still signing the app in), and a host's
+//! control API and automatic sign-in across changes, with `POST /reload`.
 //!
 //! They need Node.js and the fixture's npm packages (`npm ci` in `tests/fixtures/apps/basic` and
 //! in its `rayfin/functions`); without them they print a note and pass.
@@ -10,12 +11,17 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Value, json};
 
 /// How long a step may take: a start, or a change that rebuilds the functions.
 const STEP: Duration = Duration::from_secs(240);
+/// `RAYFIN_LOCAL_CONTROL_TOKEN` for the runs a host controls.
+const CONTROL_TOKEN: &str = "0123456789abcdef0123456789abcdef-live-reload-test";
 
 fn rayfin_local() -> Command {
     Command::new(env!("CARGO_BIN_EXE_rayfin-local"))
@@ -28,6 +34,14 @@ fn fixture_dir() -> PathBuf {
             dir.join(part)
         });
     std::path::absolute(dir).unwrap()
+}
+
+/// Vite caches what it bundles in `node_modules/.vite`, which every copy shares through its
+/// link: the tests that run Vite take turns.
+static VITE: Mutex<()> = Mutex::new(());
+
+fn vite_turn() -> MutexGuard<'static, ()> {
+    VITE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// A copy of the fixture app in a temporary folder, its `node_modules` linked to the fixture's.
@@ -166,10 +180,25 @@ struct Serve {
 
 impl Serve {
     fn start(project: &Path, args: &[&str]) -> Self {
+        Self::start_with(project, args, &[])
+    }
+
+    /// [`Serve::start`] for a host: with the control API on ([`CONTROL_TOKEN`]), and a Power BI
+    /// token that is no user's, so that the developer identity is the local developer account.
+    fn start_hosted(project: &Path, args: &[&str]) -> Self {
+        let env = [
+            ("RAYFIN_LOCAL_CONTROL_TOKEN", CONTROL_TOKEN),
+            ("RAYFIN_LOCAL_TOKEN_POWERBI", "not-a-user-token"),
+        ];
+        Self::start_with(project, args, &env)
+    }
+
+    fn start_with(project: &Path, args: &[&str], env: &[(&str, &str)]) -> Self {
         let mut child = rayfin_local()
             .args(["serve", "--json", "-C"])
             .arg(project)
             .args(args)
+            .envs(env.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -325,6 +354,54 @@ fn invoke(api_url: &str, key: &str, name: &str) -> (u16, Value) {
     );
     let envelope: Value = serde_json::from_str(&body).unwrap_or(Value::Null);
     (status, envelope["output"].clone())
+}
+
+/// A call to the control API, as a host makes it: the status and the JSON answer.
+fn control(api_url: &str, method: &str, path: &str, body: Option<&Value>) -> (u16, Value) {
+    let url = format!("{api_url}/.rayfin-local/control{path}");
+    let bearer = format!("Bearer {CONTROL_TOKEN}");
+    let (status, body) = request(method, &url, &[("Authorization", &bearer)], body);
+    (status, serde_json::from_str(&body).unwrap_or(Value::Null))
+}
+
+/// Automatic sign-in, as the app's page asks the dev server at `app_url` for it: the status and
+/// the session.
+fn sign_in(app_url: &str) -> (u16, Value) {
+    let url = format!(
+        "{}/.rayfin/dev/session-token",
+        app_url.trim_end_matches('/')
+    );
+    let (status, body) = request("GET", &url, &[("Accept", "application/json")], None);
+    (status, serde_json::from_str(&body).unwrap_or(Value::Null))
+}
+
+/// The claims of an access token.
+fn claims(token: &Value) -> Value {
+    let payload = token.as_str().unwrap().split('.').nth(1).unwrap();
+    serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload).unwrap()).unwrap()
+}
+
+/// A GraphQL query to the data API with `token`: the status and the answer.
+fn graphql(api_url: &str, key: &str, token: &str, query: &str) -> (u16, Value) {
+    let bearer = format!("Bearer {token}");
+    let headers = [
+        ("X-Publishable-Key", key),
+        ("Authorization", bearer.as_str()),
+    ];
+    let query = json!({ "query": query });
+    let url = format!("{api_url}/graphql");
+    let (status, body) = request("POST", &url, &headers, Some(&query));
+    (status, serde_json::from_str(&body).unwrap_or(Value::Null))
+}
+
+/// The entities `GET /status` says the data API serves.
+fn served_entities(api_url: &str) -> Vec<Value> {
+    let (status, now) = control(api_url, "GET", "/status", None);
+    assert_eq!(status, 200, "{now}");
+    now["features"]["data"]["entities"]
+        .as_array()
+        .unwrap()
+        .clone()
 }
 
 /// Every process: its id, its parent's and its command line.
@@ -608,7 +685,8 @@ fn vite_starts_again_on_its_port_after_it_is_killed() {
     let Some(app) = App::copy() else {
         return;
     };
-    let mut serve = Serve::start(
+    let _vite = vite_turn();
+    let mut serve = Serve::start_hosted(
         app.path(),
         &["--no-functions", "--port", "0", "--frontend-port", "0"],
     );
@@ -629,6 +707,13 @@ fn vite_starts_again_on_its_port_after_it_is_killed() {
     assert_eq!(back["url"], app_url.as_str(), "{back}");
     assert_eq!(request("GET", &app_url, &[], None).0, 200);
     replaced(serve.child.id(), "vite-dev", vite[0]);
+    // It still signs the app in automatically.
+    let (status, session) = sign_in(&app_url);
+    assert_eq!(status, 200, "{session}");
+    assert_eq!(
+        claims(&session["accessToken"])["email"],
+        "developer@example.com"
+    );
 
     // A change to rayfin.yml keeps the app's URL too.
     app.edit_config(&[(
@@ -639,6 +724,168 @@ fn vite_starts_again_on_its_port_after_it_is_killed() {
     let changed = serve.next("ready");
     assert_eq!(changed["appUrl"], app_url.as_str(), "{changed}");
     assert_eq!(changed["apiUrl"], ready["apiUrl"], "{changed}");
+
+    assert_eq!(serve.close_stdin().code(), Some(0), "{}", serve.report());
+}
+
+#[test]
+fn the_control_api_and_the_sign_in_identity_outlive_changes() {
+    let Some(app) = App::copy() else {
+        return;
+    };
+    let _vite = vite_turn();
+    let mut serve = Serve::start_hosted(
+        app.path(),
+        &["--no-functions", "--port", "0", "--frontend-port", "0"],
+    );
+    let ready = serve.next("ready");
+    let api_url = ready["apiUrl"].as_str().unwrap().to_owned();
+    let app_url = ready["appUrl"].as_str().unwrap().to_owned();
+    let as_ana = json!({ "kind": "user", "user": "ana@example.com", "create": true });
+    let (status, identity) = control(&api_url, "PUT", "/identity", Some(&as_ana));
+    assert_eq!(status, 200, "{identity}");
+    let ana = identity["user"]["id"].clone();
+    let (status, session) = sign_in(&app_url);
+    assert_eq!(status, 200, "{session}");
+    assert_eq!(claims(&session["accessToken"])["sub"], ana);
+
+    // The auth service takes new settings in place, and the backend's router is replaced.
+    app.edit_config(&[
+        (
+            "    password:\n      enabled: true",
+            "    password:\n      enabled: false",
+        ),
+        (
+            "  storage:\n    enabled: true",
+            "  storage:\n    enabled: false",
+        ),
+    ]);
+    let changed = serve.next("config-changed");
+    assert_eq!(changed["what"], json!(["auth", "storage"]), "{changed}");
+    let ready = serve.next("ready");
+    let as_ana = json!({ "kind": "user", "username": "ana@example.com" });
+    assert_eq!(ready["signInAs"], as_ana, "{ready}");
+    let (status, now) = control(&api_url, "GET", "/status", None);
+    assert_eq!(status, 200, "{now}");
+    assert_eq!(now["signInAs"], as_ana, "{now}");
+    assert_eq!(now["features"]["auth"]["password"], false, "{now}");
+    assert_eq!(now["features"]["storage"]["enabled"], false, "{now}");
+    let (status, identity) = control(&api_url, "GET", "/identity", None);
+    assert_eq!((status, &identity["user"]["id"]), (200, &ana), "{identity}");
+    let (status, session) = sign_in(&app_url);
+    assert_eq!(status, 200, "{session}");
+    assert_eq!(claims(&session["accessToken"])["sub"], ana);
+
+    let (status, reloaded) = control(&api_url, "POST", "/reload", Some(&json!({})));
+    assert_eq!(status, 200, "{reloaded}");
+    assert_eq!(reloaded["schema"]["result"], "unchanged", "{reloaded}");
+    assert_eq!(reloaded["config"], Value::Null, "{reloaded}");
+    let (status, session) = sign_in(&app_url);
+    assert_eq!(status, 200, "{session}");
+    assert_eq!(claims(&session["accessToken"])["sub"], ana);
+
+    // A rayfin.yml that can't be read: the reload fails, and the previous configuration stays.
+    std::fs::write(app.config_path(), "services: [\n").unwrap();
+    let (status, invalid) = control(&api_url, "POST", "/reload", None);
+    assert_eq!(status, 422, "{invalid}");
+    assert_eq!(invalid["error"]["code"], "config-invalid", "{invalid}");
+    let (status, session) = sign_in(&app_url);
+    assert_eq!(status, 200, "{session}");
+
+    assert_eq!(serve.close_stdin().code(), Some(0), "{}", serve.report());
+}
+
+/// An entity with no data yet.
+const LABEL: &str = "\
+import { entity, role, uuid, text } from '@microsoft/rayfin-core';
+
+@entity()
+@role('authenticated', ['create', 'read', 'update', 'delete'])
+export class Label {
+  @uuid() id!: string;
+  @text({ max: 50 }) name!: string;
+}
+";
+
+#[test]
+fn a_reload_on_request_answers_a_refused_schema_change_and_forces_it() {
+    let Some(app) = App::copy() else {
+        return;
+    };
+    let mut serve = Serve::start_hosted(
+        app.path(),
+        &["--no-functions", "--no-frontend", "--port", "0"],
+    );
+    let ready = serve.next("ready");
+    let api_url = ready["apiUrl"].as_str().unwrap().to_owned();
+    let key = publishable_key(&api_url);
+    let (status, token) = control(&api_url, "POST", "/token", None);
+    assert_eq!(status, 200, "{token}");
+    let token = token["accessToken"].as_str().unwrap().to_owned();
+    let create = "mutation { createCategory(item: { name: \"Kept\", sortOrder: 3 }) { id } }";
+    let (status, created) = graphql(&api_url, &key, &token, create);
+    assert_eq!(status, 200, "{created}");
+    assert!(created["errors"].is_null(), "{created}");
+
+    // Entities that don't compile: the reload fails, and `GET /status` has the failed analysis.
+    let data = app.path().join("rayfin").join("data");
+    std::fs::write(data.join("Label.ts"), "export class Label {\n").unwrap();
+    serve.until("the failed analysis", STEP, |event| {
+        event["type"] == "analysis" && event["ok"] == false
+    });
+    let (status, failed) = control(&api_url, "POST", "/reload", None);
+    assert_eq!(status, 422, "{failed}");
+    assert_eq!(failed["error"]["code"], "analysis-failed", "{failed}");
+    let (status, now) = control(&api_url, "GET", "/status", None);
+    assert_eq!(status, 200, "{now}");
+    assert_eq!(now["analysis"]["ok"], false, "{now}");
+
+    // Dropping a field that holds values loses data, with or without a new entity.
+    let category = std::fs::read_to_string(data.join("Category.ts"))
+        .unwrap()
+        .replace("\r\n", "\n");
+    let sort_order = "  @int({ default: 0, min: 0, max: 1000 }) sortOrder!: number;\n";
+    assert!(category.contains(sort_order), "{category}");
+    let category = category.replace(sort_order, "").replace(" int,", "");
+    std::fs::write(data.join("Category.ts"), category).unwrap();
+    std::fs::write(data.join("Label.ts"), LABEL).unwrap();
+    serve.until("the refused change", STEP, |event| {
+        event["type"] == "schema" && event["result"] == "refused"
+    });
+
+    let keep = json!({ "forceSchema": false });
+    let (status, refused) = control(&api_url, "POST", "/reload", Some(&keep));
+    assert_eq!(status, 200, "{refused}");
+    assert_eq!(refused["schema"]["type"], "schema", "{refused}");
+    assert_eq!(refused["schema"]["result"], "refused", "{refused}");
+    assert_eq!(refused["schema"]["live"], true, "{refused}");
+    assert!(
+        refused["schema"]["losses"]
+            .to_string()
+            .contains("sortOrder"),
+        "{refused}"
+    );
+    assert_eq!(refused["config"], Value::Null, "{refused}");
+    assert!(!served_entities(&api_url).contains(&json!("Label")));
+
+    let force = json!({ "forceSchema": true });
+    let (status, applied) = control(&api_url, "POST", "/reload", Some(&force));
+    assert_eq!(status, 200, "{applied}");
+    assert_eq!(applied["schema"]["result"], "applied", "{applied}");
+    let changes = applied["schema"]["changes"].as_array().unwrap();
+    assert!(changes.contains(&json!("added Label")), "{applied}");
+    assert!(changes.contains(&json!("changed Category")), "{applied}");
+    assert!(
+        applied["schema"]["losses"]
+            .to_string()
+            .contains("sortOrder"),
+        "{applied}"
+    );
+    // Entity changes come without a new `ready`; `GET /status` has the entities served now.
+    assert!(served_entities(&api_url).contains(&json!("Label")));
+    let (status, labels) = graphql(&api_url, &key, &token, "{ labels { items { name } } }");
+    assert_eq!(status, 200, "{labels}");
+    assert_eq!(labels["data"]["labels"]["items"], json!([]), "{labels}");
 
     assert_eq!(serve.close_stdin().code(), Some(0), "{}", serve.report());
 }
