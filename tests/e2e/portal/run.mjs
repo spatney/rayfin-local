@@ -136,7 +136,7 @@ await scenario('signup', async () => {
 await scenario('entra', async () => {
   const { context, app, popup } = await openPopup();
   await popup.waitForSelector('#entra-button:enabled');
-  const button = await popup.textContent('#entra-button');
+  const button = await popup.getAttribute('#entra-button', 'aria-label');
   await popup.click('#entra-button');
   const result = await appResult(app);
   await context.close();

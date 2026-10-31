@@ -11,10 +11,17 @@
 
   <section id="signin" hidden>
     <div id="entra" class="entra" hidden>
-      <button type="button" id="entra-button" class="primary" disabled hidden></button>
+      <button type="button" id="entra-button" class="account" disabled hidden>
+        <span id="entra-initials" class="avatar" aria-hidden="true"></span>
+        <span class="account-text">
+          <span id="entra-name" class="account-name"></span>
+          <span id="entra-email" class="account-email" hidden></span>
+        </span>
+        <svg class="chevron" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="m6 3.5 4.5 4.5L6 12.5"/></svg>
+      </button>
       <p id="entra-note" class="note">Checking your Azure CLI sign-in…</p>
       <p id="entra-error" class="error" role="alert" hidden></p>
-      <p class="divider"><span>or</span></p>
+      <p class="divider"><span>or use a local account</span></p>
     </div>
 
     <div id="tabs" class="tabs" role="tablist" aria-label="Account">
@@ -24,11 +31,15 @@
 
     <form id="form" role="tabpanel" aria-labelledby="tab-signin" novalidate>
       <fieldset id="fields" disabled>
-        <label for="username">Username or email</label>
-        <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
-        <label for="password">Password</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required>
-        <div id="confirm-row" hidden>
+        <div class="field">
+          <label for="username">Username or email</label>
+          <input id="username" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+        </div>
+        <div class="field">
+          <label for="password">Password</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required>
+        </div>
+        <div id="confirm-row" class="field" hidden>
           <label for="confirm">Confirm password</label>
           <input id="confirm" name="confirm" type="password" autocomplete="new-password">
         </div>
@@ -39,7 +50,8 @@
     <button type="button" id="cancel" class="link">Cancel</button>
   </section>
 
-  <section id="done" hidden>
+  <section id="done" class="done" hidden>
+    <svg class="done-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9.25"/><path d="m8 12.4 2.7 2.7 5.3-5.6"/></svg>
     <h2>You're signed in</h2>
     <p>Return to the app. You can close this window.</p>
   </section>

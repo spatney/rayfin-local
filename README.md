@@ -247,7 +247,7 @@ Users are local: they live in `.rayfin-local/db.sqlite`, not in Entra ID.
 
   Each page forgets the session the SDK stored for its origin when the backend no longer accepts it: another app's that ran on the same port, or one that `--reset` or a new sign-in identity signed out.
 - **"Sign in with Fabric".** `ensureSignedInWithFabric` opens rayfin-local's sign-in page in the popup instead of the Fabric portal.
-  There you can sign in with a local user, create one, or choose **Continue as &lt;you&gt;** to sign in as your own Entra user (the account of your `az` or Rayfin CLI login).
+  There you can sign in with a local user, create one, or choose your own account, shown at the top with your name and email ("Continue as &lt;you&gt;"), to sign in as your own Entra user (the account of your `az` or Rayfin CLI login).
   "Continue as" is offered only when the backend listens on a loopback address.
 - **Email and password.** The app's own sign-up and sign-in work as on Fabric.
   One local convenience: a password sign-in for an email that has no account creates the account (a wrong password for an existing account is still refused).
@@ -487,7 +487,7 @@ Run `rayfin-local doctor` first: it checks what `serve` needs and says what to f
   The message lists the data the change would lose; restart with `--force-schema` to accept that, or `--reset` to start over.
 - **The app says it must be opened in Fabric** (for example "Can't open this app outside Fabric").
   It signs in only inside a Fabric frame: open the banner's **Embedded** URL (`/.rayfin-local/portal/embed` on the backend) instead of the App URL.
-- **"Continue as" is missing from the sign-in page.**
+- **"Continue as" (your own account) is missing from the sign-in page.**
   It needs a loopback `--host` and a token from `az login` or the Rayfin CLI's login.
 - **A SQL connector's queries fail.**
   The error's message (also in `serve`'s output) says what to do: run `az login`, check `config.workspaceId` and `config.itemId` in `rayfin.yml`, ask the item's owner for access for your account (rayfin-local connects as you, even for `auth: application` connectors), or open TCP port 1433 to Fabric.

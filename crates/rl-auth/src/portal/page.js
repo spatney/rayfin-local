@@ -287,6 +287,15 @@
     }
   }
 
+  // Up to two letters for the account tile: "Dev Eloper" is DE, "ada@contoso.test" is A.
+  function initials(name, username) {
+    const words = (name || '').trim().split(/\s+/).filter(Boolean);
+    const letters = words.length > 1
+      ? words[0][0] + words[words.length - 1][0]
+      : (words[0] || username || '?')[0];
+    return letters.toUpperCase();
+  }
+
   async function loadIdentity() {
     el('entra').hidden = false;
     const answer = await api('whoami');
@@ -294,8 +303,14 @@
       identity = answer.body;
       const { name, username } = identity;
       const who = name && username ? `${name} (${username})` : username || name || 'your Microsoft account';
-      el('entra-button').textContent = `Continue as ${who}`;
+      el('entra-button').setAttribute('aria-label', `Continue as ${who}`);
+      el('entra-initials').textContent = initials(name, username);
+      el('entra-name').textContent = name || username || 'Your Microsoft account';
+      el('entra-email').textContent = name && username ? username : '';
+      el('entra-email').hidden = !(name && username);
       el('entra-button').hidden = false;
+      // A local account's sign-in steps back behind the developer's own.
+      el('signin').classList.add('has-account');
       el('entra-note').textContent = 'Uses your Azure CLI sign-in.';
       updateEntraButton();
       return;
