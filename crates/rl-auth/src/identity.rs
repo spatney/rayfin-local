@@ -110,6 +110,12 @@ impl AuthService {
         }
     }
 
+    /// Holds off a switch of identity while a sign-in as the identity is issued, so it belongs to
+    /// the identity a switch then signs out.
+    pub(crate) async fn identity_unchanged(&self) -> tokio::sync::RwLockReadGuard<'_, ()> {
+        self.auto_sign_in.switching.read().await
+    }
+
     /// The developer's account: their Entra user when Entra sign-in is on and a token for it
     /// comes without a prompt, else [`LOCAL_DEVELOPER`] (created when missing). After a failure it
     /// asks again only five minutes later, or once the identity is switched.

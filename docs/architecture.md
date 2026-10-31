@@ -261,8 +261,8 @@ sequenceDiagram
   Popup->>App: postMessage brokeredAuth.ready
   App->>Popup: postMessage challenge {returnOrigin, codeChallenge (S256), state}
   Popup->>API: POST portal/api/challenge (check the challenge and return origin)
-  Note over Popup: The user signs in, signs up, or chooses "Continue as"
-  Popup->>API: POST portal/api/signin, signup or entra (with the challenge)
+  Note over Popup: With a sign-in identity, the page signs in as it (portal/api/identity);<br/>with none, the user signs in, signs up, or chooses "Continue as"
+  Popup->>API: POST portal/api/identity, signin, signup or entra (with the challenge)
   API-->>Popup: one-time handoff code
   Popup->>App: postMessage handoff {handoffCode, state}
   App->>API: POST /api/auth/v1/token (authorization_code, codeVerifier)
@@ -271,6 +271,7 @@ sequenceDiagram
 
 The return origin must be a loopback origin or one of the app's `allowedRedirectUris`.
 Handoff codes are single-use and short-lived, and are bound to the PKCE challenge, the return origin and the user.
+Signing in as the identity, like "Continue as", needs a loopback `Host`, which DNS rebinding cannot fake, and holds off a switch of the identity while it issues the code.
 The SDK doesn't notice a popup closed by the user, so the page sends `access_denied` when it is cancelled or closed.
 
 ### Embedded sign-in

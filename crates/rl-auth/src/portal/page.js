@@ -175,12 +175,27 @@
     }
     el('target-origin').textContent = answer.body.returnOrigin;
     el('target').hidden = false;
+    if (config.signInAs && (await signInAsIdentity())) return;
     setStatus('');
     el('signin').hidden = false;
     el('fields').disabled = false;
     el('tabs').hidden = !config.signUp;
     updateEntraButton();
     el('username').focus();
+  }
+
+  // Signs in as the sign-in identity without asking, as Fabric signs in whoever is signed in to
+  // it. False when the page asks instead: nobody to sign in as, or not opened on localhost.
+  async function signInAsIdentity() {
+    const who = config.signInAs;
+    setStatus(who.kind === 'user' && who.username ? `Signing in as ${who.username}…` : 'Signing you in…');
+    const answer = await api('identity', challenge);
+    if (answer.ok && answer.body && typeof answer.body.handoffCode === 'string') {
+      complete(answer.body.handoffCode);
+      return true;
+    }
+    if (answer.status !== 403 && answer.status !== 404) showError('form-error', answer.message);
+    return false;
   }
 
   function setMode(next) {

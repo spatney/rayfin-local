@@ -10,7 +10,9 @@
 //! 2. app → page (`event.source`): `{type: 'brokeredAuth.challenge', returnOrigin,
 //!    codeChallenge, codeChallengeMethod: 'S256', state}`.
 //! 3. The user signs in; the server issues a handoff code bound to the challenge, the return
-//!    origin and the user (`POST …/api/signin`, `…/api/signup` or `…/api/entra`).
+//!    origin and the user (`POST …/api/signin`, `…/api/signup` or `…/api/entra`). When the
+//!    sign-in identity ([`crate::SignInAs`]) is someone, the page signs in as them without asking
+//!    (`…/api/identity`), as Fabric signs in whoever is signed in to it.
 //! 4. page → `window.opener`, target the return origin: `{type: 'brokeredAuth.handoff',
 //!    handoffCode, state}`. The app redeems the code at `POST /api/auth/v1/token`
 //!    (`authorization_code`, `codeType: 'fabric_handoff'`) and closes the popup.
@@ -20,7 +22,8 @@
 //! its 5-minute timeout).
 //!
 //! The JSON endpoints serve the page only: they need its CSRF token (`X-Rayfin-Local-CSRF`) and
-//! an `Origin` equal to the portal's own; "Continue as" also needs a loopback `Host`.
+//! an `Origin` equal to the portal's own; "Continue as" and signing in as the identity also need
+//! a loopback `Host`.
 //!
 //! The portal also hosts apps that sign in with `initEmbeddedAuth`, as Fabric does: see
 //! [`embed`] and [`EMBED_HOST_PATH`].
@@ -130,6 +133,10 @@ pub(crate) fn routes() -> Router<Arc<AuthService>> {
         .route("/.rayfin-local/portal/api/signin", post(sign_in))
         .route("/.rayfin-local/portal/api/signup", post(sign_up))
         .route("/.rayfin-local/portal/api/entra", post(continue_as_entra))
+        .route(
+            "/.rayfin-local/portal/api/identity",
+            post(sign_in_as_identity),
+        )
         .route(EMBED_HOST_PATH, get(embed::host_page))
         .route(
             "/.rayfin-local/portal/api/embed/signin",
@@ -192,6 +199,15 @@ async fn continue_as_entra(
     respond(auth.portal_entra(&headers, &uri, &body).await)
 }
 
+async fn sign_in_as_identity(
+    State(auth): AppState,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Response {
+    respond(auth.portal_identity(&headers, &uri, &body).await)
+}
+
 fn error(status: StatusCode, code: &str, message: impl Into<String>) -> ApiError {
     ApiError::new(status, code, message)
 }
@@ -223,6 +239,7 @@ impl AuthService {
             "authEnabled": settings.enabled,
             "signUp": settings.signup_enabled,
             "entra": self.entra_portal_enabled(),
+            "signInAs": identity_hint(&self.sign_in_as()),
         });
         let html = fill(
             PAGE,
@@ -472,6 +489,38 @@ impl AuthService {
         self.handoff(&user, &request).await
     }
 
+    /// Signs in as the sign-in identity without asking, as Fabric signs in whoever is signed in
+    /// to it: the developer, or the local user that `--sign-in-as` (or the control API) chose.
+    /// Like "Continue as", it needs a loopback `Host`, which DNS rebinding cannot fake. Nobody to
+    /// sign in as answers 404, and the page asks who to sign in as.
+    async fn portal_identity(
+        &self,
+        headers: &HeaderMap,
+        uri: &Uri,
+        body: &[u8],
+    ) -> Result<Value, ApiError> {
+        let host = self.portal_request(headers, uri)?;
+        if !is_loopback_authority(&host) {
+            return Err(error(
+                StatusCode::FORBIDDEN,
+                "invalid_portal_request",
+                "Signing in without asking only works when the sign-in page is opened on \
+                 localhost.",
+            ));
+        }
+        let request = self.handoff_request(&Fields::json(body)?, &host)?;
+        let _unchanged = self.identity_unchanged().await;
+        match self.sign_in_user().await {
+            Ok(Some(user)) => self.handoff(&user, &request).await,
+            Ok(None) => Err(error(
+                StatusCode::NOT_FOUND,
+                "no_identity",
+                "Nobody is signed in on this computer, so choose who to sign in as.",
+            )),
+            Err(failure) => Err(ApiError::internal(&failure)),
+        }
+    }
+
     /// The developer's user, from their Azure sign-in (created on first use).
     async fn developer_user(&self) -> Result<User, ApiError> {
         let identity = self.developer_identity().await.map_err(|failure| {
@@ -512,6 +561,15 @@ fn credentials(fields: &Fields) -> Result<(Option<&str>, Option<&str>), ApiError
         .text("password")?
         .filter(|password| !password.is_empty());
     Ok((username, password))
+}
+
+/// Who the page signs in as without asking, for what it says while it does: `null` for nobody.
+fn identity_hint(identity: &crate::SignInAs) -> Value {
+    match identity {
+        crate::SignInAs::Developer => json!({ "kind": "developer" }),
+        crate::SignInAs::User(username) => json!({ "kind": "user", "username": username }),
+        crate::SignInAs::None => Value::Null,
+    }
 }
 
 fn cannot_sign_in(origin: &str) -> String {
@@ -914,6 +972,66 @@ mod tests {
         let refused = from_page(&closed, &csrf, "signup", with(challenge(), account)).await;
         assert_eq!(refused.status, StatusCode::FORBIDDEN);
         assert_eq!(refused.body["error"], "signup_disabled");
+    }
+
+    #[tokio::test]
+    async fn the_page_signs_in_as_the_identity_without_asking() {
+        let app = portal_app(AuthSettings::new(APP_ID)).await;
+        let signed_in_as = |answer: Answer| {
+            let app = &app;
+            async move {
+                assert_eq!(answer.status, StatusCode::OK, "{}", answer.body);
+                let code = answer.body["handoffCode"].as_str().unwrap();
+                let tokens = redeem(app, code, VERIFIER, APP_ORIGIN).await;
+                assert_eq!(tokens.status, StatusCode::OK, "{}", tokens.body);
+                let token = tokens.body["accessToken"].as_str().unwrap();
+                app.auth.verify_session_token(token).unwrap().sub
+            }
+        };
+        // The developer by default: without an Azure sign-in, the local developer account.
+        let (page, csrf) = open_page(&app).await;
+        let html = String::from_utf8(page.raw.to_vec()).unwrap();
+        assert!(
+            html.contains(r#""signInAs":{"kind":"developer"}"#),
+            "{html}"
+        );
+        let developer = signed_in_as(from_page(&app, &csrf, "identity", challenge()).await).await;
+        let local = app.auth.find_user("developer@example.com").await.unwrap();
+        assert_eq!(Some(developer), local.map(|user| user.id));
+
+        // A user chosen to preview as: created without a password, so nobody needs one.
+        app.auth
+            .set_sign_in_as(crate::SignInAs::User("preview@contoso.test".into()));
+        let (page, csrf) = open_page(&app).await;
+        let html = String::from_utf8(page.raw.to_vec()).unwrap();
+        let hint = r#""signInAs":{"kind":"user","username":"preview@contoso.test"}"#;
+        assert!(html.contains(hint), "{html}");
+        let preview = signed_in_as(from_page(&app, &csrf, "identity", challenge()).await).await;
+        let created = app.auth.find_user("preview@contoso.test").await.unwrap();
+        assert_eq!(Some(preview), created.map(|user| user.id));
+
+        // Only on localhost, which DNS rebinding cannot fake.
+        let rebound = "rebound.example:7171";
+        let elsewhere = call_on(
+            &app,
+            rebound,
+            "identity",
+            Some(&csrf),
+            Some(&format!("http://{rebound}")),
+            challenge(),
+        )
+        .await;
+        assert_eq!(elsewhere.status, StatusCode::FORBIDDEN);
+        assert_eq!(elsewhere.body["error"], "invalid_portal_request");
+
+        // Nobody to sign in as: the page asks who to sign in as.
+        app.auth.set_sign_in_as(crate::SignInAs::None);
+        let (page, csrf) = open_page(&app).await;
+        let html = String::from_utf8(page.raw.to_vec()).unwrap();
+        assert!(html.contains(r#""signInAs":null"#), "{html}");
+        let nobody = from_page(&app, &csrf, "identity", challenge()).await;
+        assert_eq!(nobody.status, StatusCode::NOT_FOUND);
+        assert_eq!(nobody.body["error"], "no_identity");
     }
 
     #[tokio::test]

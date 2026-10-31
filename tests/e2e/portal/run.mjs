@@ -9,10 +9,12 @@
 //   RL_USER, RL_PASSWORD  an existing password user
 //   RL_NEW_USER           a username to sign up with
 //   RL_EMBED_USER         a username to sign up with on the local Fabric host
+//   RL_SCENARIOS          optional: the scenarios to run, comma-separated (default: all but
+//                         `identity`, which needs a backend that signs in as someone)
 //
 // Prints one line `RESULT <json>` with what each scenario observed; the Rust test asserts on it.
 import { createServer } from 'node:http';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -27,11 +29,13 @@ const env = (name) => {
 };
 const api = env('RL_API_URL');
 
-// 1. Bundle the test app with the SDK from the app's node_modules.
+// 1. Bundle the test app with the SDK from the app's node_modules, one bundle per run, since
+//    the tests run at the same time.
 await mkdir(join(here, '.build'), { recursive: true });
+const outfile = join(here, '.build', `app-${process.pid}.js`);
 await build({
   entryPoints: [join(here, 'app.js')],
-  outfile: join(here, '.build', 'app.js'),
+  outfile,
   bundle: true,
   format: 'esm',
   platform: 'browser',
@@ -39,7 +43,8 @@ await build({
   nodePaths: [env('RL_SDK_NODE_MODULES')],
   logLevel: 'error',
 });
-const bundle = await readFile(join(here, '.build', 'app.js'));
+const bundle = await readFile(outfile);
+await rm(outfile, { force: true });
 
 // 2. Serve it from its own origin, like Vite serves an app next to the backend.
 const page = `<!doctype html><meta charset="utf-8"><title>portal e2e</title>
@@ -95,13 +100,29 @@ async function appResult(app) {
   return app.evaluate(() => window.__result);
 }
 
-async function scenario(name, run) {
+const selected = process.env.RL_SCENARIOS ? new Set(process.env.RL_SCENARIOS.split(',')) : null;
+
+async function scenario(name, run, { byDefault = true } = {}) {
+  if (selected ? !selected.has(name) : !byDefault) return;
   try {
     out[name] = await run();
   } catch (error) {
     out[name] = { failed: String(error?.stack ?? error) };
   }
 }
+
+// With a sign-in identity, the popup signs in as them without asking, and closes.
+await scenario(
+  'identity',
+  async () => {
+    const { context, app, popup } = await openPopup();
+    const result = await appResult(app);
+    const popupClosed = popup.isClosed() || (await popup.waitForEvent('close', { timeout: 5_000 }).then(() => true, () => false));
+    await context.close();
+    return { result, popupClosed };
+  },
+  { byDefault: false },
+);
 
 await scenario('password', async () => {
   const { context, app, popup } = await openPopup();

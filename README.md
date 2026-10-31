@@ -247,7 +247,8 @@ Users are local: they live in `.rayfin-local/db.sqlite`, not in Entra ID.
 
   Each page forgets the session the SDK stored for its origin when the backend no longer accepts it: another app's that ran on the same port, or one that `--reset` or a new sign-in identity signed out.
 - **"Sign in with Fabric".** `ensureSignedInWithFabric` opens rayfin-local's sign-in page in the popup instead of the Fabric portal.
-  There you can sign in with a local user, create one, or choose your own account, shown at the top with your name and email ("Continue as &lt;you&gt;"), to sign in as your own Entra user (the account of your `az` or Rayfin CLI login).
+  As Fabric signs in whoever is signed in to it, the page signs in as the sign-in identity without asking, and closes, when it's opened on localhost, so an app without automatic sign-in still needs no password: you, or the local user `user:<username>` names.
+  With `none`, you can sign in there with a local user, create one, or choose your own account, shown at the top with your name and email ("Continue as &lt;you&gt;"), to sign in as your own Entra user (the account of your `az` or Rayfin CLI login).
   "Continue as" is offered only when the backend listens on a loopback address.
 - **Email and password.** The app's own sign-up and sign-in work as on Fabric.
   One local convenience: a password sign-in for an email that has no account creates the account (a wrong password for an existing account is still refused).

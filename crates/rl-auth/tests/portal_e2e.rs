@@ -2,7 +2,8 @@
 //! `ensureSignedInWithFabric` (SDK 1.36.2) against the auth routes behind `rl-server`, and signs
 //! in with a password, by signing up, with "Continue as" (a fake developer token), then cancels
 //! and closes the popup. It also runs the real `initEmbeddedAuth` in the local Fabric host's frame:
-//! signs in on the host, reloads the page and the app, and switches to a new account.
+//! signs in on the host, reloads the page and the app, and switches to a new account. A second
+//! test signs in through the popup without asking, as the backend's sign-in identity.
 //!
 //! Ignored by default. Set up once: `npm install` and `npx playwright install chromium` in
 //! `tests/e2e/portal` (without the Chromium download it falls back to the installed Edge). The
@@ -17,7 +18,7 @@ use std::{
 };
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use rl_auth::{AuthService, AuthSettings, PORTAL_PATH};
+use rl_auth::{AuthService, AuthSettings, PORTAL_PATH, SignInAs, User};
 use rl_db::Db;
 use rl_tokens::{AccessToken, BoxFuture, TokenError, TokenSource};
 use serde_json::{Value, json};
@@ -29,6 +30,8 @@ const USER: &str = "ada@contoso.test";
 const PASSWORD: &str = "correct horse";
 const NEW_USER: &str = "grace@contoso.test";
 const EMBED_USER: &str = "hopper@contoso.test";
+/// The local user the backend signs in as automatically, created without a password.
+const PREVIEW_USER: &str = "preview@contoso.test";
 
 /// The developer's identity for "Continue as": an unsigned token with a user's claims.
 struct DeveloperTokens;
@@ -67,9 +70,8 @@ fn sdk_node_modules() -> PathBuf {
         .unwrap_or_else(|| repo_root().join("../fabric-apps/apps/explorer/node_modules"))
 }
 
-#[tokio::test]
-#[ignore = "needs Node, Playwright in tests/e2e/portal and the SDK 1.36.2 (see the module docs)"]
-async fn the_sdk_signs_in_through_the_portal_popup() {
+/// Where `run.mjs` and the SDK are, or `None` (with a SKIPPED line) when one is missing.
+fn prerequisites() -> Option<(PathBuf, PathBuf)> {
     let harness = repo_root().join("tests/e2e/portal");
     let sdk = sdk_node_modules();
     for (needed, what) in [
@@ -84,10 +86,23 @@ async fn the_sdk_signs_in_through_the_portal_popup() {
     ] {
         if !needed.exists() {
             println!("SKIPPED: {} is missing: {what}", needed.display());
-            return;
+            return None;
         }
     }
+    Some((harness, sdk))
+}
 
+/// The auth routes behind `rl-server` on a free port, with a password user, signing in
+/// automatically as `identity`.
+struct Backend {
+    auth: Arc<AuthService>,
+    user: User,
+    api: String,
+    server: tokio::task::JoinHandle<()>,
+    _dir: tempfile::TempDir,
+}
+
+async fn start(identity: SignInAs) -> Backend {
     let dir = tempfile::tempdir().unwrap();
     let mut settings = AuthSettings::new(APP_ID);
     settings.fabric_enabled = true;
@@ -101,6 +116,7 @@ async fn the_sdk_signs_in_through_the_portal_popup() {
     .await
     .unwrap()
     .with_entra(Arc::new(DeveloperTokens));
+    auth.set_sign_in_as(identity);
     let user = auth.create_user(USER, PASSWORD).await.unwrap();
     let auth = Arc::new(auth);
 
@@ -125,23 +141,34 @@ async fn the_sdk_signs_in_through_the_portal_popup() {
         vec![Arc::clone(&auth).router()],
     );
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    Backend {
+        auth,
+        user,
+        api,
+        server,
+        _dir: dir,
+    }
+}
 
+/// Runs `run.mjs`'s `scenarios` (comma-separated) against `backend`; returns what they observed.
+async fn run(backend: &Backend, harness: &Path, sdk: &Path, scenarios: &str) -> Value {
     let output = tokio::process::Command::new("node")
         .arg(harness.join("run.mjs"))
-        .current_dir(&harness)
-        .env("RL_API_URL", &api)
+        .current_dir(harness)
+        .env("RL_API_URL", &backend.api)
         .env("RL_PUBLISHABLE_KEY", PUBLISHABLE_KEY)
         .env("RL_WORKSPACE_ID", WORKSPACE_ID)
         .env("RL_ITEM_ID", APP_ID)
-        .env("RL_SDK_NODE_MODULES", &sdk)
+        .env("RL_SDK_NODE_MODULES", sdk)
         .env("RL_USER", USER)
         .env("RL_PASSWORD", PASSWORD)
         .env("RL_NEW_USER", NEW_USER)
         .env("RL_EMBED_USER", EMBED_USER)
+        .env("RL_SCENARIOS", scenarios)
         .output()
         .await
         .expect("node runs (is Node on PATH?)");
-    server.abort();
+    backend.server.abort();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "node failed:\n{stdout}\n{stderr}");
@@ -154,7 +181,20 @@ async fn the_sdk_signs_in_through_the_portal_popup() {
     if !stderr.trim().is_empty() {
         println!("node stderr:\n{stderr}");
     }
+    out
+}
 
+#[tokio::test]
+#[ignore = "needs Node, Playwright in tests/e2e/portal and the SDK 1.36.2 (see the module docs)"]
+async fn the_sdk_signs_in_through_the_portal_popup() {
+    let Some((harness, sdk)) = prerequisites() else {
+        return;
+    };
+    // Nobody to sign in as automatically, so the popup asks.
+    let backend = start(SignInAs::None).await;
+    let scenarios = "password,signup,entra,cancel,closed,noOpener,embedded";
+    let out = run(&backend, &harness, &sdk, scenarios).await;
+    let (auth, user) = (&backend.auth, &backend.user);
     let password = &out["password"];
     assert_eq!(password["target"], out["appOrigin"]);
     assert_eq!(
@@ -223,4 +263,22 @@ async fn the_sdk_signs_in_through_the_portal_popup() {
         embedded["switchedUser"],
         format!("Signed in as {EMBED_USER}")
     );
+}
+
+#[tokio::test]
+#[ignore = "needs Node, Playwright in tests/e2e/portal and the SDK 1.36.2 (see the module docs)"]
+async fn the_popup_signs_in_as_the_sign_in_identity_without_asking() {
+    let Some((harness, sdk)) = prerequisites() else {
+        return;
+    };
+    let backend = start(SignInAs::User(PREVIEW_USER.into())).await;
+    let out = run(&backend, &harness, &sdk, "identity").await;
+    let identity = &out["identity"];
+    let result = &identity["result"];
+    assert_eq!(result["ok"], true, "{identity}");
+    assert_eq!(result["session"]["user"]["email"], PREVIEW_USER);
+    assert_eq!(result["refreshed"], true);
+    let previewed = backend.auth.find_user(PREVIEW_USER).await.unwrap().unwrap();
+    assert_eq!(result["session"]["user"]["id"], previewed.id.as_str());
+    assert_eq!(identity["popupClosed"], true);
 }
