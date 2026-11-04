@@ -150,7 +150,8 @@ async function analyze(input) {
     entries.data = packageEntries.map((entry) => path.resolve(serviceRoot, entry));
     diagnostics.push(warning(`Loaded entities from the data package exports: ${packageEntries.join(', ')}.`));
   } else if (entries.data.length === 0) {
-    throw new Error(`No entity modules were compiled from ${rel(projectRoot, dataDir)}.`);
+    // An entity added later is applied live, so an empty folder starts with no entities.
+    diagnostics.push(warning(`${rel(projectRoot, dataDir)} has no entity modules yet; the data service starts with no entities.`));
   }
 
   const foundEntities = {};

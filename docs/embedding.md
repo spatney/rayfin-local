@@ -22,7 +22,7 @@ Anything else bumps it.
 ## Starting
 
 ```sh
-rayfin-local serve --json -C <project> [--sign-in-as developer|none|user:<username>] [--force-schema] [--reset] [--no-functions] [--static [--reuse-build]] [--port N] [--frontend-port N]
+rayfin-local serve --json -C <project> [--sign-in-as developer|none|user:<username>] [--developer-session] [--force-schema] [--reset] [--no-functions] [--static [--reuse-build]] [--port N] [--frontend-port N]
 ```
 
 With `--json`:
@@ -256,6 +256,22 @@ The epoch changes whenever every session is signed out, and with a new database.
 After `POST /data/reset` or `PUT /identity`, reloading the page is enough: hosts need not clear its storage, and the app signs in again rather than get 401s.
 The dev server gets the stamp from the backend's `GET /.rayfin-local/dev/session-stamp`, which answers only it, as the session route does.
 `--static` serves the app's build without this.
+
+## Developer sessions
+
+A host that serves the app through its own proxy, not rayfin-local's dev server, can start `serve` with `--developer-session` and get the app's session from the backend itself:
+
+```http
+POST {apiUrl}/.rayfin-local/dev/developer-session
+```
+
+- The answer is the `POST /api/auth/v1/token` body, `{"accessToken","tokenType","expiresIn","refreshToken","scope"}`, plus `"user":{"id","username","email","developer"}`, with `Cache-Control: no-store`.
+  The app refreshes it through `POST /api/auth/v1/token` as any session.
+- It is always for the local account `developer@example.com` (created when missing), never an Entra identity and whatever the sign-in identity (`--sign-in-as`) is.
+- Only loopback peers are answered, and only requests without an `Origin` header: the host's server asks, never a page. Others get 403 `{"error","hint"}`, and CORS never allows the route.
+  It needs no secret, no control token and no publishable key.
+- 404 without `--developer-session`, and when the app's auth is off (`services.auth.enabled: false`); 500 when signing in failed.
+- A data reset or a new identity revokes the session as every other; the host asks for a new one.
 
 ## Control API
 

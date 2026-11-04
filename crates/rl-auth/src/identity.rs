@@ -35,6 +35,9 @@ use crate::{
 pub const DEV_SESSION_TOKEN_PATH: &str = "/.rayfin-local/dev/session-token";
 /// Where rayfin-local's dev server gets [`AuthService::session_stamp`], as `{"stamp"}`.
 pub const DEV_SESSION_STAMP_PATH: &str = "/.rayfin-local/dev/session-stamp";
+/// Where a host that proxies the app on this machine gets a session for [`LOCAL_DEVELOPER`],
+/// when `serve --developer-session` opens it ([`AuthService::with_developer_session`]).
+pub const DEVELOPER_SESSION_PATH: &str = "/.rayfin-local/dev/developer-session";
 /// The header with the run's secret, which only rayfin-local's own dev server knows.
 pub const DEV_SIGN_IN_SECRET_HEADER: &str = "x-rayfin-local-sign-in";
 /// The local account the developer identity signs in as when their Entra identity isn't there.
@@ -65,6 +68,8 @@ pub(crate) struct AutoSignIn {
     switching: tokio::sync::RwLock<()>,
     /// The SHA-256 of the dev server's secret; without one the route stays closed.
     secret: Option<[u8; 32]>,
+    /// Whether [`DEVELOPER_SESSION_PATH`] is open.
+    developer_session: bool,
     /// The user the developer identity signed in as last.
     developer: RwLock<Option<String>>,
     /// Until when the developer identity doesn't ask for their Entra identity again.
@@ -79,6 +84,14 @@ impl AuthService {
     /// [`DEV_SIGN_IN_SECRET_HEADER`].
     pub fn with_dev_sign_in_secret(mut self, secret: &str) -> Self {
         self.auto_sign_in.secret = Some(sha256(secret.as_bytes()));
+        self
+    }
+
+    /// Opens [`DEVELOPER_SESSION_PATH`] to loopback requests without an `Origin`: a host that
+    /// serves the app through its own proxy gets a refreshable session for [`LOCAL_DEVELOPER`]
+    /// without a secret. It never signs in with Entra, whatever the [`SignInAs`] identity.
+    pub fn with_developer_session(mut self) -> Self {
+        self.auto_sign_in.developer_session = true;
         self
     }
 
@@ -221,6 +234,49 @@ impl AuthService {
         Ok(tokens)
     }
 
+    /// A session for [`LOCAL_DEVELOPER`], for a host that proxies the app on this machine.
+    async fn developer_session(&self, request: &Parts) -> Result<(TokenResponse, User), Refusal> {
+        if !self.auto_sign_in.developer_session {
+            return Err(Refusal::new(
+                StatusCode::NOT_FOUND,
+                "Developer sessions are not available here.",
+                Some("Start `rayfin-local serve` with --developer-session."),
+            ));
+        }
+        if !from_loopback(request) {
+            return Err(Refusal::new(
+                StatusCode::FORBIDDEN,
+                "Developer sessions only answer this machine.",
+                None,
+            ));
+        }
+        if request.headers.contains_key(header::ORIGIN) {
+            return Err(Refusal::new(
+                StatusCode::FORBIDDEN,
+                "Developer sessions are not given to pages.",
+                Some("Ask for one from the host's server, without an Origin header."),
+            ));
+        }
+        if !self.settings().enabled {
+            return Err(Refusal::new(
+                StatusCode::NOT_FOUND,
+                "Sign-in is turned off for this app.",
+                Some("services.auth.enabled is false in rayfin/rayfin.yml."),
+            ));
+        }
+        let _switching = self.identity_unchanged().await;
+        let user = self
+            .find_or_create_user(LOCAL_DEVELOPER)
+            .await
+            .map_err(|error| Refusal::failed(&error))?;
+        let tokens = self
+            .issue_session(&user)
+            .await
+            .map_err(|error| Refusal::failed(&error))?;
+        tracing::debug!("issued a developer session");
+        Ok((tokens, user))
+    }
+
     /// Only rayfin-local's dev server: a loopback peer, no other origin, and the run's secret.
     fn check_dev_server(&self, request: &Parts) -> Result<(), Refusal> {
         let Some(secret) = &self.auto_sign_in.secret else {
@@ -267,6 +323,34 @@ pub(crate) async fn dev_session_token(
     let (parts, _) = request.into_parts();
     let response = match auth.automatic_sign_in(&parts).await {
         Ok(tokens) => Json(tokens).into_response(),
+        Err(refusal) => refusal.into_response(),
+    };
+    no_store(response)
+}
+
+/// `POST` [`DEVELOPER_SESSION_PATH`]: the `POST /api/auth/v1/token` body, with the `user` it
+/// belongs to.
+pub(crate) async fn developer_session(
+    State(auth): State<Arc<AuthService>>,
+    request: Request,
+) -> Response {
+    let (parts, _) = request.into_parts();
+    let response = match auth.developer_session(&parts).await {
+        Ok((tokens, user)) => match serde_json::to_value(&tokens) {
+            Ok(mut body) => {
+                body["user"] = json!({
+                    "id": user.id,
+                    "username": user.username,
+                    "email": user.email,
+                    "developer": user.is_developer(),
+                });
+                Json(body).into_response()
+            }
+            Err(error) => {
+                tracing::error!("could not write a developer session: {error}");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        },
         Err(refusal) => refusal.into_response(),
     };
     no_store(response)
@@ -525,6 +609,88 @@ mod tests {
         let app = app(settings).await;
         app.auth.set_sign_in_as(identity);
         app
+    }
+
+    /// A `POST` for a developer session from `peer` (an IPv4 address).
+    fn developer_session_request(
+        peer: Option<[u8; 4]>,
+        origin: Option<&str>,
+    ) -> axum::http::Request<Body> {
+        let mut request =
+            axum::http::Request::post(DEVELOPER_SESSION_PATH).header(header::HOST, "127.0.0.1");
+        if let Some(origin) = origin {
+            request = request.header(header::ORIGIN, origin);
+        }
+        if let Some(ip) = peer {
+            request = request.extension(ConnectInfo(SocketAddr::from((ip, 50123))));
+        }
+        request.body(Body::empty()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_host_on_this_machine_gets_a_refreshable_local_developer_session() {
+        let (dir, auth) = service_with(AuthSettings::new(APP_ID)).await;
+        let app = app_from(dir, auth.with_developer_session());
+        app.auth.set_sign_in_as(SignInAs::User("ana".into()));
+
+        let answer = app.send(developer_session_request(LOOPBACK, None)).await;
+        assert_eq!(answer.headers[header::CACHE_CONTROL], "no-store");
+        let developer = user_of(&app, &answer).await;
+        assert_eq!(developer.username, LOCAL_DEVELOPER);
+        assert!(answer.body["refreshToken"].is_string(), "{}", answer.body);
+        assert_eq!(answer.body["user"]["id"], developer.id.as_str());
+        assert_eq!(answer.body["user"]["developer"], true);
+
+        let refreshed = app
+            .auth
+            .refresh(answer.body["refreshToken"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert!(app.auth.resolve(Some(&refreshed.access_token)).is_ok());
+    }
+
+    #[tokio::test]
+    async fn developer_sessions_are_opt_in_local_and_never_for_pages() {
+        let (dir, closed) = service_with(AuthSettings::new(APP_ID)).await;
+        let closed = app_from(dir, closed.with_dev_sign_in_secret(SECRET));
+        let answer = closed.send(developer_session_request(LOOPBACK, None)).await;
+        assert_eq!(answer.status, StatusCode::NOT_FOUND, "{}", answer.body);
+
+        let (dir, auth) = service_with(AuthSettings::new(APP_ID)).await;
+        let app = app_from(dir, auth.with_developer_session());
+        let refused = [
+            (
+                "remote",
+                developer_session_request(Some([10, 0, 0, 7]), None),
+            ),
+            ("no peer", developer_session_request(None, None)),
+            (
+                "own origin",
+                developer_session_request(LOOPBACK, Some("http://127.0.0.1")),
+            ),
+            (
+                "a page",
+                developer_session_request(LOOPBACK, Some("https://preview.example")),
+            ),
+        ];
+        for (case, request) in refused {
+            let answer = app.send(request).await;
+            assert_eq!(
+                answer.status,
+                StatusCode::FORBIDDEN,
+                "{case}: {}",
+                answer.body
+            );
+            assert!(answer.body.get("accessToken").is_none(), "{case}");
+        }
+        assert!(app.auth.list_users().await.unwrap().is_empty());
+
+        let mut settings = AuthSettings::new(APP_ID);
+        settings.enabled = false;
+        let (dir, off) = service_with(settings).await;
+        let off = app_from(dir, off.with_developer_session());
+        let answer = off.send(developer_session_request(LOOPBACK, None)).await;
+        assert_eq!(answer.status, StatusCode::NOT_FOUND, "{}", answer.body);
     }
 
     #[tokio::test]

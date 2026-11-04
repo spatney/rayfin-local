@@ -229,6 +229,7 @@ Its port is remembered per project; when it is busy, rayfin-local takes the next
 | `/.rayfin-local/portal/embed` | The local Fabric host, for apps that sign in embedded. |
 | `/.rayfin-local/health` | `{"ok":true}` once the backend is up. |
 | `/.rayfin-local/dev/session-token`, `/.rayfin-local/dev/session-stamp` | Automatic sign-in, and the stamp of the sessions the backend accepts, for rayfin-local's own dev server only. |
+| `/.rayfin-local/dev/developer-session` | With `--developer-session`: a session for the local developer account, for a host that proxies the app on this machine (see [docs/embedding.md](docs/embedding.md#developer-sessions)). |
 | `/.rayfin-local/control/*` | The control API, for programs that run rayfin-local, with `RAYFIN_LOCAL_CONTROL_TOKEN` (see [docs/embedding.md](docs/embedding.md#control-api)). |
 
 As on Fabric, `/api/*`, `/graphql`, `/functions/*`, `/connector-invoke/*` and `/connectors/*` need an `X-Publishable-Key` header; the local key is in `/rayfin.config.json`.
@@ -435,6 +436,7 @@ Every command takes these options:
 | `--token-source <auto\|az\|rayfin>` | Where Azure tokens come from. Default: `[tokens] source`, else `auto`. |
 | `--tenant <TENANT>` | Entra tenant for tokens. Default: your login's tenant. |
 | `--sign-in-as <WHO>` | Who apps that sign in automatically sign in as: `developer` (you), `user:<username>` (a local user) or `none`. Default: `[auth] sign_in_as`, else `developer`. See [Signing in](#signing-in). |
+| `--developer-session` | Open `POST /.rayfin-local/dev/developer-session`, which gives loopback requests without an `Origin` header a session for the local account `developer@example.com`, for a host that proxies the app. See [docs/embedding.md](docs/embedding.md#developer-sessions). |
 | `--force-schema` | Apply schema changes that lose data. |
 | `--reset` | Start from an empty database: delete the database and stored files (keeps ports, keys and secrets). |
 | `--inspect[=PORT]` | Start the function host with the Node.js inspector, on port 9229 by default. |

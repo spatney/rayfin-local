@@ -77,6 +77,8 @@ pub struct ServeOptions {
     pub inspect: Option<u16>,
     /// `--sign-in-as`: who apps are signed in as automatically.
     pub sign_in_as: Option<rl_project::SignInAs>,
+    /// `--developer-session`: open [`rl_auth::DEVELOPER_SESSION_PATH`].
+    pub developer_session: bool,
     pub open: bool,
     pub verbose: bool,
 }
@@ -207,8 +209,16 @@ async fn start(
     );
     let host = listen_host(&project, options);
     let sign_in_secret = new_secret()?;
-    let (auth, auth_settings) =
-        start_auth(&project, &state, &db, &host, &broker, &sign_in_secret).await?;
+    let (auth, auth_settings) = start_auth(
+        &project,
+        &state,
+        &db,
+        &host,
+        &broker,
+        &sign_in_secret,
+        options.developer_session,
+    )
+    .await?;
     auth.set_sign_in_as(sign_in_identity(&project, options));
     let bound = bind_ports(&project, &mut state, options, &host).await?;
     let api_origin = format!("http://{}:{}", origin_host(&host), bound.api_port);
@@ -440,7 +450,8 @@ fn is_wildcard(host: &str) -> bool {
 /// Entra exchange and automatic sign-in) is on only on loopback, with the developer's tokens
 /// from `broker`. They are optional there: without one, automatic sign-in signs in as the local
 /// developer account and the sign-in page says why, so a missing token is no `azure-sign-in`
-/// warning. Automatic sign-in answers the holder of `sign_in_secret` (the app's dev server).
+/// warning. Automatic sign-in answers the holder of `sign_in_secret` (the app's dev server);
+/// `developer_session` opens [`rl_auth::DEVELOPER_SESSION_PATH`].
 async fn start_auth(
     project: &Project,
     state: &LocalState,
@@ -448,17 +459,21 @@ async fn start_auth(
     host: &str,
     broker: &Arc<TokenBroker>,
     sign_in_secret: &str,
+    developer_session: bool,
 ) -> anyhow::Result<(Arc<AuthService>, AuthSettings)> {
     let settings = integrations::auth_settings(
         project,
         &state.data().app_id,
         integrations::is_loopback(host),
     );
-    let auth = AuthService::new(db.clone(), state.keys_dir(), settings.clone())
+    let mut auth = AuthService::new(db.clone(), state.keys_dir(), settings.clone())
         .await
         .context("Could not start the local auth service")?
         .with_entra(broker.clone())
         .with_dev_sign_in_secret(sign_in_secret);
+    if developer_session {
+        auth = auth.with_developer_session();
+    }
     Ok((Arc::new(auth), settings))
 }
 

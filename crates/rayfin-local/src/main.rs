@@ -137,6 +137,11 @@ struct ServeArgs {
     /// `[auth] sign_in_as` in rayfin-local.toml, else developer).
     #[arg(long, value_name = "WHO")]
     sign_in_as: Option<SignInAs>,
+    /// Open POST /.rayfin-local/dev/developer-session: a session for the local developer account
+    /// (never your Entra identity), with a refresh token, for a host that proxies the app on this
+    /// machine. Answers loopback requests without an Origin header, with no secret.
+    #[arg(long)]
+    developer_session: bool,
     /// Open the app in the browser once it is ready (not with --json).
     #[arg(long)]
     open: bool,
@@ -179,6 +184,7 @@ impl ServeArgs {
             reset: self.reset,
             inspect: self.inspect,
             sign_in_as: self.sign_in_as,
+            developer_session: self.developer_session,
             open: self.open,
             verbose,
         }
