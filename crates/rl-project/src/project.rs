@@ -27,6 +27,9 @@ pub struct LoadOptions {
     /// The environment for `${VAR}` interpolation in `rayfin.yml` (it wins over the env file) and
     /// for `RAYFIN_ENV_FILE`. `None` uses the process environment.
     pub process_env: Option<BTreeMap<String, String>>,
+    /// The state folder to use instead of `<root>/.rayfin-local` (absolute, or relative to the
+    /// current directory). See [`Project::state_dir`].
+    pub state_dir: Option<PathBuf>,
 }
 
 /// A loaded Rayfin project: the directory that contains `rayfin/rayfin.yml`, its configuration,
@@ -44,6 +47,8 @@ pub struct Project {
     rayfin_packages: Vec<RayfinPackage>,
     paths: ServicePaths,
     warnings: Vec<String>,
+    /// [`LoadOptions::state_dir`], made absolute.
+    state_dir: Option<PathBuf>,
 }
 
 impl Project {
@@ -111,6 +116,11 @@ impl Project {
         let manifests: Vec<&PackageJson> =
             frontend_package.iter().chain(root_package.iter()).collect();
         let rayfin_packages = collect_rayfin_packages(&paths.frontend_dir, &root, &manifests);
+        let state_dir = options
+            .state_dir
+            .as_deref()
+            .map(|dir| state_dir_for(&root, dir))
+            .transpose()?;
 
         Ok(Self {
             root,
@@ -122,6 +132,7 @@ impl Project {
             rayfin_packages,
             paths,
             warnings,
+            state_dir,
         })
     }
 
@@ -160,9 +171,12 @@ impl Project {
         self.root.join(LocalConfig::FILE_NAME)
     }
 
-    /// `<root>/.rayfin-local`, where everything rayfin-local writes goes.
+    /// The state folder, where everything rayfin-local writes goes: [`LoadOptions::state_dir`]
+    /// when set, else `<root>/.rayfin-local`.
     pub fn state_dir(&self) -> PathBuf {
-        self.root.join(STATE_DIR)
+        self.state_dir
+            .clone()
+            .unwrap_or_else(|| self.root.join(STATE_DIR))
     }
 
     /// The name to show: `name`, else `id`, else the root folder's name.
@@ -517,6 +531,23 @@ impl PathResolver<'_> {
         ));
         Ok(default.to_path_buf())
     }
+}
+
+/// The absolute state folder for `--state-dir` `dir` (relative to the current directory);
+/// refuses the project root and its parents.
+fn state_dir_for(root: &Path, dir: &Path) -> Result<PathBuf, ProjectError> {
+    let absolute = std::path::absolute(dir).map_err(|source| ProjectError::Read {
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    let resolved = dunce::canonicalize(&absolute).unwrap_or_else(|_| absolute.clone());
+    if root.starts_with(&resolved) {
+        return Err(ProjectError::InvalidStateDir {
+            path: absolute,
+            root: root.to_path_buf(),
+        });
+    }
+    Ok(absolute)
 }
 
 fn canonicalize(path: &Path) -> Result<PathBuf, ProjectError> {

@@ -1,4 +1,5 @@
-//! The `.rayfin-local/` state folder at the project root.
+//! The state folder: `.rayfin-local/` at the project root, unless [`crate::LoadOptions::state_dir`]
+//! (`--state-dir`) puts it elsewhere. Its `.gitignore` is written wherever it is.
 //!
 //! ```text
 //! .rayfin-local/
@@ -23,7 +24,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{EnvFile, Project, ProjectError};
 
-/// The state folder's name, at the project root.
+/// The state folder's name, at the project root (its default place).
 pub const STATE_DIR: &str = ".rayfin-local";
 /// Prefix of the publishable keys rayfin-local generates.
 pub const PUBLISHABLE_KEY_PREFIX: &str = "pk-local-";
@@ -255,7 +256,7 @@ impl LocalState {
         &mut self.data
     }
 
-    /// `<root>/.rayfin-local`.
+    /// The state folder ([`Project::state_dir`]).
     pub fn dir(&self) -> &Path {
         &self.dir
     }

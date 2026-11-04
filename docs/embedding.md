@@ -22,7 +22,7 @@ Anything else bumps it.
 ## Starting
 
 ```sh
-rayfin-local serve --json -C <project> [--sign-in-as developer|none|user:<username>] [--developer-session] [--force-schema] [--reset] [--no-functions] [--static [--reuse-build]] [--port N] [--frontend-port N]
+rayfin-local serve --json -C <project> [--state-dir <path>] [--sign-in-as developer|none|user:<username>] [--developer-session] [--force-schema] [--reset] [--no-frontend] [--no-functions] [--static [--reuse-build]] [--port N] [--frontend-port N]
 ```
 
 With `--json`:
@@ -36,12 +36,23 @@ With `--json`:
 - Child output (Vite, the function host, builds) becomes `log` events instead of `[vite]`-style lines.
 - The browser is never opened (`--open` is ignored).
 
+### The state folder
+
+`serve` keeps its state (`db.sqlite` with its `-wal` and `-shm`, `keys/`, `storage/`, `cache/`, `secrets.json`, `state.json`, `serve.json` and `serve.lock`) in `<project>/.rayfin-local`.
+`--state-dir <path>` (or `RAYFIN_LOCAL_STATE_DIR`; the option wins) moves all of it to another folder, created on first use; a relative path is resolved against rayfin-local's working directory.
+Use it when the project sits on a network or FUSE mount, where SQLite's write-ahead log can't live: keep the project there and the state on local disk.
+The project root and its parents are refused (`config-invalid`), since `reset` deletes the state folder.
+Pass the same `--state-dir` to every command that reads or writes the state (`reset`, `users`, `secret`); without it they use `<project>/.rayfin-local`.
+The folder gets a `.gitignore` (`*`) wherever it is, and the `ready` event's `dataDir` reports it.
+Nothing in it is a project source: live reload follows only its `secrets.json`.
+
 The environment configures the rest:
 
 | Variable | Effect |
 | --- | --- |
 | `RAYFIN_LOCAL_CONTROL_TOKEN` | Turns on the [control API](#control-api); requests must send it as a bearer token. At least 32 characters; shorter values are refused with a fatal `config-invalid` error. An empty value counts as unset. rayfin-local removes it from its environment, so the processes it starts (Vite, the function host, the app's code) don't see it. |
 | `RAYFIN_LOCAL_NODE` | The `node` executable. |
+| `RAYFIN_LOCAL_STATE_DIR` | The [state folder](#the-state-folder), as `--state-dir` (which wins). |
 | `RAYFIN_CONFIG_DIR` | The Rayfin CLI's config folder, for the `rayfin` token source (the account a host has signed in). |
 | `NO_COLOR` | Ignored with `--json` (there are no colors). |
 
@@ -155,7 +166,7 @@ It comes again after each `config-changed` that applied, with the new features; 
 
 ### `config-changed`
 
-`rayfin.yml`, `rayfin-local.toml`, the storage folders, the SQL connectors' entities (`rayfin/connectors/`) or the secret values (`.rayfin-local/secrets.json`, the functions' `local.settings.json`) changed while serving.
+`rayfin.yml`, `rayfin-local.toml`, the storage folders, the SQL connectors' entities (`rayfin/connectors/`) or the secret values (the state folder's `secrets.json`, the functions' `local.settings.json`) changed while serving.
 
 ```json
 {"v":1,"type":"config-changed","time":"…","applied":true,"restartRequired":false,"what":["storage","functions"],"message":null}
@@ -197,14 +208,14 @@ A `fatal` error is followed by `stopped`; other errors leave `serve` running.
 | `node-missing` | error | Node.js was not found. |
 | `node-too-old` | error | Node.js is older than 20. `details`: `{"version"}`. |
 | `project-not-found` | error | No `rayfin/rayfin.yml` in the folder or its parents. |
-| `config-invalid` | error | `rayfin.yml`, `rayfin-local.toml`, `.rayfin-local/state.json`, the functions' folder, `package.json` or `local.settings.json`, or the control token is invalid. Not fatal when `rayfin.yml` or `rayfin-local.toml` changes while serving: the previous configuration stays in use. |
+| `config-invalid` | error | `rayfin.yml`, `rayfin-local.toml`, the state folder's `state.json`, the functions' folder, `package.json` or `local.settings.json`, or the control token is invalid. Not fatal when `rayfin.yml` or `rayfin-local.toml` changes while serving: the previous configuration stays in use. |
 | `packages-missing` | error | The project's npm packages (or the functions') aren't installed. `details`: `{"dir"}`, the folder to run `npm install` in. For the functions' packages it is not fatal: it comes before their build, which then fails, once they have stayed missing for five seconds (an `npm install` that is still running when the functions start doesn't raise it). |
 | `sdk-unsupported` | warning | The app's Rayfin packages are outside `sdk.supported`. `details`: `{"version","supported"}`. |
 | `analysis-failed` | error | The model could not be analyzed, or `rayfin-local.toml` refuses it (`[fabric] anonymous_data_access = false` and entities that grant `anonymous`). |
 | `schema-refused` | error | See [`schema`](#schema). `details`: `{"losses"}`. |
 | `schema-failed` | error | The database could not be updated. |
 | `port-in-use` | error | A port set with a flag is busy. `details`: `{"port"}`. |
-| `already-serving` | error | Another `serve` runs this project. `details`: `{"pid","appUrl","apiUrl"}` from `.rayfin-local/serve.json`. |
+| `already-serving` | error | Another `serve` runs this project. `details`: `{"pid","appUrl","apiUrl"}` from the state folder's `serve.json`. |
 | `vite-failed` | error | Vite could not start (fatal at start; while running, see `vite` events). |
 | `functions-build-failed` | warning | The functions' build failed (once per failure; the `functions` event has the compiler's messages). Until a build succeeds, invocations answer 503, or run what the compiler emitted despite the errors. |
 | `secret-missing` | warning | A declared secret has no local value. `details`: `{"name"}`. |
@@ -332,7 +343,7 @@ Leave out `Authorization` to call as an anonymous user.
 ## Local secret values
 
 `rayfin-local secret set <NAME>` reads the value from stdin when it isn't given as an argument; `secret delete <NAME>` removes it.
-`rayfin-local secret list --json` prints `{"secrets":[{"name","declared":true,"description":null,"source":"env"}]}` with `source` one of `env`, `local` (`.rayfin-local/secrets.json`), `settings` (`local.settings.json`) or `none`; values are never printed.
+`rayfin-local secret list --json` prints `{"secrets":[{"name","declared":true,"description":null,"source":"env"}]}` with `source` one of `env`, `local` (the state folder's `secrets.json`), `settings` (`local.settings.json`) or `none`; values are never printed.
 A running `serve` picks up a change made with `secret set` or `secret delete` by itself and restarts only its function host (a `config-changed` event with `"what": ["secrets"]` follows), so hosts don't restart it.
 
 ## Doctor

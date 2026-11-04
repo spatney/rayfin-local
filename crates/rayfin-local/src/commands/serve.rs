@@ -93,20 +93,20 @@ enum Outcome {
     BackendExited(anyhow::Error),
 }
 
-pub async fn run(dir: &Path, options: ServeOptions) -> anyhow::Result<ExitCode> {
+pub async fn run(location: &super::Location, options: ServeOptions) -> anyhow::Result<ExitCode> {
     let mut running = Running::new();
     let outcome = if options.json {
         // From the start: a host may give up on a start that takes long.
         let mut stop = StopListener::with_input(io::stdin());
         tokio::select! {
-            outcome = serve(dir, &options, &mut running) => outcome,
+            outcome = serve(location, &options, &mut running) => outcome,
             request = stop.requested() => match request {
                 Ok(request) => Outcome::Stop(request),
                 Err(err) => Outcome::Failed(anyhow!(err).context("Could not listen for Ctrl+C")),
             },
         }
     } else {
-        serve(dir, &options, &mut running).await
+        serve(location, &options, &mut running).await
     };
     finish(outcome, running, options.json).await
 }
@@ -162,19 +162,23 @@ async fn finish(outcome: Outcome, running: Running, json: bool) -> anyhow::Resul
 
 /// Starts everything and serves until a stop request (without `--json`; with it, [`run`] listens
 /// for them) or until the backend stops.
-async fn serve(dir: &Path, options: &ServeOptions, running: &mut Running) -> Outcome {
-    match start(dir, options, running).await {
+async fn serve(
+    location: &super::Location,
+    options: &ServeOptions,
+    running: &mut Running,
+) -> Outcome {
+    match start(location, options, running).await {
         Ok(outcome) => outcome,
         Err(err) => Outcome::Failed(err),
     }
 }
 
 async fn start(
-    dir: &Path,
+    location: &super::Location,
     options: &ServeOptions,
     running: &mut Running,
 ) -> anyhow::Result<Outcome> {
-    let project = Project::discover(dir)?;
+    let project = location.discover()?;
     events::emit(Event::Starting(Starting {
         pid: std::process::id(),
         version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -320,7 +324,7 @@ pub(crate) fn sign_in_identity(project: &Project, options: &ServeOptions) -> Ide
     }
 }
 
-/// The project's `.rayfin-local/` (created on first use), locked against a second `serve`.
+/// The state folder (created on first use), locked against a second `serve`.
 /// `--reset` then empties the database and storage, which hold the users, the entity data and
 /// the stored files.
 fn open_state(project: &Project, reset: bool) -> anyhow::Result<(LocalState, ServeLock)> {

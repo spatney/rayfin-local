@@ -30,6 +30,7 @@ async fn compile_entities(project: &Path) -> PathBuf {
     std::fs::create_dir_all(&scratch).unwrap();
     let mut input = ConnectorsAnalyzeInput::for_project(
         project,
+        &project.join(".rayfin-local"),
         vec![ConnectorSource {
             name: "inventory".into(),
             dir: project.join("rayfin/connectors/inventory"),

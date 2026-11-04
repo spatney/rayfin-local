@@ -9,8 +9,9 @@
 //   dataDir       the entity sources, normally <projectRoot>/rayfin/data
 //   storageDir    optional; the `@blob` sources, default <dataDir>/../storage
 //   tsconfigPath  rayfin/tsconfig.json, or null to compile with built-in defaults
-//   outDir        absolute folder for the compiled JavaScript; the only place this helper writes
-//                 (besides the --output file). It is emptied first.
+//   stateDir      optional; rayfin-local's state folder, default <projectRoot>/.rayfin-local
+//   outDir        absolute folder for the compiled JavaScript, inside stateDir; the only place
+//                 this helper writes (besides the --output file). It is emptied first.
 //   dialect       "mssql" | "postgresql"
 //   storage       whether to analyze the storage folders too
 //   verbose       optional; echo the analyzer's log to stderr. Without it console.log/info/debug
@@ -29,9 +30,9 @@
 // Connectors mode (`mode: "connectors"`): the entity classes of Category A connectors
 // (`rayfin/connectors/<name>/*.ts`), analyzed the way `rayfin up connector apply` does (CLI 1.36.2,
 // services/connector-generator.js): ConnectorSchemaAnalyzer, then ConnectorConfigGenerator.
-//   Input: projectRoot, tsconfigPath (the project's rayfin/tsconfig.json, or null), outDir,
-//   connectors ([{name, dir, dialect}]: dialect is the connector type's analyzer dialect, `mssql`,
-//   `fabric-warehouse` or `fabric-sqlanalytics`), verbose.
+//   Input: projectRoot, tsconfigPath (the project's rayfin/tsconfig.json, or null), stateDir,
+//   outDir, connectors ([{name, dir, dialect}]: dialect is the connector type's analyzer dialect,
+//   `mssql`, `fabric-warehouse` or `fabric-sqlanalytics`), verbose.
 //   Result: coreVersion, typescriptVersion, featureFlags, connectors ([{name, dialect, entities,
 //   config, policies}] as above, or [{name, dialect, error: {message}}] when that connector's
 //   analysis failed), sources ({inputs}) and diagnostics. A compile error fails the whole run, as
@@ -91,6 +92,7 @@ async function analyze(input) {
   const dataDir = path.resolve(projectRoot, required(input, 'dataDir'));
   const storageDir = path.resolve(projectRoot, input.storageDir ?? path.join(dataDir, '..', 'storage'));
   const outDir = path.resolve(required(input, 'outDir'));
+  const stateDir = stateDirOf(input, projectRoot);
   const dialect = required(input, 'dialect');
   const tsconfigPath = input.tsconfigPath ? path.resolve(projectRoot, input.tsconfigPath) : null;
   const log = input.verbose ? (message = '') => process.stderr.write(`${message}\n`) : () => {};
@@ -138,6 +140,7 @@ async function analyze(input) {
     const compiled = compile(ts, {
       projectRoot,
       tsconfigPath,
+      stateDir,
       outDir,
       entryDirs: [...(packageEntries ? [] : [dataDir]), ...(storageExists ? [storageDir] : [])],
       diagnostics,
@@ -217,6 +220,7 @@ async function analyze(input) {
 async function analyzeConnectors(input) {
   const projectRoot = path.resolve(required(input, 'projectRoot'));
   const outDir = path.resolve(required(input, 'outDir'));
+  const stateDir = stateDirOf(input, projectRoot);
   const tsconfigPath = input.tsconfigPath ? path.resolve(projectRoot, input.tsconfigPath) : null;
   const log = input.verbose ? (message = '') => process.stderr.write(`${message}\n`) : () => {};
   const diagnostics = [];
@@ -243,6 +247,7 @@ async function analyzeConnectors(input) {
   const compiled = compile(ts, {
     projectRoot,
     tsconfigPath,
+    stateDir,
     outDir,
     entryDirs: existing.map((connector) => connector.dir),
     diagnostics,
@@ -322,6 +327,11 @@ function rel(root, file) {
 function isInside(dir, file) {
   const relative = path.relative(dir, file);
   return relative.length > 0 && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+/** The input's `stateDir` (rayfin-local's `--state-dir`), default `<projectRoot>/.rayfin-local`. */
+function stateDirOf(input, projectRoot) {
+  return path.resolve(projectRoot, input.stateDir ?? '.rayfin-local');
 }
 
 /** Whether `a` and `b` are the same folder (on Windows, `path.relative` ignores letter case). */
@@ -500,7 +510,7 @@ function sourceOf(file) {
  * folder, the compiled `.js` of the folder's top-level modules (the CLI imports
  * `.temp/compiled/data/*.js`), sorted.
  */
-function compile(ts, { projectRoot, tsconfigPath, outDir, entryDirs, diagnostics }) {
+function compile(ts, { projectRoot, tsconfigPath, stateDir, outDir, entryDirs, diagnostics }) {
   // Without a tsconfig, the rayfin folder of the first folder compiled.
   const configDir = tsconfigPath
     ? path.dirname(tsconfigPath)
@@ -564,16 +574,16 @@ function compile(ts, { projectRoot, tsconfigPath, outDir, entryDirs, diagnostics
   // "No inputs were found" is moot once the entry folders are added.
   configErrors = configErrors.filter((d) => d.code !== 18003);
 
-  // Inside the project, only rayfin-local's own state folder may be written.
+  // Only a folder inside rayfin-local's own state folder may be written.
   if (
     samePath(outDir, path.parse(outDir).root) ||
     samePath(outDir, projectRoot) ||
     isInside(outDir, projectRoot) ||
-    (isInside(projectRoot, outDir) && !isInside(path.join(projectRoot, '.rayfin-local'), outDir))
+    !isInside(stateDir, outDir)
   ) {
     throw new Error(
-      `analyze.mjs: refusing to use ${outDir} as the output folder; inside the project it must be ` +
-        `under .rayfin-local/.`,
+      `analyze.mjs: refusing to use ${outDir} as the output folder; it must be inside the state ` +
+        `folder ${stateDir}.`,
     );
   }
   for (const file of included) {

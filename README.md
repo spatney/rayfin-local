@@ -97,7 +97,7 @@ flowchart LR
 
 1. Reads `rayfin/rayfin.yml` and analyzes the entities in `rayfin/data` (and SQL connectors' entities in `rayfin/connectors`) with your project's own `@microsoft/rayfin-core`, as the Rayfin CLI does.
    A data package with `services.data.buildCommand` (a workspace layout with `services.data.path`) is built first, as the CLI does.
-2. Creates or migrates a SQLite database in `.rayfin-local/`.
+2. Creates or migrates a SQLite database in `.rayfin-local/` (or the folder `--state-dir` names).
 3. Starts one backend that answers every route the SDK calls: auth, `/graphql`, functions, connectors and storage, with your `@role` policies enforced.
 4. Builds your functions and runs them on a Node.js host with the real `@microsoft/fabric-user-data-functions` package, without Azure Functions Core Tools.
 5. Starts your app's own Vite dev server with environment variables that point the SDK at the local backend; your `.env` files are not changed.
@@ -311,6 +311,8 @@ A running `serve` picks up a changed value there or in `local.settings.json` by 
 
 rayfin-local keeps its state in `.rayfin-local/` at the project root.
 The folder has its own `.gitignore` (`*`), so none of it is committed.
+`--state-dir <PATH>` (or `RAYFIN_LOCAL_STATE_DIR`; the option wins) puts the whole folder somewhere else, relative to the current directory: on local disk when the project sits on a network drive, which can't hold a live SQLite database, for example.
+Pass the same folder to every command (`serve`, `reset`, `users`, `secret`); the `.gitignore` is written there too, and the project root or one of its parents is refused.
 Outside it, rayfin-local writes only build output: what your build commands produce (such as `dist/`) and the functions' `runtimemetadata.json`, which `rayfin dev` also generates.
 
 | Path | Holds |
@@ -409,9 +411,9 @@ With `anonymous_data_access = false`, `serve` refuses such entities, as `rayfin 
 | `rayfin-local serve` | Start the local backend and the app. |
 | `rayfin-local doctor [--json]` | Check Node.js, installed packages, Azure and Rayfin sign-in, and ports. |
 | `rayfin-local schema` | Print the app model and the SQLite schema derived from `rayfin/data`. |
-| `rayfin-local reset [--yes]` | Delete `.rayfin-local/`: database, users, keys, stored files and secrets. |
+| `rayfin-local reset [--yes]` | Delete the state folder (`.rayfin-local/`): database, users, keys, stored files and secrets. |
 | `rayfin-local users list\|add\|delete\|reset-password` | Manage local users. |
-| `rayfin-local secret set\|list\|delete` | Manage local secret values (`.rayfin-local/secrets.json`); `secret list --json` prints them as JSON (never the values). |
+| `rayfin-local secret set\|list\|delete` | Manage local secret values (the state folder's `secrets.json`); `secret list --json` prints them as JSON (never the values). |
 | `rayfin-local version [--json]` | Print the version; with `--json`, also the version of the host contract and the Rayfin SDK versions it supports. |
 
 `rayfin-local <command> --help` shows each command's arguments.
@@ -420,6 +422,7 @@ Every command takes these options:
 | Option | Meaning |
 | --- | --- |
 | `-C, --project <DIR>` | The project to use. Default: the current directory, or the nearest parent with `rayfin/rayfin.yml`. |
+| `--state-dir <PATH>` | The state folder (database, keys, stored files, secrets, caches) instead of `<project>/.rayfin-local`; relative to the current directory. Default: `RAYFIN_LOCAL_STATE_DIR`, else `.rayfin-local` (see [Local state and reset](#local-state-and-reset)). |
 | `-v, --verbose` | Show rayfin-local's debug logs. `RUST_LOG` replaces the default log filters. |
 
 `serve` flags:
@@ -448,6 +451,7 @@ Every command takes these options:
 | Variable | Effect |
 | --- | --- |
 | `RAYFIN_LOCAL_NODE` | The `node` executable to use instead of the one on `PATH`. |
+| `RAYFIN_LOCAL_STATE_DIR` | The state folder, as `--state-dir` (which wins). |
 | `RAYFIN_LOCAL_TOKEN_<AUDIENCE>` | A fixed token for one audience (see [Identity and Azure tokens](#identity-and-azure-tokens)). |
 | `RAYFIN_LOCAL_CONTROL_TOKEN` | Turns on the control API for programs that run rayfin-local; at least 32 characters (see [docs/embedding.md](docs/embedding.md#control-api)). |
 | `RAYFIN_ENV_FILE` | The env file to read instead of `rayfin/.env`, as for the Rayfin CLI. |

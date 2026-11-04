@@ -1,5 +1,5 @@
 //! The app model: `@microsoft/rayfin-core`'s analysis of `rayfin/data` (and `rayfin/storage`), run
-//! with the project's own packages and cached in `.rayfin-local/cache/analysis.json` while its
+//! with the project's own packages and cached in the state folder's `cache/analysis.json` while its
 //! inputs are unchanged. A data package's `services.data.buildCommand` runs first, as in the CLI.
 
 use std::fs;
@@ -360,12 +360,13 @@ fn major_minor(version: &str) -> Option<(u64, u64)> {
     Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
 }
 
-/// The helper's input: the project's entity and storage folders, compiled into
-/// `.rayfin-local/cache/compiled`.
+/// The helper's input: the project's entity and storage folders, compiled into the state folder's
+/// `cache/compiled`.
 pub fn analyze_input(project: &Project, state: &LocalState, verbose: bool) -> AnalyzeInput {
     let services = &project.config().services;
     let mut input = AnalyzeInput::for_project(
         project.root(),
+        state.dir(),
         model_dialect(services.data.dialect()),
         services.storage.enabled,
     );
@@ -373,7 +374,6 @@ pub fn analyze_input(project: &Project, state: &LocalState, verbose: bool) -> An
     input.storage_dir = Some(project.storage_schema_dir());
     let tsconfig = rayfin_tsconfig(project);
     input.tsconfig_path = tsconfig.is_file().then_some(tsconfig);
-    input.out_dir = state.cache_dir().join("compiled");
     input.verbose = verbose;
     input
 }

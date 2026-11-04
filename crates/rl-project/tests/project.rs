@@ -183,6 +183,7 @@ fn honors_rayfin_env_file_and_explicit_env_files() {
     let options = LoadOptions {
         env_file: Some(PathBuf::from("config/missing.env")),
         process_env: Some(BTreeMap::new()),
+        ..Default::default()
     };
     let err = Project::load_with(&root, &options).unwrap_err();
     assert!(matches!(err, ProjectError::EnvFileNotFound { .. }), "{err}");
@@ -402,5 +403,72 @@ fn state_folder_lives_in_the_project_and_resets() {
         assert!(state.secrets_path().is_file());
         drop(held);
         assert!(LocalState::reset(&project).unwrap());
+    }
+}
+
+#[test]
+fn state_dir_option_moves_the_whole_state_folder() {
+    let (_temp, root) = project_dir(&[("rayfin/rayfin.yml", MINIMAL)]);
+    let elsewhere = tempfile::tempdir().unwrap();
+    let state_dir = elsewhere.path().join("app-state");
+    let project = Project::load_with(
+        &root,
+        &LoadOptions {
+            process_env: Some(BTreeMap::new()),
+            state_dir: Some(state_dir.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(project.state_dir(), state_dir);
+
+    let state = LocalState::load_or_create(&project).unwrap();
+    state
+        .save_secrets(&[("KEY".to_owned(), "value".to_owned())].into())
+        .unwrap();
+    assert_eq!(state.dir(), state_dir);
+    assert_eq!(state.db_path(), state_dir.join("db.sqlite"));
+    assert!(state.keys_dir().is_dir() && state.keys_dir().starts_with(&state_dir));
+    assert!(state.storage_dir().is_dir() && state.cache_dir().is_dir());
+    assert!(state_dir.join("secrets.json").is_file());
+    assert!(state_dir.join("state.json").is_file());
+    assert!(!root.join(".rayfin-local").exists());
+
+    assert!(LocalState::reset(&project).unwrap());
+    assert!(!state_dir.exists());
+}
+
+#[test]
+fn a_relative_state_dir_is_made_absolute_and_the_default_is_unchanged() {
+    let (_temp, root) = project_dir(&[("rayfin/rayfin.yml", MINIMAL)]);
+    let project = Project::load_with(
+        &root,
+        &LoadOptions {
+            process_env: Some(BTreeMap::new()),
+            state_dir: Some(PathBuf::from("some-state")),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        project.state_dir(),
+        std::env::current_dir().unwrap().join("some-state")
+    );
+    assert_eq!(
+        load(&root, &[]).unwrap().state_dir(),
+        root.join(".rayfin-local")
+    );
+
+    for holding_the_project in [root.clone(), root.parent().unwrap().to_owned()] {
+        let err = Project::load_with(
+            &root,
+            &LoadOptions {
+                process_env: Some(BTreeMap::new()),
+                state_dir: Some(holding_the_project),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ProjectError::InvalidStateDir { .. }), "{err}");
     }
 }
