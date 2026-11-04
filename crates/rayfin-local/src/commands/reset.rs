@@ -1,15 +1,14 @@
-//! `rayfin-local reset`: delete the project's `.rayfin-local/` folder.
+//! `rayfin-local reset`: delete the state folder (`.rayfin-local/`, or `--state-dir`).
 
 use std::io::{self, BufRead, IsTerminal, Write};
-use std::path::Path;
 use std::process::ExitCode;
 
-use rl_project::{LocalState, Project};
+use rl_project::LocalState;
 
 use crate::ui;
 
-pub fn run(dir: &Path, yes: bool) -> anyhow::Result<ExitCode> {
-    let project = Project::discover(dir)?;
+pub fn run(location: &super::Location, yes: bool) -> anyhow::Result<ExitCode> {
+    let project = location.discover()?;
     let state_dir = project.state_dir();
     if !state_dir.exists() {
         ui::status(format_args!(

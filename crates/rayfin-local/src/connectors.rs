@@ -1,6 +1,6 @@
 //! Category A connectors' entities: the classes in `rayfin/connectors/<name>/` analyzed with the
 //! project's own `@microsoft/rayfin-core` (`js/analyze.mjs`, connectors mode), as `rayfin up`
-//! analyzes them, and cached in `.rayfin-local/cache/connectors-analysis.json` while their
+//! analyzes them, and cached in the state folder's `cache/connectors-analysis.json` while their
 //! sources are unchanged. Each model is completed with the connector's `metadata.json` and
 //! limited to its declared operations.
 //!
@@ -61,8 +61,7 @@ pub async fn analyze(
             dialect: kind.analyzer_dialect().to_owned(),
         })
         .collect();
-    let mut input = ConnectorsAnalyzeInput::for_project(project.root(), sources);
-    input.out_dir = state.cache_dir().join("compiled-connectors");
+    let mut input = ConnectorsAnalyzeInput::for_project(project.root(), state.dir(), sources);
     input.verbose = verbose;
 
     let analysis = match load(project, state, node, &input).await {

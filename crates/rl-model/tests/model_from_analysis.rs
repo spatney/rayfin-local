@@ -532,7 +532,8 @@ fn analyze_input_for_a_project() {
         .join("fixtures")
         .join("apps")
         .join("basic");
-    let input = AnalyzeInput::for_project(&root, Dialect::Mssql, true).to_json();
+    let state_dir = root.join(".rayfin-local");
+    let input = AnalyzeInput::for_project(&root, &state_dir, Dialect::Mssql, true).to_json();
     assert_eq!(input["dialect"], "mssql");
     assert_eq!(input["storage"], true);
     assert!(
@@ -541,6 +542,10 @@ fn analyze_input_for_a_project() {
             .unwrap()
             .ends_with("tsconfig.json")
     );
-    assert!(input["outDir"].as_str().unwrap().contains(".rayfin-local"));
+    assert_eq!(
+        input["outDir"],
+        state_dir.join("cache").join("compiled").to_str().unwrap()
+    );
+    assert_eq!(input["stateDir"], state_dir.to_str().unwrap());
     assert!(input.get("storageDir").is_none());
 }

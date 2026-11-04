@@ -48,6 +48,8 @@ impl AuthService {
     /// - [`crate::DEV_SESSION_TOKEN_PATH`]: automatic sign-in, and [`crate::DEV_SESSION_STAMP_PATH`]:
     ///   the stamp of the sessions it accepts, for rayfin-local's dev server (see
     ///   [`AuthService::with_dev_sign_in_secret`])
+    /// - [`crate::DEVELOPER_SESSION_PATH`]: a session for the local developer account, for a host
+    ///   that proxies the app (see [`AuthService::with_developer_session`])
     /// - the routes of features rayfin-local lacks (magic links, email verification, password
     ///   reset email), answering as the real service does when the feature is disabled
     ///
@@ -88,6 +90,10 @@ impl AuthService {
             .route(
                 crate::DEV_SESSION_STAMP_PATH,
                 get(crate::identity::dev_session_stamp),
+            )
+            .route(
+                crate::DEVELOPER_SESSION_PATH,
+                post(crate::identity::developer_session),
             )
             .merge(crate::portal::routes())
             .with_state(self)

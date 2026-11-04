@@ -23,7 +23,7 @@ const RUNNING_NOTE: &str = "A running `rayfin-local serve` applies this by itsel
 
 #[derive(Debug, Subcommand)]
 pub enum SecretCommand {
-    /// Store a secret's local value in .rayfin-local/secrets.json.
+    /// Store a secret's local value in the state folder's secrets.json.
     Set {
         /// The secret's name, as declared under `secrets:` in rayfin/rayfin.yml.
         name: String,
@@ -38,15 +38,15 @@ pub enum SecretCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Delete a secret's local value from .rayfin-local/secrets.json.
+    /// Delete a secret's local value from the state folder's secrets.json.
     Delete {
         /// The secret's name.
         name: String,
     },
 }
 
-pub fn run(dir: &Path, command: SecretCommand) -> anyhow::Result<ExitCode> {
-    let project = Project::discover(dir)?;
+pub fn run(location: &super::Location, command: SecretCommand) -> anyhow::Result<ExitCode> {
+    let project = location.discover()?;
     let state = LocalState::load_or_create(&project)?;
     match command {
         SecretCommand::Set { name, value } => {
@@ -465,9 +465,10 @@ mod tests {
     fn sets_lists_and_deletes_local_values() {
         let dir = project();
         let root = dir.path();
+        let location = crate::commands::Location::from(root);
         let set = |name: &str, value: &str| {
             run(
-                root,
+                &location,
                 SecretCommand::Set {
                     name: name.to_owned(),
                     value: Some(value.to_owned()),
@@ -478,7 +479,7 @@ mod tests {
         // Saved with a warning.
         set("UNDECLARED_KEY", "other").unwrap();
         assert!(set("API_KEY", "").is_err());
-        run(root, SecretCommand::List { json: false }).unwrap();
+        run(&location, SecretCommand::List { json: false }).unwrap();
 
         let project = Project::discover(root).unwrap();
         let state = LocalState::load_or_create(&project).unwrap();
@@ -526,7 +527,7 @@ mod tests {
 
         let delete = |name: &str| {
             run(
-                root,
+                &location,
                 SecretCommand::Delete {
                     name: name.to_owned(),
                 },

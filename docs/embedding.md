@@ -22,7 +22,7 @@ Anything else bumps it.
 ## Starting
 
 ```sh
-rayfin-local serve --json -C <project> [--sign-in-as developer|none|user:<username>] [--force-schema] [--reset] [--no-functions] [--static [--reuse-build]] [--port N] [--frontend-port N]
+rayfin-local serve --json -C <project> [--state-dir <path>] [--sign-in-as developer|none|user:<username>] [--developer-session] [--force-schema] [--reset] [--no-frontend] [--no-functions] [--static [--reuse-build]] [--port N] [--frontend-port N]
 ```
 
 With `--json`:
@@ -36,12 +36,23 @@ With `--json`:
 - Child output (Vite, the function host, builds) becomes `log` events instead of `[vite]`-style lines.
 - The browser is never opened (`--open` is ignored).
 
+### The state folder
+
+`serve` keeps its state (`db.sqlite` with its `-wal` and `-shm`, `keys/`, `storage/`, `cache/`, `secrets.json`, `state.json`, `serve.json` and `serve.lock`) in `<project>/.rayfin-local`.
+`--state-dir <path>` (or `RAYFIN_LOCAL_STATE_DIR`; the option wins) moves all of it to another folder, created on first use; a relative path is resolved against rayfin-local's working directory.
+Use it when the project sits on a network or FUSE mount, where SQLite's write-ahead log can't live: keep the project there and the state on local disk.
+The project root and its parents are refused (`config-invalid`), since `reset` deletes the state folder.
+Pass the same `--state-dir` to every command that reads or writes the state (`reset`, `users`, `secret`, [`backup` and `restore`](#backup-and-restore)); without it they use `<project>/.rayfin-local`.
+The folder gets a `.gitignore` (`*`) wherever it is, and the `ready` event's `dataDir` reports it.
+Nothing in it is a project source: live reload follows only its `secrets.json`.
+
 The environment configures the rest:
 
 | Variable | Effect |
 | --- | --- |
 | `RAYFIN_LOCAL_CONTROL_TOKEN` | Turns on the [control API](#control-api); requests must send it as a bearer token. At least 32 characters; shorter values are refused with a fatal `config-invalid` error. An empty value counts as unset. rayfin-local removes it from its environment, so the processes it starts (Vite, the function host, the app's code) don't see it. |
 | `RAYFIN_LOCAL_NODE` | The `node` executable. |
+| `RAYFIN_LOCAL_STATE_DIR` | The [state folder](#the-state-folder), as `--state-dir` (which wins). |
 | `RAYFIN_CONFIG_DIR` | The Rayfin CLI's config folder, for the `rayfin` token source (the account a host has signed in). |
 | `NO_COLOR` | Ignored with `--json` (there are no colors). |
 
@@ -155,7 +166,7 @@ It comes again after each `config-changed` that applied, with the new features; 
 
 ### `config-changed`
 
-`rayfin.yml`, `rayfin-local.toml`, the storage folders, the SQL connectors' entities (`rayfin/connectors/`) or the secret values (`.rayfin-local/secrets.json`, the functions' `local.settings.json`) changed while serving.
+`rayfin.yml`, `rayfin-local.toml`, the storage folders, the SQL connectors' entities (`rayfin/connectors/`) or the secret values (the state folder's `secrets.json`, the functions' `local.settings.json`) changed while serving.
 
 ```json
 {"v":1,"type":"config-changed","time":"…","applied":true,"restartRequired":false,"what":["storage","functions"],"message":null}
@@ -197,14 +208,14 @@ A `fatal` error is followed by `stopped`; other errors leave `serve` running.
 | `node-missing` | error | Node.js was not found. |
 | `node-too-old` | error | Node.js is older than 20. `details`: `{"version"}`. |
 | `project-not-found` | error | No `rayfin/rayfin.yml` in the folder or its parents. |
-| `config-invalid` | error | `rayfin.yml`, `rayfin-local.toml`, `.rayfin-local/state.json`, the functions' folder, `package.json` or `local.settings.json`, or the control token is invalid. Not fatal when `rayfin.yml` or `rayfin-local.toml` changes while serving: the previous configuration stays in use. |
+| `config-invalid` | error | `rayfin.yml`, `rayfin-local.toml`, the state folder's `state.json`, the functions' folder, `package.json` or `local.settings.json`, or the control token is invalid. Not fatal when `rayfin.yml` or `rayfin-local.toml` changes while serving: the previous configuration stays in use. |
 | `packages-missing` | error | The project's npm packages (or the functions') aren't installed. `details`: `{"dir"}`, the folder to run `npm install` in. For the functions' packages it is not fatal: it comes before their build, which then fails, once they have stayed missing for five seconds (an `npm install` that is still running when the functions start doesn't raise it). |
 | `sdk-unsupported` | warning | The app's Rayfin packages are outside `sdk.supported`. `details`: `{"version","supported"}`. |
 | `analysis-failed` | error | The model could not be analyzed, or `rayfin-local.toml` refuses it (`[fabric] anonymous_data_access = false` and entities that grant `anonymous`). |
 | `schema-refused` | error | See [`schema`](#schema). `details`: `{"losses"}`. |
 | `schema-failed` | error | The database could not be updated. |
 | `port-in-use` | error | A port set with a flag is busy. `details`: `{"port"}`. |
-| `already-serving` | error | Another `serve` runs this project. `details`: `{"pid","appUrl","apiUrl"}` from `.rayfin-local/serve.json`. |
+| `already-serving` | error | Another `serve` runs this project. `details`: `{"pid","appUrl","apiUrl"}` from the state folder's `serve.json`. |
 | `vite-failed` | error | Vite could not start (fatal at start; while running, see `vite` events). |
 | `functions-build-failed` | warning | The functions' build failed (once per failure; the `functions` event has the compiler's messages). Until a build succeeds, invocations answer 503, or run what the compiler emitted despite the errors. |
 | `secret-missing` | warning | A declared secret has no local value. `details`: `{"name"}`. |
@@ -256,6 +267,22 @@ The epoch changes whenever every session is signed out, and with a new database.
 After `POST /data/reset` or `PUT /identity`, reloading the page is enough: hosts need not clear its storage, and the app signs in again rather than get 401s.
 The dev server gets the stamp from the backend's `GET /.rayfin-local/dev/session-stamp`, which answers only it, as the session route does.
 `--static` serves the app's build without this.
+
+## Developer sessions
+
+A host that serves the app through its own proxy, not rayfin-local's dev server, can start `serve` with `--developer-session` and get the app's session from the backend itself:
+
+```http
+POST {apiUrl}/.rayfin-local/dev/developer-session
+```
+
+- The answer is the `POST /api/auth/v1/token` body, `{"accessToken","tokenType","expiresIn","refreshToken","scope"}`, plus `"user":{"id","username","email","developer"}`, with `Cache-Control: no-store`.
+  The app refreshes it through `POST /api/auth/v1/token` as any session.
+- It is always for the local account `developer@example.com` (created when missing), never an Entra identity and whatever the sign-in identity (`--sign-in-as`) is.
+- Only loopback peers are answered, and only requests without an `Origin` header: the host's server asks, never a page. Others get 403 `{"error","hint"}`, and CORS never allows the route.
+  It needs no secret, no control token and no publishable key.
+- 404 without `--developer-session`, and when the app's auth is off (`services.auth.enabled: false`); 500 when signing in failed.
+- A data reset or a new identity revokes the session as every other; the host asks for a new one.
 
 ## Control API
 
@@ -316,8 +343,75 @@ Leave out `Authorization` to call as an anonymous user.
 ## Local secret values
 
 `rayfin-local secret set <NAME>` reads the value from stdin when it isn't given as an argument; `secret delete <NAME>` removes it.
-`rayfin-local secret list --json` prints `{"secrets":[{"name","declared":true,"description":null,"source":"env"}]}` with `source` one of `env`, `local` (`.rayfin-local/secrets.json`), `settings` (`local.settings.json`) or `none`; values are never printed.
+`rayfin-local secret list --json` prints `{"secrets":[{"name","declared":true,"description":null,"source":"env"}]}` with `source` one of `env`, `local` (the state folder's `secrets.json`), `settings` (`local.settings.json`) or `none`; values are never printed.
 A running `serve` picks up a change made with `secret set` or `secret delete` by itself and restarts only its function host (a `config-changed` event with `"what": ["secrets"]` follows), so hosts don't restart it.
+
+## Backup and restore
+
+```sh
+rayfin-local backup --out <dir> [--json] [-C <project>] [--state-dir <path>]
+rayfin-local restore --from <dir> [--json] [-C <project>] [--state-dir <path>]
+```
+
+`backup` writes a consistent snapshot of the state folder into `<dir>`, which it creates, or which must be empty.
+It takes no lock, so it runs while `serve` runs and writes: the database is copied with SQLite's online backup API as one self-contained `db.sqlite` (rollback journal, no `-wal` or `-shm`), with every transaction committed when the copy starts, those still in the write-ahead log included.
+`keys/`, `storage/`, `secrets.json` and `state.json` are copied as they are, each only when present.
+`cache/`, `serve.json`, `serve.lock`, `.gitignore` and the database's `-wal`, `-shm` and `-journal` files are never copied; `serve` rebuilds the cache.
+`<dir>` must not be inside the state folder.
+With `--state-dir`, `backup` needs no project.
+
+Every snapshot has a `manifest.json`, which lists every other file it holds, sorted by path:
+
+```json
+{
+  "v": 1,
+  "rayfinLocal": "0.2.4",
+  "createdAt": "2026-01-01T12:00:00Z",
+  "files": [
+    {"path": "db.sqlite", "size": 98304, "sha256": "…64 lowercase hex digits…"},
+    {"path": "keys/es256.pk8", "size": 138, "sha256": "…"},
+    {"path": "secrets.json", "size": 41, "sha256": "…"},
+    {"path": "state.json", "size": 312, "sha256": "…"},
+    {"path": "storage/photos/a.jpg", "size": 5120, "sha256": "…"}
+  ]
+}
+```
+
+`path` is relative to the snapshot, with `/` separators; `size` is in bytes; `createdAt` is RFC 3339 UTC.
+`v` is the manifest's version: additive fields keep it, and `restore` refuses any other.
+
+`restore` reads the manifest first and refuses it unless every path is `db.sqlite`, `secrets.json`, `state.json` or a file under `keys/` or `storage/`, none twice, and `db.sqlite` is among them.
+It then copies the listed files into a sibling of the state folder, checking each one's size and SHA-256, and moves them into the state folder, `db.sqlite` last, only when all of them match.
+Files the manifest doesn't list are ignored.
+The state folder is created when missing; an existing one must hold none of `db.sqlite` (or its `-wal`, `-shm`, `-journal`), `keys/`, `storage/`, `secrets.json` or `state.json`, and no `serve` may run it: `restore` holds the serve lock while it writes.
+A refused or failed restore moves none of the snapshot's files into the state folder; a snapshot refused as `snapshot-invalid` doesn't create a missing one either.
+
+With `--json`, each prints one line on stdout and exits 0:
+
+```json
+{"type":"backup","v":1,"out":"/abs/path/to/dir","files":5,"bytes":104000}
+{"type":"restore","v":1,"files":5,"bytes":104000}
+```
+
+`out` is the snapshot folder as an absolute path; `files` and `bytes` count the files the manifest lists.
+On failure the line is `{"type":"error","code":"…","message":"…"}` and the exit code is 1:
+
+| Code | Command | Meaning |
+| --- | --- | --- |
+| `state-missing` | `backup` | The state folder has no `db.sqlite`. |
+| `out-not-empty` | `backup` | `<dir>` is a file, or a folder that isn't empty. |
+| `out-invalid` | `backup` | `<dir>` is inside the state folder. |
+| `backup-failed` | `backup` | Copying or hashing failed; a `<dir>` the backup created is removed, an empty one emptied again. |
+| `snapshot-invalid` | `restore` | `manifest.json` is missing or invalid, or a file is missing or doesn't match its size or SHA-256. |
+| `state-exists` | `restore` | The state folder already holds state. |
+| `already-serving` | `restore` | A `serve` runs the state folder. |
+| `restore-failed` | `restore` | Copying or moving failed. |
+| `project-not-found`, `config-invalid`, `internal` | both | As for [`serve`](#warning-and-error). |
+
+Without `--json`, success is a line on stderr and failure a message on stderr, with exit code 1.
+
+A host that keeps the state on local disk (see [the state folder](#the-state-folder)) saves it with `backup` into a new local folder, while the app keeps running, and then copies that folder to durable storage.
+To bring the app back on a new machine, it copies the snapshot to local disk, may check `manifest.json` itself (every listed file present with its size and SHA-256), runs `restore --from <dir> --state-dir <empty folder>` before starting `serve`, and starts `serve` with the same `--state-dir`.
 
 ## Doctor
 

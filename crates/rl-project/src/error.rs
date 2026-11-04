@@ -119,6 +119,16 @@ pub enum ProjectError {
     )]
     EnvFileNotFound { path: PathBuf },
 
+    /// The state folder requested with `--state-dir` is the project root or one of its parents
+    /// (`rayfin-local reset` deletes the state folder).
+    #[error(
+        "The state folder {} would hold the project {}. Pass a --state-dir that is not the \
+         project root or one of its parents.",
+        .path.display(),
+        .root.display()
+    )]
+    InvalidStateDir { path: PathBuf, root: PathBuf },
+
     /// The project's npm dependencies are not installed.
     #[error(
         "{package} is not installed: there is no node_modules/{package} in {} or its parents. Run \

@@ -2,7 +2,6 @@
 //! SQLite DDL of its entity tables.
 
 use std::fmt::Write as _;
-use std::path::Path;
 use std::process::ExitCode;
 
 use rl_model::{
@@ -14,8 +13,8 @@ use rl_project::LocalState;
 use crate::analysis;
 use crate::ui::{Color, Painter};
 
-pub async fn run(dir: &Path, verbose: bool) -> anyhow::Result<ExitCode> {
-    let project = super::load_project(dir)?;
+pub async fn run(location: &super::Location, verbose: bool) -> anyhow::Result<ExitCode> {
+    let project = super::load_project(location)?;
     let state = LocalState::load_or_create(&project)?;
     let node = super::find_node().await?;
     let (model, _) = analysis::analyze(&project, &state, &node, verbose).await?;

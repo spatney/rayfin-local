@@ -40,7 +40,7 @@ use rl_db::{Db, MigrationReport};
 use rl_graphql::DataApi;
 use rl_model::AppModel;
 use rl_node::NodeRuntime;
-use rl_project::{LocalState, Project};
+use rl_project::{LoadOptions, LocalState, Project};
 use rl_server::{RouterHandle, StaticSite};
 use rl_tokens::TokenBroker;
 use serde::Serialize;
@@ -295,6 +295,8 @@ struct Paths {
     /// The `rayfin/tsconfig.json` the analysis compiles with (it may not exist yet).
     tsconfig: PathBuf,
     connectors_dir: PathBuf,
+    /// The state folder: only its `secrets.json` is a source; the rest is what `serve` writes.
+    state_dir: PathBuf,
     secrets: PathBuf,
     functions_dir: PathBuf,
     /// The functions' `local.settings.json`.
@@ -311,6 +313,7 @@ impl Paths {
             storage_dir: project.storage_schema_dir(),
             tsconfig: analysis::rayfin_tsconfig(project),
             connectors_dir: project.rayfin_dir().join("connectors"),
+            state_dir: state.dir().to_owned(),
             secrets: state.secrets_path(),
             settings: functions_dir.join("local.settings.json"),
             functions_dir,
@@ -349,6 +352,8 @@ impl Sources {
             Some(Change::Config)
         } else if path == paths.secrets || path == paths.settings {
             Some(Change::Secrets)
+        } else if path.starts_with(&paths.state_dir) {
+            None
         } else if (moved && path == paths.functions_dir)
             || path == paths.functions_dir.join("package.json")
         {
@@ -945,7 +950,11 @@ impl Reloader {
     /// restart is needed. A file that can't be read is reported (`config-invalid`), and the
     /// previous configuration stays in use.
     fn reload_config(&mut self, update: &mut Update) -> anyhow::Result<()> {
-        let project = Project::load(self.live.project.root()).map_err(|err| {
+        let options = LoadOptions {
+            state_dir: Some(self.live.project.state_dir()),
+            ..LoadOptions::default()
+        };
+        let project = Project::load_with(self.live.project.root(), &options).map_err(|err| {
             let err = coded(
                 ErrorCode::ConfigInvalid,
                 events::no_details(),
@@ -1441,6 +1450,45 @@ mod tests {
     }
 
     #[test]
+    fn a_state_folder_inside_the_sources_only_reloads_its_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = |path: &str| {
+            path.split('/')
+                .fold(dir.path().to_owned(), |path, part| path.join(part))
+        };
+        let sources = Sources {
+            paths: Arc::new(RwLock::new(Paths {
+                config: at("rayfin/rayfin.yml"),
+                local_config: at("rayfin-local.toml"),
+                data_dir: at("rayfin/data"),
+                storage_dir: at("rayfin/storage"),
+                tsconfig: at("rayfin/tsconfig.json"),
+                connectors_dir: at("rayfin/connectors"),
+                state_dir: at("rayfin/data/state"),
+                secrets: at("rayfin/data/state/secrets.json"),
+                functions_dir: at("rayfin/functions"),
+                settings: at("rayfin/functions/local.settings.json"),
+            })),
+            files: Arc::default(),
+            packages: Arc::new(RwLock::new(vec![Package {
+                root: at("rayfin/data"),
+                skipped: BTreeSet::new(),
+            }])),
+        };
+
+        let edit = EventKind::Modify(ModifyKind::Any);
+        let cases = [
+            ("rayfin/data/state/secrets.json", Some(Change::Secrets)),
+            ("rayfin/data/state/db.sqlite-wal", None),
+            ("rayfin/data/state/cache/compiled/model.js", None),
+            ("rayfin/data/todo.ts", Some(Change::Model)),
+        ];
+        for (path, change) in cases {
+            assert_eq!(sources.classify(&at(path), &edit), change, "{path}");
+        }
+    }
+
+    #[test]
     fn changes_are_followed_in_the_model_folders_and_the_files_read_outside_them() {
         use notify::event::{CreateKind, RemoveKind};
 
@@ -1464,6 +1512,7 @@ mod tests {
                 storage_dir: at("rayfin/storage"),
                 tsconfig: at("rayfin/tsconfig.json"),
                 connectors_dir: at("rayfin/connectors"),
+                state_dir: at(".rayfin-local"),
                 secrets: at(".rayfin-local/secrets.json"),
                 functions_dir: at("rayfin/functions"),
                 settings: at("rayfin/functions/local.settings.json"),

@@ -10,6 +10,7 @@ mod integrations;
 mod ports;
 mod reload;
 mod shutdown;
+mod snapshot;
 mod tokens;
 mod ui;
 
@@ -29,6 +30,7 @@ use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
+use crate::commands::Location;
 use crate::commands::serve::ServeOptions;
 use crate::errors::HostError;
 use crate::events::{StopReason, Stopped};
@@ -46,6 +48,16 @@ struct Cli {
     #[arg(short = 'C', long = "project", global = true, value_name = "DIR")]
     project: Option<PathBuf>,
 
+    /// The folder for rayfin-local's state (database, keys, stored files, secrets, caches)
+    /// instead of the project's .rayfin-local; relative to the current directory.
+    #[arg(
+        long = "state-dir",
+        global = true,
+        value_name = "PATH",
+        env = "RAYFIN_LOCAL_STATE_DIR"
+    )]
+    state_dir: Option<PathBuf>,
+
     /// Show detailed logs.
     #[arg(short, long, global = true)]
     verbose: bool,
@@ -58,7 +70,7 @@ struct Cli {
 enum Command {
     /// Start the app with a local backend.
     Serve(ServeArgs),
-    /// Delete the local state (.rayfin-local): database, users, keys and stored files.
+    /// Delete the state folder (.rayfin-local, or --state-dir): database, users, keys, files.
     Reset {
         /// Do not ask for confirmation.
         #[arg(short, long)]
@@ -78,6 +90,25 @@ enum Command {
     /// Set, list and delete the local values of the secrets declared in rayfin.yml.
     #[command(subcommand)]
     Secret(commands::secret::SecretCommand),
+    /// Snapshot the state folder (database, keys, stored files, secrets) into a new folder, with
+    /// a manifest; safe while `serve` runs.
+    Backup {
+        /// The folder to write the snapshot to; it must not exist or be empty.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+        /// Print the result, or the error, as one JSON line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore a snapshot from `backup` into a state folder that has no state yet.
+    Restore {
+        /// The snapshot folder (with its manifest.json).
+        #[arg(long, value_name = "DIR")]
+        from: PathBuf,
+        /// Print the result, or the error, as one JSON line.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the version, with the host contract's version and the Rayfin SDK it supports.
     Version {
         /// Print one JSON object.
@@ -126,7 +157,7 @@ struct ServeArgs {
     #[arg(long)]
     force_schema: bool,
     /// Start from an empty database: delete the users, entity data and stored files (keeps the
-    /// ports, publishable key, keys, secrets and caches in .rayfin-local).
+    /// ports, publishable key, keys, secrets and caches in the state folder).
     #[arg(long)]
     reset: bool,
     /// Start the function host with the Node inspector (default port 9229).
@@ -137,6 +168,11 @@ struct ServeArgs {
     /// `[auth] sign_in_as` in rayfin-local.toml, else developer).
     #[arg(long, value_name = "WHO")]
     sign_in_as: Option<SignInAs>,
+    /// Open POST /.rayfin-local/dev/developer-session: a session for the local developer account
+    /// (never your Entra identity), with a refresh token, for a host that proxies the app on this
+    /// machine. Answers loopback requests without an Origin header, with no secret.
+    #[arg(long)]
+    developer_session: bool,
     /// Open the app in the browser once it is ready (not with --json).
     #[arg(long)]
     open: bool,
@@ -179,6 +215,7 @@ impl ServeArgs {
             reset: self.reset,
             inspect: self.inspect,
             sign_in_as: self.sign_in_as,
+            developer_session: self.developer_session,
             open: self.open,
             verbose,
         }
@@ -236,20 +273,22 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     rl_node::init_process_supervision()?;
-    let dir = project_dir(cli.project.as_deref())?;
+    let location = location(cli.project.as_deref(), cli.state_dir.as_deref())?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
     let result = runtime.block_on(async move {
         match cli.command {
             Command::Serve(args) => {
-                commands::serve::run(&dir, args.into_options(cli.verbose)).await
+                commands::serve::run(&location, args.into_options(cli.verbose)).await
             }
-            Command::Reset { yes } => commands::reset::run(&dir, yes),
-            Command::Doctor { json } => commands::doctor::run(&dir, json).await,
-            Command::Schema => commands::schema::run(&dir, cli.verbose).await,
-            Command::Users(command) => commands::users::run(&dir, command).await,
-            Command::Secret(command) => commands::secret::run(&dir, command),
+            Command::Reset { yes } => commands::reset::run(&location, yes),
+            Command::Doctor { json } => commands::doctor::run(&location, json).await,
+            Command::Schema => commands::schema::run(&location, cli.verbose).await,
+            Command::Users(command) => commands::users::run(&location, command).await,
+            Command::Secret(command) => commands::secret::run(&location, command),
+            Command::Backup { out, json } => commands::backup::run(&location, &out, json),
+            Command::Restore { from, json } => commands::restore::run(&location, &from, json),
             Command::Version { json } => Ok(commands::version::run(json)),
         }
     });
@@ -259,14 +298,19 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     result
 }
 
-/// `-C` (relative to the current directory), else the current directory.
-fn project_dir(project: Option<&Path>) -> anyhow::Result<PathBuf> {
+/// `-C` (relative to the current directory), else the current directory; and `--state-dir`
+/// (relative to the current directory).
+fn location(project: Option<&Path>, state_dir: Option<&Path>) -> anyhow::Result<Location> {
     let cwd = std::env::current_dir()
         .map_err(|err| anyhow::anyhow!("Could not read the current directory: {err}"))?;
-    Ok(match project {
+    let dir = match project {
         Some(dir) => cwd.join(dir),
-        None => cwd,
-    })
+        None => cwd.clone(),
+    };
+    let state_dir = state_dir
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| cwd.join(dir));
+    Ok(Location { dir, state_dir })
 }
 
 /// Logs go to stderr in the style of the status lines (see [`LogFormat`]): `info` for

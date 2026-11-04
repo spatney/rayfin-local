@@ -39,8 +39,10 @@ pub struct AnalyzeInput {
     pub storage_dir: Option<PathBuf>,
     /// `rayfin/tsconfig.json`; `None` compiles with built-in defaults.
     pub tsconfig_path: Option<PathBuf>,
-    /// Where the compiled JavaScript goes, emptied first. Inside the project it must be under
-    /// `.rayfin-local/` (the helper refuses anything else).
+    /// rayfin-local's state folder (`<project>/.rayfin-local` unless `--state-dir` moves it).
+    pub state_dir: PathBuf,
+    /// Where the compiled JavaScript goes, emptied first. It must be inside `state_dir` (the
+    /// helper refuses anything else).
     pub out_dir: PathBuf,
     /// `services.data.dialect`.
     pub dialect: Dialect,
@@ -52,18 +54,21 @@ pub struct AnalyzeInput {
 
 impl AnalyzeInput {
     /// The usual layout: entities in `rayfin/data`, `rayfin/tsconfig.json` when it exists, and the
-    /// compiled output in `.rayfin-local/cache/compiled`.
-    pub fn for_project(project_root: &Path, dialect: Dialect, storage: bool) -> Self {
+    /// compiled output in `<state_dir>/cache/compiled`.
+    pub fn for_project(
+        project_root: &Path,
+        state_dir: &Path,
+        dialect: Dialect,
+        storage: bool,
+    ) -> Self {
         let tsconfig = project_root.join("rayfin").join("tsconfig.json");
         Self {
             project_root: project_root.to_path_buf(),
             data_dir: project_root.join("rayfin").join("data"),
             storage_dir: None,
             tsconfig_path: tsconfig.is_file().then_some(tsconfig),
-            out_dir: project_root
-                .join(".rayfin-local")
-                .join("cache")
-                .join("compiled"),
+            state_dir: state_dir.to_path_buf(),
+            out_dir: state_dir.join("cache").join("compiled"),
             dialect,
             storage,
             verbose: false,
@@ -86,8 +91,9 @@ pub struct ConnectorsAnalyzeInput {
     pub project_root: PathBuf,
     /// The project's `rayfin/tsconfig.json`; `None` compiles with built-in defaults.
     pub tsconfig_path: Option<PathBuf>,
-    /// Where the compiled JavaScript goes (emptied first; under `.rayfin-local/` inside the
-    /// project).
+    /// rayfin-local's state folder (`<project>/.rayfin-local` unless `--state-dir` moves it).
+    pub state_dir: PathBuf,
+    /// Where the compiled JavaScript goes (emptied first; inside `state_dir`).
     pub out_dir: PathBuf,
     pub connectors: Vec<ConnectorSource>,
     /// Echo the analyzer's log to the helper's stderr.
@@ -108,17 +114,19 @@ pub struct ConnectorSource {
 
 impl ConnectorsAnalyzeInput {
     /// The usual layout: `rayfin/tsconfig.json` when it exists, and the compiled output in
-    /// `.rayfin-local/cache/compiled-connectors`.
-    pub fn for_project(project_root: &Path, connectors: Vec<ConnectorSource>) -> Self {
+    /// `<state_dir>/cache/compiled-connectors`.
+    pub fn for_project(
+        project_root: &Path,
+        state_dir: &Path,
+        connectors: Vec<ConnectorSource>,
+    ) -> Self {
         let tsconfig = project_root.join("rayfin").join("tsconfig.json");
         Self {
             mode: "connectors",
             project_root: project_root.to_path_buf(),
             tsconfig_path: tsconfig.is_file().then_some(tsconfig),
-            out_dir: project_root
-                .join(".rayfin-local")
-                .join("cache")
-                .join("compiled-connectors"),
+            state_dir: state_dir.to_path_buf(),
+            out_dir: state_dir.join("cache").join("compiled-connectors"),
             connectors,
             verbose: false,
         }

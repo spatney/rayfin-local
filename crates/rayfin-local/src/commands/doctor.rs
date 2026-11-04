@@ -3,7 +3,6 @@
 
 use std::fmt::Display;
 use std::io::Write as _;
-use std::path::Path;
 use std::process::ExitCode;
 
 use rl_node::NodeRuntime;
@@ -18,7 +17,7 @@ use crate::ui::{Color, Painter};
 
 const DEFAULT_HOST: &str = "127.0.0.1";
 
-pub async fn run(dir: &Path, json: bool) -> anyhow::Result<ExitCode> {
+pub async fn run(location: &super::Location, json: bool) -> anyhow::Result<ExitCode> {
     let mut report = Report::new(json);
     let node = match NodeRuntime::discover().await {
         Ok(node) => {
@@ -36,7 +35,7 @@ pub async fn run(dir: &Path, json: bool) -> anyhow::Result<ExitCode> {
         }
     };
 
-    let project = match Project::discover(dir) {
+    let project = match location.discover() {
         Ok(project) => {
             report.check(
                 "project",

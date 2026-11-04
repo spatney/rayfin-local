@@ -79,10 +79,10 @@ fn analyze_js_reproduces_the_golden_analysis() {
     let Some((node, project)) = prerequisites() else {
         return;
     };
-    // Outside the project, so the helper must resolve the project's packages itself.
+    // A state folder outside the project, so the helper must resolve the project's packages
+    // itself.
     let scratch = Path::new(env!("CARGO_TARGET_TMPDIR")).join("rl-model-analyze-golden");
-    let mut input = AnalyzeInput::for_project(&project, Dialect::Mssql, true);
-    input.out_dir = scratch.join("compiled");
+    let input = AnalyzeInput::for_project(&project, &scratch, Dialect::Mssql, true);
     let output = run(&node, &project, &input.to_json(), &scratch);
     assert_eq!(output["ok"], true, "{output}");
     let golden: Value = serde_json::from_str(include_str!("fixtures/basic.analysis.json")).unwrap();
@@ -100,18 +100,24 @@ fn analyze_js_reproduces_the_golden_analysis() {
 }
 
 #[test]
-fn analyze_js_writes_inside_a_project_only_under_rayfin_local() {
+fn analyze_js_writes_only_inside_the_state_folder() {
     let Some((node, project)) = prerequisites() else {
         return;
     };
     let scratch = Path::new(env!("CARGO_TARGET_TMPDIR")).join("rl-model-analyze-outdir");
-    let mut input = AnalyzeInput::for_project(&project, Dialect::Mssql, false);
-    input.out_dir = project.join("rayfin").join("compiled");
-    let output = run(&node, &project, &input.to_json(), &scratch);
-    assert_eq!(output["ok"], false, "{output}");
-    let message = output["error"]["message"].as_str().unwrap();
-    assert!(message.contains(".rayfin-local"), "{message}");
-    assert!(!input.out_dir.exists());
+    let state_dir = scratch.join("state");
+    for out_dir in [
+        project.join("rayfin").join("compiled"),
+        scratch.join("compiled"),
+    ] {
+        let mut input = AnalyzeInput::for_project(&project, &state_dir, Dialect::Mssql, false);
+        input.out_dir = out_dir;
+        let output = run(&node, &project, &input.to_json(), &scratch);
+        assert_eq!(output["ok"], false, "{output}");
+        let message = output["error"]["message"].as_str().unwrap();
+        assert!(message.contains("inside the state folder"), "{message}");
+        assert!(!input.out_dir.exists());
+    }
 }
 
 /// The `connectors` fixture app (the `inventory` SQL connector), with its packages installed.
@@ -144,9 +150,11 @@ fn analyze_js_reproduces_the_golden_connector_analysis() {
         dir: project.join("rayfin").join("connectors").join(name),
         dialect: "mssql".to_owned(),
     };
-    let mut input =
-        ConnectorsAnalyzeInput::for_project(&project, vec![source("inventory"), source("missing")]);
-    input.out_dir = scratch.join("compiled");
+    let input = ConnectorsAnalyzeInput::for_project(
+        &project,
+        &scratch,
+        vec![source("inventory"), source("missing")],
+    );
     let output = run(&node, &project, &input.to_json(), &scratch);
     assert_eq!(output["ok"], true, "{output}");
     let connectors = &output["result"]["connectors"];

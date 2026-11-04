@@ -15,11 +15,11 @@ Each service has a local stand-in:
 
 | Path | Purpose |
 | --- | --- |
-| `crates/rayfin-local` | The binary: CLI (`clap`), `serve` orchestration and supervision. |
-| `crates/rl-project` | Project discovery; `rayfin.yml`, `rayfin/.env`, `package.json`, `rayfin-local.toml`; the `.rayfin-local/` state folder. |
+| `crates/rayfin-local` | The binary: CLI (`clap`), `serve` orchestration and supervision; `backup`/`restore` snapshots of the state folder (`snapshot.rs`). |
+| `crates/rl-project` | Project discovery; `rayfin.yml`, `rayfin/.env`, `package.json`, `rayfin-local.toml`; the state folder (`.rayfin-local/`, or `--state-dir`). |
 | `crates/rl-node` | Node discovery, embedded JS helpers (`run_helper`), supervised process trees (`ManagedChild`). |
 | `crates/rl-model` | The app model (IR) from `@microsoft/rayfin-core`'s analyzer; `Caller`/`CallerResolver` (request identity). |
-| `crates/rl-db` | The SQLite handle (`Db`), component migrations, entity DDL and schema migrations. |
+| `crates/rl-db` | The SQLite handle (`Db`), component migrations, entity DDL and schema migrations; online backup (`backup_to`). |
 | `crates/rl-graphql` | `POST /graphql`: DAB-compatible queries, mutations, aggregations and policies over SQLite; the same front end over T-SQL (`tsql`) for SQL connectors. |
 | `crates/rl-auth` | `/api/auth/v1/*`, JWKS, runtime settings, the sign-in popup portal, the Entra exchange; implements `CallerResolver`. |
 | `crates/rl-tokens` | `TokenSource`: Azure tokens for the developer (az CLI, Rayfin CLI login, env overrides); `Audience` scopes. |
@@ -76,7 +76,8 @@ Never modify files in it, except generated artifacts that `rayfin dev` would als
 - **Errors are actionable:** say what failed and what to do (for example, "run `az login`").
 - **Privacy:** never log access tokens, refresh tokens, passwords, secrets or Entra tokens.
   Keep identity claims (email, oid) out of info-level logs.
-- **Local state:** everything rayfin-local writes goes under `<project>/.rayfin-local/`.
+- **Local state:** everything rayfin-local writes goes under the state folder, `Project::state_dir()`: `<project>/.rayfin-local/` unless `--state-dir` moves it.
+  Never join `.rayfin-local` onto the project root yourself.
   That folder has its own `.gitignore` containing `*`.
 - **Tests:** focused tests for the behavior you add.
   Unit tests sit next to the code (`#[cfg(test)]`); integration tests go in `crates/<crate>/tests/`.

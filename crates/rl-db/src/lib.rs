@@ -138,6 +138,64 @@ fn configure(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// How long [`backup_to`] waits for a busy or locked source.
+const BACKUP_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// The pause between [`backup_to`]'s attempts.
+const BACKUP_RETRY: Duration = Duration::from_millis(50);
+
+/// Copies the database file `src` into `dest`, a new self-contained file (no `-wal` or `-shm`),
+/// with SQLite's online backup. Safe while other connections, in this process or another, write
+/// `src`: the copy is one consistent snapshot that includes the transactions committed to the
+/// write-ahead log but not checkpointed yet. `src` is never created; `dest` must not exist.
+pub fn backup_to(src: &Path, dest: &Path) -> Result<(), DbError> {
+    use rusqlite::OpenFlags;
+
+    let source = Connection::open_with_flags(
+        src,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    source.busy_timeout(BACKUP_BUSY_TIMEOUT)?;
+    let mut copy = Connection::open_with_flags(
+        dest,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    // All pages in one step (-1): the read transaction holds one snapshot throughout, and a WAL
+    // writer is never blocked by it. Busy or locked only while a checkpoint or another writer
+    // holds the file; retried for as long as the busy timeout.
+    {
+        use rusqlite::backup::{Backup, StepResult};
+
+        let backup = Backup::new(&source, &mut copy)?;
+        let mut waited = Duration::ZERO;
+        loop {
+            match backup.step(-1)? {
+                StepResult::Done => break,
+                StepResult::More | StepResult::Busy | StepResult::Locked
+                    if waited < BACKUP_BUSY_TIMEOUT =>
+                {
+                    std::thread::sleep(BACKUP_RETRY);
+                    waited += BACKUP_RETRY;
+                }
+                _ => {
+                    return Err(rusqlite::Error::SqliteFailure(
+                        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+                        Some("the database stayed busy for the whole backup".into()),
+                    )
+                    .into());
+                }
+            }
+        }
+    }
+    // The copied header says WAL; a rollback journal keeps the file self-contained.
+    copy.pragma_update_and_check(None, "journal_mode", "DELETE", |row| {
+        row.get::<_, String>(0)
+    })?;
+    copy.close().map_err(|(_, err)| err)?;
+    Ok(())
+}
+
 fn migrate(conn: &mut Connection, component: &str, steps: &[&str]) -> Result<(), DbError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS _rl_migrations (
@@ -222,6 +280,56 @@ mod tests {
         db.migrate_component("test", STEPS).await.unwrap();
         let err = db.migrate_component("test", &STEPS[..1]).await.unwrap_err();
         assert!(matches!(err, DbError::NewerSchema { found: 2, .. }));
+    }
+
+    #[test]
+    fn a_backup_includes_the_writes_still_in_the_write_ahead_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("db.sqlite");
+        let db = Db::open(&src).unwrap();
+        db.call_blocking(|c| {
+            c.execute_batch(
+                "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT);
+                 INSERT INTO t (name) VALUES ('a'), ('b'), ('c');",
+            )
+        })
+        .unwrap();
+        // The writer stays open, so nothing has been checkpointed into the main file.
+        assert!(
+            std::fs::metadata(dir.path().join("db.sqlite-wal"))
+                .unwrap()
+                .len()
+                > 0
+        );
+
+        let dest = dir.path().join("copy.sqlite");
+        backup_to(&src, &dest).unwrap();
+        db.call_blocking(|c| c.execute("INSERT INTO t (name) VALUES ('later')", []))
+            .unwrap();
+
+        assert!(!dir.path().join("copy.sqlite-wal").exists());
+        assert!(!dir.path().join("copy.sqlite-shm").exists());
+        let copy = Connection::open(&dest).unwrap();
+        let mode: String = copy
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        let names: Vec<String> = copy
+            .prepare("SELECT name FROM t ORDER BY id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(names, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_backup_never_creates_its_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("missing.sqlite");
+        assert!(backup_to(&src, &dir.path().join("copy.sqlite")).is_err());
+        assert!(!src.exists());
     }
 
     #[test]
