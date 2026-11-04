@@ -312,7 +312,7 @@ A running `serve` picks up a changed value there or in `local.settings.json` by 
 rayfin-local keeps its state in `.rayfin-local/` at the project root.
 The folder has its own `.gitignore` (`*`), so none of it is committed.
 `--state-dir <PATH>` (or `RAYFIN_LOCAL_STATE_DIR`; the option wins) puts the whole folder somewhere else, relative to the current directory: on local disk when the project sits on a network drive, which can't hold a live SQLite database, for example.
-Pass the same folder to every command (`serve`, `reset`, `users`, `secret`); the `.gitignore` is written there too, and the project root or one of its parents is refused.
+Pass the same folder to every command (`serve`, `reset`, `users`, `secret`, `backup`, `restore`); the `.gitignore` is written there too, and the project root or one of its parents is refused.
 Outside it, rayfin-local writes only build output: what your build commands produce (such as `dist/`) and the functions' `runtimemetadata.json`, which `rayfin dev` also generates.
 
 | Path | Holds |
@@ -327,6 +327,14 @@ Outside it, rayfin-local writes only build output: what your build commands prod
 
 - `rayfin-local serve --reset` starts from an empty database: it deletes `db.sqlite` (data, users and sessions) and `storage/`, and keeps the rest.
 - `rayfin-local reset` deletes the whole folder after asking (`--yes` skips the question).
+
+### Backup and restore
+
+`rayfin-local backup --out <DIR>` copies the state into a new or empty folder, also while `serve` runs and writes: the database through SQLite's online backup, as one self-contained `db.sqlite`, and `keys/`, `storage/`, `secrets.json` and `state.json` as they are.
+It never copies `cache/`, `serve.lock`, `serve.json` or the database's `-wal` and `-shm` files, and writes `manifest.json`: every file's size and SHA-256.
+`rayfin-local restore --from <DIR>` checks every file against that manifest, then moves them into a state folder that holds no state yet (no database, keys, stored files, secrets or `state.json`), while no `serve` runs it.
+A snapshot that doesn't match its manifest is refused, and nothing is written.
+Both take `--json` for one JSON result line (see [docs/embedding.md](docs/embedding.md#backup-and-restore)).
 
 ## Schema changes
 
@@ -413,6 +421,8 @@ With `anonymous_data_access = false`, `serve` refuses such entities, as `rayfin 
 | `rayfin-local schema` | Print the app model and the SQLite schema derived from `rayfin/data`. |
 | `rayfin-local reset [--yes]` | Delete the state folder (`.rayfin-local/`): database, users, keys, stored files and secrets. |
 | `rayfin-local users list\|add\|delete\|reset-password` | Manage local users. |
+| `rayfin-local backup --out <DIR> [--json]` | Snapshot the state folder into `<DIR>` (new or empty), also while `serve` runs (see [Backup and restore](#backup-and-restore)). |
+| `rayfin-local restore --from <DIR> [--json]` | Verify a snapshot against its `manifest.json` and move it into an empty state folder. |
 | `rayfin-local secret set\|list\|delete` | Manage local secret values (the state folder's `secrets.json`); `secret list --json` prints them as JSON (never the values). |
 | `rayfin-local version [--json]` | Print the version; with `--json`, also the version of the host contract and the Rayfin SDK versions it supports. |
 

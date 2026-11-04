@@ -10,6 +10,7 @@ mod integrations;
 mod ports;
 mod reload;
 mod shutdown;
+mod snapshot;
 mod tokens;
 mod ui;
 
@@ -89,6 +90,25 @@ enum Command {
     /// Set, list and delete the local values of the secrets declared in rayfin.yml.
     #[command(subcommand)]
     Secret(commands::secret::SecretCommand),
+    /// Snapshot the state folder (database, keys, stored files, secrets) into a new folder, with
+    /// a manifest; safe while `serve` runs.
+    Backup {
+        /// The folder to write the snapshot to; it must not exist or be empty.
+        #[arg(long, value_name = "DIR")]
+        out: PathBuf,
+        /// Print the result, or the error, as one JSON line.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore a snapshot from `backup` into a state folder that has no state yet.
+    Restore {
+        /// The snapshot folder (with its manifest.json).
+        #[arg(long, value_name = "DIR")]
+        from: PathBuf,
+        /// Print the result, or the error, as one JSON line.
+        #[arg(long)]
+        json: bool,
+    },
     /// Print the version, with the host contract's version and the Rayfin SDK it supports.
     Version {
         /// Print one JSON object.
@@ -267,6 +287,8 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
             Command::Schema => commands::schema::run(&location, cli.verbose).await,
             Command::Users(command) => commands::users::run(&location, command).await,
             Command::Secret(command) => commands::secret::run(&location, command),
+            Command::Backup { out, json } => commands::backup::run(&location, &out, json),
+            Command::Restore { from, json } => commands::restore::run(&location, &from, json),
             Command::Version { json } => Ok(commands::version::run(json)),
         }
     });

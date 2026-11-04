@@ -84,13 +84,6 @@ impl LocalState {
 
     fn load_or_create_in(dir: &Path, env: &EnvFile) -> Result<Self, ProjectError> {
         create_state_dir(dir)?;
-        let gitignore = dir.join(".gitignore");
-        if !gitignore.exists() {
-            write_atomic(&gitignore, b"*\n").map_err(|source| ProjectError::Write {
-                path: gitignore,
-                source,
-            })?;
-        }
         for name in SUBDIRECTORIES {
             create_dir(&dir.join(name))?;
         }
@@ -209,41 +202,16 @@ impl LocalState {
     /// while another process holds it. The operating system releases the lock when this process
     /// ends, so a crash leaves no stale lock.
     pub fn lock_serve(&self) -> Result<ServeLock, ProjectError> {
-        let path = self.dir.join(SERVE_LOCK_FILE);
-        let info_path = self.dir.join(SERVE_INFO_FILE);
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&path)
-            .map_err(|source| ProjectError::Write {
-                path: path.clone(),
-                source,
-            })?;
-        match file.try_lock() {
-            Ok(()) => {
-                let lock = ServeLock {
-                    info_path,
-                    file: Some(file),
-                };
-                lock.publish(&ServeInfo {
-                    pid: std::process::id(),
-                    ..ServeInfo::default()
-                })?;
-                Ok(lock)
-            }
-            Err(TryLockError::WouldBlock) => Err(ProjectError::AlreadyServing {
-                info: read_serve_info(&info_path),
-            }),
-            // A file system without locks: serve without the check.
-            Err(TryLockError::Error(err)) => {
-                tracing::debug!("could not lock {}: {err}", path.display());
-                Ok(ServeLock {
-                    info_path,
-                    file: None,
-                })
-            }
-        }
+        lock_existing(&self.dir)
+    }
+
+    /// Takes the `serve` lock of the state folder `dir` without opening the state in it, for
+    /// commands that replace its contents (`restore`): creates the folder (with its
+    /// `.gitignore`) if needed, and fails with [`ProjectError::AlreadyServing`] while a
+    /// `rayfin-local serve` (or another such command) holds the lock.
+    pub fn lock_dir(dir: &Path) -> Result<ServeLock, ProjectError> {
+        create_state_dir(dir)?;
+        lock_existing(dir)
     }
 
     /// The contents of `state.json`.
@@ -331,9 +299,48 @@ fn create_dir(dir: &Path) -> Result<(), ProjectError> {
     })
 }
 
-/// Creates the state folder `dir`. On Unix, only its owner may open it, which keeps the keys, the
-/// database and the secrets in it private; a folder an earlier version made open to others is
-/// closed.
+/// Takes the `serve` lock of the existing state folder `dir` (see [`LocalState::lock_serve`]).
+fn lock_existing(dir: &Path) -> Result<ServeLock, ProjectError> {
+    let path = dir.join(SERVE_LOCK_FILE);
+    let info_path = dir.join(SERVE_INFO_FILE);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|source| ProjectError::Write {
+            path: path.clone(),
+            source,
+        })?;
+    match file.try_lock() {
+        Ok(()) => {
+            let lock = ServeLock {
+                info_path,
+                file: Some(file),
+            };
+            lock.publish(&ServeInfo {
+                pid: std::process::id(),
+                ..ServeInfo::default()
+            })?;
+            Ok(lock)
+        }
+        Err(TryLockError::WouldBlock) => Err(ProjectError::AlreadyServing {
+            info: read_serve_info(&info_path),
+        }),
+        // A file system without locks: serve without the check.
+        Err(TryLockError::Error(err)) => {
+            tracing::debug!("could not lock {}: {err}", path.display());
+            Ok(ServeLock {
+                info_path,
+                file: None,
+            })
+        }
+    }
+}
+
+/// Creates the state folder `dir`, with its `.gitignore` (`*`). On Unix, only its owner may open
+/// it, which keeps the keys, the database and the secrets in it private; a folder an earlier
+/// version made open to others is closed.
 fn create_state_dir(dir: &Path) -> Result<(), ProjectError> {
     let failed = |source| ProjectError::Write {
         path: dir.to_path_buf(),
@@ -352,6 +359,13 @@ fn create_state_dir(dir: &Path) -> Result<(), ProjectError> {
             std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
                 .map_err(failed)?;
         }
+    }
+    let gitignore = dir.join(".gitignore");
+    if !gitignore.exists() {
+        write_atomic(&gitignore, b"*\n").map_err(|source| ProjectError::Write {
+            path: gitignore,
+            source,
+        })?;
     }
     Ok(())
 }
@@ -563,6 +577,29 @@ mod tests {
         assert!(!dir.join(SERVE_INFO_FILE).exists());
         assert!(ensure_not_serving(&dir).is_ok());
         drop(state.lock_serve().unwrap());
+    }
+
+    #[test]
+    fn locking_a_state_folder_creates_it_and_excludes_serve() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("state");
+        let lock = LocalState::lock_dir(&dir).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join(".gitignore")).unwrap(),
+            "*\n"
+        );
+        let state = LocalState::load_or_create_in(&dir, &EnvFile::default()).unwrap();
+        assert!(matches!(
+            state.lock_serve(),
+            Err(ProjectError::AlreadyServing { .. })
+        ));
+        drop(lock);
+        let serving = state.lock_serve().unwrap();
+        assert!(matches!(
+            LocalState::lock_dir(&dir),
+            Err(ProjectError::AlreadyServing { .. })
+        ));
+        drop(serving);
     }
 
     #[test]

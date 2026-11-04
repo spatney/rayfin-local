@@ -42,7 +42,7 @@ With `--json`:
 `--state-dir <path>` (or `RAYFIN_LOCAL_STATE_DIR`; the option wins) moves all of it to another folder, created on first use; a relative path is resolved against rayfin-local's working directory.
 Use it when the project sits on a network or FUSE mount, where SQLite's write-ahead log can't live: keep the project there and the state on local disk.
 The project root and its parents are refused (`config-invalid`), since `reset` deletes the state folder.
-Pass the same `--state-dir` to every command that reads or writes the state (`reset`, `users`, `secret`); without it they use `<project>/.rayfin-local`.
+Pass the same `--state-dir` to every command that reads or writes the state (`reset`, `users`, `secret`, [`backup` and `restore`](#backup-and-restore)); without it they use `<project>/.rayfin-local`.
 The folder gets a `.gitignore` (`*`) wherever it is, and the `ready` event's `dataDir` reports it.
 Nothing in it is a project source: live reload follows only its `secrets.json`.
 
@@ -345,6 +345,73 @@ Leave out `Authorization` to call as an anonymous user.
 `rayfin-local secret set <NAME>` reads the value from stdin when it isn't given as an argument; `secret delete <NAME>` removes it.
 `rayfin-local secret list --json` prints `{"secrets":[{"name","declared":true,"description":null,"source":"env"}]}` with `source` one of `env`, `local` (the state folder's `secrets.json`), `settings` (`local.settings.json`) or `none`; values are never printed.
 A running `serve` picks up a change made with `secret set` or `secret delete` by itself and restarts only its function host (a `config-changed` event with `"what": ["secrets"]` follows), so hosts don't restart it.
+
+## Backup and restore
+
+```sh
+rayfin-local backup --out <dir> [--json] [-C <project>] [--state-dir <path>]
+rayfin-local restore --from <dir> [--json] [-C <project>] [--state-dir <path>]
+```
+
+`backup` writes a consistent snapshot of the state folder into `<dir>`, which it creates, or which must be empty.
+It takes no lock, so it runs while `serve` runs and writes: the database is copied with SQLite's online backup API as one self-contained `db.sqlite` (rollback journal, no `-wal` or `-shm`), with every transaction committed when the copy starts, those still in the write-ahead log included.
+`keys/`, `storage/`, `secrets.json` and `state.json` are copied as they are, each only when present.
+`cache/`, `serve.json`, `serve.lock`, `.gitignore` and the database's `-wal`, `-shm` and `-journal` files are never copied; `serve` rebuilds the cache.
+`<dir>` must not be inside the state folder.
+With `--state-dir`, `backup` needs no project.
+
+Every snapshot has a `manifest.json`, which lists every other file it holds, sorted by path:
+
+```json
+{
+  "v": 1,
+  "rayfinLocal": "0.2.4",
+  "createdAt": "2026-01-01T12:00:00Z",
+  "files": [
+    {"path": "db.sqlite", "size": 98304, "sha256": "…64 lowercase hex digits…"},
+    {"path": "keys/es256.pk8", "size": 138, "sha256": "…"},
+    {"path": "secrets.json", "size": 41, "sha256": "…"},
+    {"path": "state.json", "size": 312, "sha256": "…"},
+    {"path": "storage/photos/a.jpg", "size": 5120, "sha256": "…"}
+  ]
+}
+```
+
+`path` is relative to the snapshot, with `/` separators; `size` is in bytes; `createdAt` is RFC 3339 UTC.
+`v` is the manifest's version: additive fields keep it, and `restore` refuses any other.
+
+`restore` reads the manifest first and refuses it unless every path is `db.sqlite`, `secrets.json`, `state.json` or a file under `keys/` or `storage/`, none twice, and `db.sqlite` is among them.
+It then copies the listed files into a sibling of the state folder, checking each one's size and SHA-256, and moves them into the state folder, `db.sqlite` last, only when all of them match.
+Files the manifest doesn't list are ignored.
+The state folder is created when missing; an existing one must hold none of `db.sqlite` (or its `-wal`, `-shm`, `-journal`), `keys/`, `storage/`, `secrets.json` or `state.json`, and no `serve` may run it: `restore` holds the serve lock while it writes.
+A refused or failed restore moves none of the snapshot's files into the state folder; a snapshot refused as `snapshot-invalid` doesn't create a missing one either.
+
+With `--json`, each prints one line on stdout and exits 0:
+
+```json
+{"type":"backup","v":1,"out":"/abs/path/to/dir","files":5,"bytes":104000}
+{"type":"restore","v":1,"files":5,"bytes":104000}
+```
+
+`out` is the snapshot folder as an absolute path; `files` and `bytes` count the files the manifest lists.
+On failure the line is `{"type":"error","code":"…","message":"…"}` and the exit code is 1:
+
+| Code | Command | Meaning |
+| --- | --- | --- |
+| `state-missing` | `backup` | The state folder has no `db.sqlite`. |
+| `out-not-empty` | `backup` | `<dir>` is a file, or a folder that isn't empty. |
+| `out-invalid` | `backup` | `<dir>` is inside the state folder. |
+| `backup-failed` | `backup` | Copying or hashing failed; a `<dir>` the backup created is removed, an empty one emptied again. |
+| `snapshot-invalid` | `restore` | `manifest.json` is missing or invalid, or a file is missing or doesn't match its size or SHA-256. |
+| `state-exists` | `restore` | The state folder already holds state. |
+| `already-serving` | `restore` | A `serve` runs the state folder. |
+| `restore-failed` | `restore` | Copying or moving failed. |
+| `project-not-found`, `config-invalid`, `internal` | both | As for [`serve`](#warning-and-error). |
+
+Without `--json`, success is a line on stderr and failure a message on stderr, with exit code 1.
+
+A host that keeps the state on local disk (see [the state folder](#the-state-folder)) saves it with `backup` into a new local folder, while the app keeps running, and then copies that folder to durable storage.
+To bring the app back on a new machine, it copies the snapshot to local disk, may check `manifest.json` itself (every listed file present with its size and SHA-256), runs `restore --from <dir> --state-dir <empty folder>` before starting `serve`, and starts `serve` with the same `--state-dir`.
 
 ## Doctor
 

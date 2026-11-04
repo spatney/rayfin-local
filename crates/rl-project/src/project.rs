@@ -179,6 +179,20 @@ impl Project {
             .unwrap_or_else(|| self.root.join(STATE_DIR))
     }
 
+    /// The state folder of the project rooted at `root` (as [`Project::state_dir`]) without
+    /// loading the project: `state_dir` (relative to the current directory) when given, else
+    /// `<root>/.rayfin-local`. Refuses the project root and its parents.
+    pub fn resolve_state_dir(
+        root: &Path,
+        state_dir: Option<&Path>,
+    ) -> Result<PathBuf, ProjectError> {
+        let root = canonicalize(root)?;
+        match state_dir {
+            Some(dir) => state_dir_for(&root, dir),
+            None => Ok(root.join(STATE_DIR)),
+        }
+    }
+
     /// The name to show: `name`, else `id`, else the root folder's name.
     pub fn display_name(&self) -> &str {
         let config = &self.config;
