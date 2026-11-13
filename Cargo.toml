@@ -13,7 +13,7 @@ members = ["crates/*"]
 tiberius = { path = "vendor/tiberius" }
 
 [workspace.package]
-version = "0.2.8"
+version = "0.2.9"
 edition = "2024"
 rust-version = "1.96"
 license = "MIT"

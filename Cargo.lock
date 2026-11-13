@@ -1420,7 +1420,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rayfin-local"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "anyhow",
  "axum",
@@ -1543,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "rl-auth"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "argon2",
  "axum",
@@ -1572,7 +1572,7 @@ dependencies = [
 
 [[package]]
 name = "rl-connectors"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -1600,7 +1600,7 @@ dependencies = [
 
 [[package]]
 name = "rl-db"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "parking_lot",
  "rl-model",
@@ -1617,7 +1617,7 @@ dependencies = [
 
 [[package]]
 name = "rl-frontend"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "axum",
  "dunce",
@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "rl-functions"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "axum",
  "bytes",
@@ -1658,7 +1658,7 @@ dependencies = [
 
 [[package]]
 name = "rl-graphql"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "async-graphql-parser",
  "axum",
@@ -1685,7 +1685,7 @@ dependencies = [
 
 [[package]]
 name = "rl-model"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "indexmap",
  "serde",
@@ -1695,7 +1695,7 @@ dependencies = [
 
 [[package]]
 name = "rl-node"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "hex",
  "libc",
@@ -1712,7 +1712,7 @@ dependencies = [
 
 [[package]]
 name = "rl-project"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "dunce",
  "ring",
@@ -1728,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "rl-server"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "axum",
  "http-body-util",
@@ -1744,7 +1744,7 @@ dependencies = [
 
 [[package]]
 name = "rl-storage"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -1771,7 +1771,7 @@ dependencies = [
 
 [[package]]
 name = "rl-tokens"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "base64 0.23.1",
  "rl-node",
