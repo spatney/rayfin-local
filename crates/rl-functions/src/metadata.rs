@@ -1,16 +1,15 @@
 //! `runtimemetadata.json` for the functions package.
 //!
-//! `@microsoft/fabric-user-data-functions` 1.36 never analyses source at runtime: `new
-//! UserDataFunctions()` reads `runtimemetadata.json` from the process's working directory (beside
-//! its default `srcRoot`, `./src`) and answers every invocation with "Unable to determine function
-//! metadata" when the file is missing, invalid or not schema 2.x. The function host runs in the
+//! Neither supported `@microsoft/fabric-user-data-functions` worker analyses source at runtime:
+//! `new UserDataFunctions()` reads `runtimemetadata.json` from the working directory (beside
+//! its default `srcRoot`, `./src`) and requires valid metadata for every invocation. We generate
+//! their common schema 2.x format. The function host runs in the
 //! functions directory, so the file belongs at `<functions dir>/runtimemetadata.json`, which is
 //! where `rayfin dev` writes it too. It is a generated artifact, rewritten only when its content
 //! changes; a stamp in the cache folder remembers which inputs it was generated from.
 //!
 //! `js/udf-metadata.mjs` generates it with the functions package's own TypeScript compiler,
-//! following the rules of the Rayfin CLI 1.36.2 type generation, so the output is byte-for-byte
-//! what `rayfin dev` writes for the same source.
+//! preserving the Rayfin CLI 1.36.2 output and canonicalizing context types for the 2.0 worker.
 
 mod model;
 
@@ -28,7 +27,7 @@ use serde::{Deserialize, Serialize};
 /// The file the UDF package reads, in the functions directory.
 pub const FILE_NAME: &str = "runtimemetadata.json";
 
-/// The schema version generated: the one the 1.36 UDF package requires.
+/// The metadata format both supported UDF workers read.
 pub const SCHEMA_VERSION: &str = "2.0";
 
 const HELPER: Helper = Helper::new("udf-metadata", include_str!("../../../js/udf-metadata.mjs"));
@@ -132,7 +131,7 @@ impl GenerateInput {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Generated {
-    /// The file content, exactly as the Rayfin CLI writes it.
+    /// The generated worker-compatible file content.
     pub json: String,
     pub metadata: RuntimeMetadata,
     /// Whether [`GenerateInput::output_path`] was written; `None` without one.
@@ -240,7 +239,8 @@ pub async fn ensure_fresh_with(
         .clone()
         .unwrap_or_else(|| metadata_path(functions_dir));
     let newest = newest_input(functions_dir);
-    if is_current(cache_dir, &path, newest) {
+    let canonical_context_types = uses_canonical_context_types(functions_dir);
+    if is_current(cache_dir, &path, newest, canonical_context_types) {
         match load(&path) {
             Ok(metadata) => return Ok(metadata),
             Err(error) => tracing::info!("{error}"),
@@ -269,7 +269,13 @@ pub async fn ensure_fresh_with(
     if written {
         tracing::info!("updated {}", path.display());
     }
-    Stamp::save(cache_dir, &path, newest, &generated.json);
+    Stamp::save(
+        cache_dir,
+        &path,
+        newest,
+        &generated.json,
+        canonical_context_types,
+    );
     Ok(generated.metadata)
 }
 
@@ -277,12 +283,34 @@ pub async fn ensure_fresh_with(
 /// last generation decides when it describes the file: the file's own modification time proves
 /// nothing then, since it is written after a generation that takes seconds, and a source saved
 /// meanwhile is newer than the inputs read yet older than the file. A file another tool wrote is
-/// current when no input is newer than it.
-fn is_current(cache_dir: &Path, path: &Path, newest_input: Option<SystemTime>) -> bool {
+/// current when no input is newer than it, except SDK 2 needs a stamp of its context format.
+fn is_current(
+    cache_dir: &Path,
+    path: &Path,
+    newest_input: Option<SystemTime>,
+    canonical_context_types: bool,
+) -> bool {
     match Stamp::load(cache_dir, path) {
-        Some(stamp) => stamp.inputs_modified >= newest_input.map(epoch_time),
-        None => !is_older_than(path, newest_input),
+        Some(stamp) => {
+            stamp.canonical_context_types == canonical_context_types
+                && stamp.inputs_modified >= newest_input.map(epoch_time)
+        }
+        None => !canonical_context_types && !is_older_than(path, newest_input),
     }
+}
+
+fn uses_canonical_context_types(functions_dir: &Path) -> bool {
+    let package = node_path(functions_dir).ancestors().find_map(|dir| {
+        fs::read(dir.join("node_modules/@microsoft/fabric-user-data-functions/package.json")).ok()
+    });
+    let Some(package) =
+        package.and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+    else {
+        return false;
+    };
+    package["version"]
+        .as_str()
+        .is_some_and(|version| version.starts_with("2."))
 }
 
 /// What the last generation produced: a metadata file with this content is current while no
@@ -292,6 +320,8 @@ fn is_current(cache_dir: &Path, path: &Path, newest_input: Option<SystemTime>) -
 #[serde(rename_all = "camelCase")]
 struct Stamp {
     metadata_path: PathBuf,
+    #[serde(default)]
+    canonical_context_types: bool,
     /// The newest input before generation, as seconds and nanoseconds since the Unix epoch.
     inputs_modified: Option<(u64, u32)>,
     content: String,
@@ -308,9 +338,16 @@ impl Stamp {
         .then_some(stamp)
     }
 
-    fn save(cache_dir: &Path, path: &Path, newest_input: Option<SystemTime>, content: &str) {
+    fn save(
+        cache_dir: &Path,
+        path: &Path,
+        newest_input: Option<SystemTime>,
+        content: &str,
+        canonical_context_types: bool,
+    ) {
         let stamp = Stamp {
             metadata_path: path.to_owned(),
+            canonical_context_types,
             inputs_modified: newest_input.map(epoch_time),
             content: content.to_owned(),
         };

@@ -31,6 +31,9 @@ cd ../../../..
 cargo run -p rayfin-local -- serve -C tests/fixtures/apps/basic
 ```
 
+For SDK 2.0, use `tests/fixtures/apps/sdk-v2` instead; its `npm ci` also installs the Functions workspace.
+It uses explicit auth adapters and service factories and pins the SDK and worker to `2.0.0`.
+
 `-v` shows rayfin-local's debug logs, and `RUST_LOG` (for example `rl_graphql=trace`) replaces the default filters.
 
 ## Lint and format
@@ -55,7 +58,7 @@ Unit tests sit next to the code (`#[cfg(test)]`); integration tests are in `crat
 
 ### Tests that use Node.js and the real SDK
 
-Several integration tests drive the real Rayfin SDK 1.36.2, or the project's own packages, with Node.js against rayfin-local's routes.
+Several integration tests drive the real Rayfin SDKs 1.36.2 and 2.0.0, or the project's own packages, with Node.js against rayfin-local's routes.
 They print a `skipped: …` note and pass when Node.js or the packages they need are missing, so `cargo test --workspace` works on any machine.
 
 | Test | What it checks | Needs |
@@ -63,11 +66,11 @@ They print a `skipped: …` note and pass when Node.js or the packages they need
 | `rl-graphql` `tests/sdk.rs` | The SDK's data client against the GraphQL API, signed in through `rl-auth`, on the reference app's model. | The SDK |
 | `rl-connectors` `tests/sdk_decode.rs` | The SDK's `fabricSemanticModel()` through rayfin-local, compared with its direct path to the same mock Power BI. | The SDK |
 | `rl-storage` `tests/sdk.rs` | The SDK's `StorageFolderClient` against the storage routes. | `npm install` in `crates/rl-storage/tests/sdk` |
-| `rl-model` `tests/analyze_js.rs` | `js/analyze.mjs` on the fixture app, against the golden analysis; in connectors mode on the `connectors` fixture app. | `npm install` in `tests/fixtures/apps/basic` and `tests/fixtures/apps/connectors` |
+| `rl-model` `tests/analyze_js.rs` | Golden 1.36 analysis, plus SDK 2.0 data, storage and mapped SQL-connector permissions. | `npm ci` in `tests/fixtures/apps/basic`, `tests/fixtures/apps/connectors` and `tests/fixtures/apps/sdk-v2` |
 | `rl-connectors` `tests/sql_sdk.rs` | The SDK's Category A connector client (`createConnectorsApi` with the entity classes, for a SQL database, a Warehouse and a SQL analytics endpoint) through rayfin-local on a real SQL Server. | `npm install` in `tests/fixtures/apps/connectors`, and [SQL Server](#sql-server-tests) |
 | `rl-functions` `tests/host.rs`, `tests/invoke.rs` | The function host and the invoke routes on `tests/fixtures/functions/basic`, which they install and build on first use; also the reference app's functions when present. | Node.js and npm |
 | `rl-frontend` `tests/vite.rs` | The Vite dev server and the static build, on copies of the reference app and small Vite apps; automatic sign-in answered before `rayfinLocalDev()`'s, on the fixture app and the apps in `RAYFIN_LOCAL_TEST_VITE_APPS`. | The reference app; `npm ci` in `tests/fixtures/apps/basic` |
-| `rayfin-local` `tests/host_contract.rs` | `serve --json` of the fixture app ([embedding.md](embedding.md)): its events from `starting` to `ready`, the app and the backend answering, and a clean stop when stdin closes. | `npm ci` in `tests/fixtures/apps/basic` |
+| `rayfin-local` `tests/host_contract.rs` | `serve --json` lifecycle ([embedding.md](embedding.md)), plus the composed SDK 2.0 client using auth, data, functions and storage through Vite. | `npm ci` in `tests/fixtures/apps/basic` and `tests/fixtures/apps/sdk-v2` |
 | `rayfin-local` `tests/control_api.rs` | The control API and automatic sign-in of the fixture app under `serve --json`: status, users, identities, the dev server's session token used on `/graphql`, rows, a reload and a data reset. | `npm ci` in `tests/fixtures/apps/basic` |
 | `rayfin-local` `tests/live_reload.rs` | `serve --json` of a copy of the fixture app (its `node_modules` linked): `rayfin.yml` edits applied on the same ports, `secret set` restarting only the function host, Vite started again after it is killed, and the control API, `POST /reload` (refused and forced schema changes, invalid files) and automatic sign-in across changes. | `npm ci` in `tests/fixtures/apps/basic` and its `rayfin/functions` |
 
@@ -78,11 +81,13 @@ These variables point the tests at what they need:
 | `RAYFIN_SDK_NODE_MODULES` | `../fabric-apps/apps/explorer/node_modules`: a `node_modules` with the Rayfin SDK 1.36.2. |
 | `RAYFIN_LOCAL_EXPLORER` | `../fabric-apps/apps/explorer`: the reference app, for `rl-frontend`. |
 | `RAYFIN_LOCAL_EXPLORER_FUNCTIONS` | `../fabric-apps/apps/explorer/rayfin/functions`: the reference app's functions, for `rl-functions`. |
+| `RAYFIN_LOCAL_TYPESCRIPT_DIR` | The reference app; set to `tests/fixtures/apps/basic` to run functions metadata tests with the fixture's TypeScript. |
 | `RAYFIN_APPS_DIR` | `../fabric-apps/apps`: every app's `rayfin.yml`, for `rl-project`'s ignored test. |
 | `RAYFIN_LOCAL_TEST_VITE_APPS` | None: more apps with their packages installed (a list of folders, separated as in `PATH`), for `rl-frontend`'s automatic sign-in test, such as an app on another Vite version. |
 | `RAYFIN_LOCAL_NODE` | `node` on `PATH`. |
 
 The defaults are relative to this repository's folder: they expect `fabric-apps` checked out beside it.
+CI's `sdk-compatibility` job installs both SDK fixtures and runs the analyzer, Functions metadata and host-contract tests on Linux and Windows.
 
 ### SQL Server tests
 
@@ -176,7 +181,7 @@ The essentials of [`AGENTS.md`](../AGENTS.md):
 - **Errors are actionable:** say what failed and what to do.
 - **Privacy:** never log tokens, passwords, secrets or Entra tokens, and keep identity claims out of info-level logs.
 - **Local state:** everything rayfin-local writes goes under `<project>/.rayfin-local/`.
-- **Rayfin behavior:** check the SDK 1.36.2 dist, not memory; `AGENTS.md` lists the sources of truth.
+- **Rayfin behavior:** check the version-locked SDK dist and matching source tags, not memory; `AGENTS.md` lists the sources of truth.
 - **Tests:** focused tests for the behavior you add; never test constants or framework behavior.
 - **JS helpers:** plain ESM with no dependencies of their own; see [`js/README.md`](../js/README.md).
 - **Docs:** one sentence per line.

@@ -38,6 +38,36 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
 
+  sdk-compatibility:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      RAYFIN_LOCAL_TYPESCRIPT_DIR: ${{ github.workspace }}/tests/fixtures/apps/basic
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: Swatinem/rust-cache@v2
+      - name: Install the SDK 1.36 fixture
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: tests/fixtures/apps/basic
+      - name: Install the SDK 2.0 fixture and Functions worker
+        run: npm ci --ignore-scripts --no-audit --no-fund
+        working-directory: tests/fixtures/apps/sdk-v2
+      - name: Typecheck the SDK 2.0 fixture
+        run: npm run typecheck
+        working-directory: tests/fixtures/apps/sdk-v2
+      - run: cargo test -p rl-model --test analyze_js
+      - run: cargo test -p rl-functions --test metadata
+      - run: cargo test -p rayfin-local --test host_contract
+
   sql-connectors:
     # Category A (SQL) connectors against a real SQL Server: crates/rl-connectors/tests/sql_server.rs
     # and sql_sdk.rs (the real SDK, from the connectors fixture's packages). The password only

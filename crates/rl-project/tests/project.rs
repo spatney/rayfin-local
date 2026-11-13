@@ -245,7 +245,7 @@ fn installed_packages_beat_declared_ones() {
     assert_eq!(project.sdk_version(), Some("1.37.0"));
     let warning = project.sdk_version_warning().unwrap();
     assert!(
-        warning.starts_with("@microsoft/rayfin-client 1.37.0 is not the 1.36 SDK"),
+        warning.starts_with("@microsoft/rayfin-client 1.37.0 is not a supported SDK"),
         "{warning}"
     );
     project.check_installed().unwrap();
@@ -257,6 +257,31 @@ fn installed_packages_beat_declared_ones() {
         rl_project::resolve_node_package(project.frontend_dir(), "vite"),
         Some(root.join("node_modules").join("vite"))
     );
+}
+
+#[test]
+fn installed_v2_packages_do_not_warn() {
+    for version in ["2.0.0-beta.1", "2.0.0"] {
+        let (_temp, root) = project_dir(&[
+            ("rayfin/rayfin.yml", MINIMAL),
+            (
+                "package.json",
+                r#"{"dependencies":{"@microsoft/rayfin-client":"^2.0.0"}}"#,
+            ),
+            (
+                "node_modules/@microsoft/rayfin-client/package.json",
+                &package("@microsoft/rayfin-client", version),
+            ),
+            (
+                "node_modules/@microsoft/rayfin-core/package.json",
+                &package("@microsoft/rayfin-core", version),
+            ),
+        ]);
+        let project = load(&root, &[]).unwrap();
+        assert_eq!(project.installed_sdk_version(), Some(version));
+        assert_eq!(project.sdk_version_warning(), None);
+        project.check_installed().unwrap();
+    }
 }
 
 #[test]

@@ -1,14 +1,14 @@
-// Generates `runtimemetadata.json` for a Rayfin functions package, as `rayfin dev` (Rayfin CLI
-// 1.36.2) does in its type generation step.
+// Generates `runtimemetadata.json` for Rayfin 1.36 and 2.0 functions packages.
 //
-// `@microsoft/fabric-user-data-functions` 1.36 never parses source at runtime: `new
-// UserDataFunctions()` reads `<cwd>/runtimemetadata.json` (schema 2.0), which lists every
+// Neither worker parses source at runtime: `new UserDataFunctions()` reads
+// `<cwd>/runtimemetadata.json` (schema 2.0), which lists every
 // `udf.func(...)` registration with its delegate parameters and the audiences declared on its
 // `RayfinContext<Schema, Audiences>` annotation. Type arguments are erased by the compiler, so the
 // audiences can only come from a build-time pass with the TypeScript type checker.
 //
-// The analysis follows the CLI's rules exactly, so the output is byte-for-byte what the CLI writes
-// for the same source:
+// The 1.36 output matches its CLI byte for byte. The 2.0 worker also accepts schema 2.0,
+// but requires resolved context aliases to be emitted as `RayfinContext`.
+// The source analysis follows the CLI's rules:
 // - A TypeScript program from the package's `tsconfig.json`, created with the package's own
 //   `typescript`. Without a usable tsconfig, each `src/**/*.ts` file is parsed on its own and the
 //   audiences are read from the annotation syntax.
@@ -245,7 +245,7 @@ function isFabricParameter(typeText, name) {
   return lower === 'context' || lower.includes('connection') || lower.includes('fabric');
 }
 
-function analyzeParameters(handler, sourceFile) {
+function analyzeParameters(ts, handler, sourceFile, checker) {
   return handler.parameters.map((parameter, position) => {
     const name = parameter.name.getText(sourceFile);
     const typeText = parameter.type?.getText(sourceFile);
@@ -253,6 +253,7 @@ function analyzeParameters(handler, sourceFile) {
     return {
       name,
       typeText,
+      isContext: parameterAudiences(ts, parameter, checker) !== null,
       optional: parameter.questionToken !== undefined,
       hasDefault: parameter.initializer !== undefined,
       position,
@@ -289,7 +290,11 @@ function analyzeFuncCall(ts, node, sourceFile, scriptFile, checker, diagnostics)
       functionName,
     });
   }
-  return { functionName, parameters: analyzeParameters(handler, sourceFile), contextAudiences };
+  return {
+    functionName,
+    parameters: analyzeParameters(ts, handler, sourceFile, checker),
+    contextAudiences,
+  };
 }
 
 function analyzeSourceFile(ts, sourceFile, scriptFile, checker, diagnostics) {
@@ -344,15 +349,17 @@ function normalizeContextAnnotation(ts, typeText, audiences) {
   return `${typeText.slice(0, start)}${union}${typeText.slice(end)}`;
 }
 
-function toRuntimeMetadata(ts, functions) {
+function toRuntimeMetadata(ts, functions, canonicalContextTypes) {
   return {
     schemaVersion: SCHEMA_VERSION,
     functions: functions.map((fn) => ({
       functionName: fn.functionName,
       delegateParameters: fn.parameters.map((parameter) => {
-        const type = isContextTypeText(parameter.typeText)
-          ? normalizeContextAnnotation(ts, parameter.typeText, fn.contextAudiences)
-          : parameter.typeText;
+        const type = canonicalContextTypes && parameter.isContext
+          ? CONTEXT_TYPE_NAME
+          : isContextTypeText(parameter.typeText)
+            ? normalizeContextAnnotation(ts, parameter.typeText, fn.contextAudiences)
+            : parameter.typeText;
         // The worker rejects the whole file when `fabricParameterType` and `type` disagree, so a
         // copy of the annotation is normalized with it.
         const fabricParameterType =
@@ -373,6 +380,21 @@ function toRuntimeMetadata(ts, functions) {
       contextAudiences: [...fn.contextAudiences],
     })),
   };
+}
+
+/** SDK 2 records context identity separately from resolved audiences. Keep 1.36's format. */
+function usesCanonicalContextTypes(functionsDir) {
+  const name = '@microsoft/fabric-user-data-functions';
+  const require = createRequire(path.join(functionsDir, 'package.json'));
+  for (const dir of require.resolve.paths(name) ?? []) {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(path.join(dir, name, 'package.json'), 'utf8'));
+      return typeof manifest.version === 'string' && manifest.version.startsWith('2.');
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
+  }
+  return false;
 }
 
 /** Writes `content` to `file` through a sibling temp file, unless it already has that content. */
@@ -424,7 +446,7 @@ function generate(input) {
     );
   }
 
-  const metadata = toRuntimeMetadata(ts, functions);
+  const metadata = toRuntimeMetadata(ts, functions, usesCanonicalContextTypes(functionsDir));
   const json = JSON.stringify(metadata, null, 2);
   const written =
     typeof input.outputPath === 'string' && input.outputPath.length > 0

@@ -1,0 +1,28 @@
+{
+  "name": "rayfin-local-fixture-sdk-v2",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "description": "Rayfin 2.0 compatibility fixture with explicit auth and service adapters.",
+  "workspaces": ["rayfin/functions"],
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p rayfin/tsconfig.json && tsc --noEmit -p rayfin/functions/tsconfig.json"
+  },
+  "dependencies": {
+    "@microsoft/rayfin-auth": "2.0.0",
+    "@microsoft/rayfin-client": "2.0.0",
+    "@microsoft/rayfin-connectors": "2.0.0",
+    "@microsoft/rayfin-core": "2.0.0",
+    "@microsoft/rayfin-data": "2.0.0",
+    "@microsoft/rayfin-functions": "2.0.0",
+    "@microsoft/rayfin-lib": "2.0.0",
+    "@microsoft/rayfin-local-dev": "2.0.0",
+    "@microsoft/rayfin-storage": "2.0.0"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vite": "7.3.2"
+  }
+}

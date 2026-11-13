@@ -1,0 +1,25 @@
+id: rayfin-local-fixture-sdk-v2
+name: rayfin-local-fixture-sdk-v2
+version: 1.0.0
+services:
+  auth:
+    enabled: true
+    password:
+      enabled: true
+    fabric:
+      enabled: true
+  data:
+    enabled: true
+    dialect: mssql
+  functions:
+    enabled: true
+    auth:
+      type: application
+    buildCommand: npm run build
+  storage:
+    enabled: true
+  staticHosting:
+    enabled: true
+    folder: dist
+    buildCommand: npm run build
+    assetAccess: public

@@ -75,6 +75,45 @@ fn relationships_and_permissions_come_from_the_decorators() {
 }
 
 #[test]
+fn mapped_field_grants_preserve_each_sdks_permission_names() {
+    for (version, included, other) in [
+        (None, "owner_email", "ownerEmail"),
+        (Some("2.0.0"), "ownerEmail", "owner_email"),
+    ] {
+        let mut analysis: Value =
+            serde_json::from_str(include_str!("fixtures/inventory.connector.json")).unwrap();
+        analysis["coreVersion"] = serde_json::json!(version);
+        analysis["policies"] = serde_json::json!([]);
+        let product = &mut analysis["config"]["entities"]["Product"];
+        // An exposed name intentionally overlaps a different field's backing column.
+        product["mappings"]["in_stock"] = "owner_email".into();
+        product["permissions"] = serde_json::json!([{
+            "role": "authenticated",
+            "actions": [
+                { "action": "read", "fields": { "include": ["owner_email"] } },
+                { "action": "update", "fields": { "exclude": ["owner_email"] } }
+            ]
+        }]);
+        let model = AppModel::from_connector_analysis(&analysis).unwrap();
+        let product = model.entity("Product").unwrap();
+        let read = product
+            .grants("authenticated", Action::Read)
+            .next()
+            .unwrap();
+        let read = read.fields.as_ref().unwrap();
+        assert!(read.allows(included), "{version:?}: {read:?}");
+        assert!(!read.allows(other), "{version:?}: {read:?}");
+        let update = product
+            .grants("authenticated", Action::Update)
+            .next()
+            .unwrap();
+        let update = update.fields.as_ref().unwrap();
+        assert!(!update.allows(included), "{version:?}: {update:?}");
+        assert!(update.allows(other), "{version:?}: {update:?}");
+    }
+}
+
+#[test]
 fn source_metadata_marks_database_types_and_generated_columns() {
     let mut model = inventory();
     assert!(model.apply_source_metadata(&metadata()).is_empty());

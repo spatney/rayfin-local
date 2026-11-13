@@ -56,6 +56,12 @@
 //! - **Logs.** The UDF package replaces `console.*`; inside an invocation each call goes to the
 //!   invocation's `context.log`, prefixed `[UserDataFunctions]`.
 //!
+//! The 2.0.0 package reads the same headers and settings. It also accepts metadata schema `3.x`
+//! (with `capabilities`), and a parameter is the context only when its type text is
+//! `RayfinContext` or `RayfinContext<…>`, alone or in an `&` intersection, so [`crate::metadata`]
+//! writes context parameters typed through aliases as `RayfinContext` for it. Its SQL capability
+//! (`ctx.sql`) is not supported.
+//!
 //! # What callers supply
 //!
 //! - `env`: the package's `local.settings.json` `Values` ([`local_settings_values`]), as

@@ -17,6 +17,7 @@ pub fn run(json: bool) -> ExitCode {
             "sdk": {
                 "supported": rl_project::supported_sdk_range(),
                 "tested": rl_project::TESTED_SDK_VERSION,
+                "testedVersions": rl_project::TESTED_SDK_VERSIONS,
             },
         })
         .to_string()

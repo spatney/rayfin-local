@@ -1,8 +1,8 @@
 //! The host contract (docs/embedding.md) of the built binary: `version --json`, fatal errors of
 //! `serve --json`, and a `serve --json` of the fixture app from its start to the end of stdin.
 //!
-//! The last needs Node.js and the fixture's npm packages (`npm ci` in
-//! `tests/fixtures/apps/basic`); without them it prints a note and passes.
+//! Serving needs Node.js and the fixtures' npm packages (`npm ci` in
+//! `tests/fixtures/apps/basic` and `sdk-v2`); without them it prints a note and passes.
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -31,6 +31,9 @@ fn version_json_reports_the_contract_and_the_sdk() {
         "{supported}"
     );
     assert!(version["sdk"]["tested"].is_string());
+    let tested = version["sdk"]["testedVersions"].as_array().unwrap();
+    assert!(tested.iter().all(Value::is_string));
+    assert!(tested.contains(&version["sdk"]["tested"]));
 
     let output = rayfin_local().arg("version").output().unwrap();
     assert_eq!(
@@ -193,8 +196,14 @@ fn fatal_errors_come_with_a_code_then_stopped() {
 
 /// `tests/fixtures/apps/basic`, when its packages and Node.js are installed.
 fn fixture() -> Option<PathBuf> {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/apps/basic");
-    let installed = ["@microsoft/rayfin-core", "vite"].iter().all(|package| {
+    fixture_with_packages("basic", &["@microsoft/rayfin-core", "vite"])
+}
+
+fn fixture_with_packages(name: &str, packages: &[&str]) -> Option<PathBuf> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/apps")
+        .join(name);
+    let installed = packages.iter().all(|package| {
         let manifest = dir.join("node_modules").join(package).join("package.json");
         manifest.is_file()
     });
@@ -210,6 +219,62 @@ fn fixture() -> Option<PathBuf> {
         return None;
     }
     Some(dir)
+}
+
+#[test]
+fn serves_the_v2_sdk_with_explicit_auth_and_services() {
+    let Some(project) = fixture_with_packages(
+        "sdk-v2",
+        &[
+            "@microsoft/rayfin-core",
+            "@microsoft/rayfin-client",
+            "@microsoft/fabric-user-data-functions",
+            "vite",
+        ],
+    ) else {
+        return;
+    };
+    let mut serve = Serve::start(
+        &project,
+        &[
+            "--port",
+            "0",
+            "--frontend-port",
+            "0",
+            "--sign-in-as",
+            "none",
+        ],
+        &[],
+    );
+    let ready = serve.until("ready", Duration::from_secs(300));
+    assert_eq!(ready["sdk"]["supported"], true, "{}", serve.report());
+    assert_eq!(ready["features"]["functions"]["enabled"], true, "{ready}");
+    assert!(
+        !serve
+            .seen
+            .iter()
+            .any(|event| event["code"] == "sdk-unsupported"),
+        "{}",
+        serve.report()
+    );
+    let settings = serde_json::json!({
+        "apiUrl": ready["apiUrl"],
+        "appUrl": ready["appUrl"],
+    });
+    let output = Command::new("node")
+        .arg(project.join("smoke.mjs"))
+        .env("RL_SDK_TEST", settings.to_string())
+        .output()
+        .unwrap();
+    let status = serve.close_stdin(Duration::from_secs(60));
+    assert_eq!(status.code(), Some(0), "{}", serve.report());
+    assert!(
+        output.status.success(),
+        "SDK 2 smoke failed:\n{}\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        serve.report()
+    );
 }
 
 #[test]

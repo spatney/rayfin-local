@@ -7,8 +7,8 @@ They run on the developer's own Node.js (20 or later), in a folder of the projec
 | Helper | Owner crate | Kind | Purpose |
 | --- | --- | --- | --- |
 | `analyze.mjs` | `rl-model` | One-shot | Compile `rayfin/data` (and `rayfin/storage`) and run the project's `@microsoft/rayfin-core` analyzer, as `rayfin dev db apply` does; in connectors mode, analyze the SQL connectors' entities in `rayfin/connectors`, as `rayfin up` does. |
-| `rayfin-token.mjs` | `rl-tokens` | One-shot | Mint a token with the developer's Rayfin CLI login (`@microsoft/rayfin-cli/auth`). |
-| `udf-metadata.mjs` | `rl-functions` | One-shot | Generate `runtimemetadata.json` from the `udf.func(...)` declarations, byte for byte as the Rayfin CLI does. |
+| `rayfin-token.mjs` | `rl-tokens` | One-shot | Mint a token with the developer's Rayfin CLI login, using its `/_internal/auth` (2.0) or `/auth` (1.36) export. |
+| `udf-metadata.mjs` | `rl-functions` | One-shot | Generate worker-compatible `runtimemetadata.json` from `udf.func(...)`, preserving 1.36 metadata and canonicalizing context types for the 2.0 worker. |
 | `function-host.mjs` | `rl-functions` | Long-running: stdout announcements, then TCP JSON lines | Host the app's functions on the real UDF package, without Azure Functions Core Tools. |
 | `vite-dev.mjs` | `rl-frontend` | Long-running: stdout announcements and signals | Run the app's own Vite dev server, with the `rayfin-local:shim` plugin that wires it to the local backend, the `rayfin-local:sign-in` plugin that signs the app in automatically, and the `rayfin-local:session-stamp` plugin that makes pages forget stale sessions (with `session-stamp.mjs`, written next to it). |
 
@@ -29,7 +29,7 @@ Both files live in `.rayfin-local/cache/tmp/` and are deleted after the run.
 | Helper | Input | Result |
 | --- | --- | --- |
 | `analyze.mjs` | `projectRoot`, `dataDir`, `storageDir?`, `tsconfigPath`, `outDir`, `dialect`, `storage`, `verbose?` | `coreVersion`, `typescriptVersion`, `dialect`, `featureFlags`, `entities`, `config`, `policies`, `storage`, `sources`, `diagnostics` |
-| `analyze.mjs` with `mode: "connectors"` | `projectRoot`, `tsconfigPath`, `outDir`, `connectors` (`name`, `dir`, `dialect`), `verbose?` | `coreVersion`, `typescriptVersion`, `featureFlags`, `connectors` (`name`, `dialect`, then `entities`, `config` and `policies`, or `error`), `sources`, `diagnostics` |
+| `analyze.mjs` with `mode: "connectors"` | `projectRoot`, `tsconfigPath`, `outDir`, `connectors` (`name`, `dir`, `dialect`), `verbose?` | `coreVersion`, `typescriptVersion`, `featureFlags`, `connectors` (`name`, `dialect`, `coreVersion?` for SDK 2.0's column-based permissions, then `entities`, `config` and `policies`, or `error`), `sources`, `diagnostics` |
 | `rayfin-token.mjs` | `scopes`, `tenantId?`, `silent?` (fail rather than sign in interactively) | `token`, `expiresOnTimestamp` (ms since the epoch), `tenantId?` |
 | `udf-metadata.mjs` | `functionsDir`, `resolvePaths?`, `outputPath?` | `json`, `metadata`, `written`, `diagnostics`, `typescript` (`version`, `path`), `typeChecked`, `sourceFiles` |
 
@@ -75,3 +75,4 @@ The owner is `crates/rl-frontend/src/dev.rs`.
 The function host's tests need the fixture functions package installed and built (`npm ci` and `npm run build` in `tests/fixtures/functions/basic`), then: `node --test js/test/function-host.test.mjs`.
 The session stamp's tests need nothing: `node --test js/test/session-stamp.test.mjs`.
 The owner crates' integration tests run the helpers too, for example `rl-model`'s `tests/analyze_js.rs`, `rl-functions`' `tests/host.rs` and `rl-frontend`'s `tests/vite.rs`.
+Install `tests/fixtures/apps/sdk-v2` with `npm ci` to run SDK 2.0 analysis and the composed-client end-to-end test in `rayfin-local`'s `tests/host_contract.rs`.

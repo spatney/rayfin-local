@@ -217,6 +217,93 @@ async fn fixture_metadata_matches_the_cli() {
 }
 
 #[tokio::test]
+async fn v2_metadata_recognizes_context_aliases_and_qualified_names() {
+    let Some((node, typescript)) = toolchain().await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let app = fixture_app(dir.path());
+    let manifest = app.join("node_modules/@microsoft/fabric-user-data-functions/package.json");
+    let mut package = json(&fs::read_to_string(&manifest).unwrap());
+    package["version"] = "2.0.0".into();
+    fs::write(manifest, package.to_string()).unwrap();
+    fs::write(
+        app.join("src/aliases.ts"),
+        "import { AudienceType, type RayfinContext } \
+         from '@microsoft/fabric-user-data-functions';\n\
+         import { udf } from './udf.js';\n\
+         type AppContext = RayfinContext<Record<string, never>, AudienceType.Fabric>;\n\
+         udf.func('aliased', async (ctx: AppContext) => typeof ctx);\n",
+    )
+    .unwrap();
+    let generated = metadata::generate(
+        &node,
+        &input(&app, &typescript),
+        &dir.path().join("cache"),
+        sink(),
+    )
+    .await
+    .unwrap();
+    generated.metadata.validate().unwrap();
+    for (name, audiences) in [
+        ("aliased", vec![Audience::Fabric]),
+        ("namespaced", vec![Audience::Sql]),
+        ("backlog", vec![Audience::Ado]),
+        ("legacyContext", vec![Audience::Fabric, Audience::Storage]),
+    ] {
+        let function = generated.metadata.function(name).unwrap();
+        assert!(
+            function
+                .delegate_parameters
+                .iter()
+                .any(|parameter| parameter.is_context()),
+            "{name}: {function:?}"
+        );
+        assert_eq!(function.audiences(), audiences, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn upgrading_the_worker_refreshes_current_v1_metadata() {
+    let Some((node, typescript)) = toolchain().await else {
+        return;
+    };
+    for with_stamp in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let app = fixture_app(dir.path());
+        let request = input(&app, &typescript);
+        let original_cache = dir.path().join("cache");
+        let legacy = metadata::ensure_fresh_with(&node, &request, &original_cache, sink())
+            .await
+            .unwrap();
+        let manifest = app.join("node_modules/@microsoft/fabric-user-data-functions/package.json");
+        let mut package = json(&fs::read_to_string(&manifest).unwrap());
+        package["version"] = "2.0.0".into();
+        fs::write(manifest, package.to_string()).unwrap();
+        assert!(!metadata::is_stale(&app, &metadata::metadata_path(&app)));
+
+        let cache = if with_stamp {
+            original_cache
+        } else {
+            dir.path().join("without-stamp")
+        };
+        let upgraded = metadata::ensure_fresh_with(&node, &request, &cache, sink())
+            .await
+            .unwrap();
+        assert_ne!(upgraded, legacy, "with_stamp={with_stamp}");
+        assert!(
+            upgraded
+                .function("namespaced")
+                .unwrap()
+                .delegate_parameters
+                .iter()
+                .any(|parameter| parameter.is_context())
+        );
+        assert_eq!(upgraded.audiences("namespaced"), [Audience::Sql]);
+    }
+}
+
+#[tokio::test]
 async fn without_tsconfig_audiences_come_from_the_annotation_text() {
     let Some((node, typescript)) = toolchain().await else {
         return;

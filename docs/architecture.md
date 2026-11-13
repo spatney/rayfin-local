@@ -15,9 +15,9 @@ The app is unchanged: the SDK receives a different URL, and everything behind it
 
 ### Goals
 
-- **Unmodified apps.** Any Rayfin project on SDK 1.36.x runs with `rayfin-local serve`, without code or config changes.
+- **Unmodified apps.** Rayfin SDK 1.36.x and 2.0.x apps run with `rayfin-local serve`, without code or config changes.
 - **Wire compatibility.** For every supported feature, the SDK sees the same status codes, headers, bodies and errors as from Fabric.
-  The real SDK 1.36.2 is the oracle in tests.
+  The real SDKs 1.36.2 and 2.0.0 are the oracles in tests.
 - **No Fabric dependency** for the core services: auth, data, functions and storage run entirely on the machine.
 - **Real data where needed.** Functions and connectors reach real Azure and Fabric resources, Fabric SQL databases included, with the developer's own identity.
 - **A fast inner loop.** Schema changes migrate the database live, functions rebuild and reload, and Vite hot-reloads the UI.
@@ -33,7 +33,7 @@ The app is unchanged: the SDK receives a different URL, and everything behind it
 ## Design principles
 
 1. **The SDK's wire contract is the specification.**
-   rayfin-local implements what `@microsoft/rayfin-*` 1.36.x sends and expects, not the internals of the Fabric services.
+   rayfin-local implements what `@microsoft/rayfin-*` 1.36.x and 2.0.x send and expect, not the internals of the Fabric services.
    Where the SDK depends on a detail, such as 403 rather than 401 for a bad publishable key, or HTTP 200 envelopes for failed functions, rayfin-local reproduces it.
    The tests run the real SDK against rayfin-local.
 2. **Run the project's own packages instead of reimplementing them.**

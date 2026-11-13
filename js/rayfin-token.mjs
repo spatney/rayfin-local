@@ -3,10 +3,11 @@
 // turns its token down).
 //
 // It uses the project's own `@microsoft/rayfin-cli` (a devDependency of Rayfin projects):
-// `getAuthenticatedToken(scopes, { tenantId })` from `@microsoft/rayfin-cli/auth` serves the token
-// from the CLI's MSAL cache (`rayfin login`). When the cache can't serve the scope silently, the
-// CLI signs in interactively: a browser window, or a device code printed to the log in headless
-// environments. rl-tokens waits up to 180 s for that. With `silent`, the helper fails instead.
+// `getAuthenticatedToken(scopes, { tenantId })` from `@microsoft/rayfin-cli/_internal/auth`
+// (`/auth` in 1.36) serves the token from the CLI's MSAL cache (`rayfin login`). When the cache
+// can't serve the scope silently, the CLI signs in interactively: a browser window, or a device
+// code printed to the log in headless environments. rl-tokens waits up to 180 s for that.
+// With `silent`, the helper fails instead.
 //
 // Protocol (`rl_node::run_helper`): `node rayfin-token.mjs --input <in.json> --output <out.json>`,
 // run with the project root as the working directory.
@@ -62,12 +63,15 @@ async function loadAuth(projectRoot) {
   const packageDir = findPackage(projectRoot);
   if (!packageDir) throw new Error(`${NOT_INSTALLED} in ${projectRoot}`);
   const manifest = JSON.parse(fs.readFileSync(path.join(packageDir, 'package.json'), 'utf8'));
-  const target = exportTarget(manifest.exports?.['./auth']) ?? './dist/auth/index.js';
+  const target =
+    exportTarget(manifest.exports?.['./_internal/auth']) ??
+    exportTarget(manifest.exports?.['./auth']) ??
+    './dist/auth/index.js';
   const auth = await import(pathToFileURL(path.join(packageDir, target)).href);
   if (typeof auth.getAuthenticatedToken !== 'function') {
     throw new Error(
-      `${PACKAGE} ${manifest.version ?? ''} has no getAuthenticatedToken in ${PACKAGE}/auth; ` +
-        'rayfin-local supports Rayfin 1.36',
+      `${PACKAGE} ${manifest.version ?? ''} has no getAuthenticatedToken in its auth module; ` +
+        'install a compatible @microsoft/rayfin-cli version',
     );
   }
   return auth;

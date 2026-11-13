@@ -11,7 +11,10 @@ use ring::digest::{Context, SHA256};
 use rl_model::{AnalyzeInput, AppModel, Dialect};
 use rl_node::{Helper, NodeError, NodeRuntime, ProcessSpec};
 use rl_project::config::Dialect as ConfigDialect;
-use rl_project::{CORE_PACKAGE, LocalState, Project, SUPPORTED_SDK_VERSION, write_atomic};
+use rl_project::{
+    CORE_PACKAGE, LocalState, Project, SUPPORTED_SDK_VERSIONS, is_supported_sdk_version,
+    supported_sdk_line, write_atomic,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use walkdir::WalkDir;
@@ -331,8 +334,8 @@ fn display_path(project: &Project, path: &Path) -> String {
     }
 }
 
-/// What to do when the installed `@microsoft/rayfin-core` is not the 1.36 line rayfin-local
-/// implements (`None` when it is, or when its version is unknown).
+/// What to do when the installed `@microsoft/rayfin-core` is outside the supported SDK lines
+/// (`None` when it is supported, or when its version is unknown).
 fn sdk_upgrade_note(project: &Project) -> Option<String> {
     let version = project.rayfin_package(CORE_PACKAGE)?.installed.as_deref()?;
     sdk_note(version)
@@ -340,17 +343,17 @@ fn sdk_upgrade_note(project: &Project) -> Option<String> {
 
 fn sdk_note(version: &str) -> Option<String> {
     let installed = major_minor(version)?;
-    if installed == SUPPORTED_SDK_VERSION {
+    if is_supported_sdk_version(version) {
         return None;
     }
-    let (major, minor) = SUPPORTED_SDK_VERSION;
-    let advice = if installed < SUPPORTED_SDK_VERSION {
-        format!(" Upgrade the app's @microsoft/rayfin-* packages to {major}.{minor}.")
+    let lines = supported_sdk_line();
+    let advice = if installed < SUPPORTED_SDK_VERSIONS[0] {
+        format!(" Upgrade the app's @microsoft/rayfin-* packages to {lines}.")
     } else {
         String::new()
     };
     Some(format!(
-        "This app uses {CORE_PACKAGE} {version}; rayfin-local implements {major}.{minor}.x.{advice}"
+        "This app uses {CORE_PACKAGE} {version}; rayfin-local implements SDK {lines}.{advice}"
     ))
 }
 
@@ -869,14 +872,17 @@ mod tests {
     fn older_sdks_are_told_to_upgrade() {
         assert_eq!(sdk_note("1.36.2"), None);
         assert_eq!(sdk_note("1.36.0-alpha.1917"), None);
+        assert_eq!(sdk_note("2.0.0"), None);
+        assert_eq!(sdk_note("2.0.0-beta.1"), None);
         assert_eq!(
             sdk_note("1.34.0").as_deref(),
             Some(
-                "This app uses @microsoft/rayfin-core 1.34.0; rayfin-local implements 1.36.x. \
-                 Upgrade the app's @microsoft/rayfin-* packages to 1.36."
+                "This app uses @microsoft/rayfin-core 1.34.0; rayfin-local implements SDK \
+                 1.36 or 2.0. Upgrade the app's @microsoft/rayfin-* packages to 1.36 or 2.0."
             )
         );
         assert!(!sdk_note("1.37.1").unwrap().contains("Upgrade"));
+        assert!(sdk_note("2.1.0-alpha").is_some());
     }
 
     /// A project with `rayfin.yml` and the files given (path, contents).

@@ -44,6 +44,15 @@ struct Project {
 impl Project {
     /// A project; with `auth_module`, it has `@microsoft/rayfin-cli` with that `./auth` export.
     fn new(auth_module: Option<&str>) -> Self {
+        Self::with_auth_export(auth_module, "1.36.2", "./auth", "./dist/auth/index.js")
+    }
+
+    fn with_auth_export(
+        auth_module: Option<&str>,
+        version: &str,
+        subpath: &str,
+        target: &str,
+    ) -> Self {
         let dir = common::scratch_dir();
         write(
             &dir.path().join("package.json"),
@@ -53,16 +62,16 @@ impl Project {
             let package = dir.path().join("node_modules/@microsoft/rayfin-cli");
             let manifest = json!({
                 "name": "@microsoft/rayfin-cli",
-                "version": "1.36.2",
+                "version": version,
                 "type": "module",
                 "exports": {
                     ".": { "import": "./dist/index.js", "types": "./dist/index.d.ts" },
-                    "./auth": { "import": "./dist/auth/index.js", "types": "./dist/auth/index.d.ts" },
+                    (subpath): { "import": target },
                     "./package.json": "./package.json"
                 }
             });
             write(&package.join("package.json"), &manifest.to_string());
-            write(&package.join("dist/auth/index.js"), source);
+            write(&package.join(target), source);
         }
         Self { dir }
     }
@@ -142,6 +151,24 @@ async fn signs_in_with_the_projects_rayfin_cli() {
             }),
             json!({ "fn": "getAuthenticatedToken", "scopes": [scope], "options": options }),
         ]
+    );
+}
+
+#[tokio::test]
+async fn loads_the_v2_internal_auth_export() {
+    let project = Project::with_auth_export(
+        Some(AUTH_MODULE),
+        "2.0.0",
+        "./_internal/auth",
+        "./internal-token.mjs",
+    );
+    let broker = project.broker(TokenMode::Rayfin, None).await;
+    let scope = Audience::Fabric.default_scope();
+    let token = broker.token(scope).await.unwrap();
+    assert_eq!(token.token, format!("rayfin-token-for-{scope}"));
+    assert_eq!(
+        project.called(),
+        ["ensureAuthenticated", "getAuthenticatedToken"]
     );
 }
 

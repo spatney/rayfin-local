@@ -272,6 +272,7 @@ async function analyzeConnectors(input) {
       results.push({
         name,
         dialect,
+        ...(coreVersion?.startsWith('2.') ? { coreVersion } : {}),
         entities: toJson(entities),
         config: configJson,
         policies: collectPolicies(core, entityClasses, entities, coreVersion),

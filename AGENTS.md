@@ -1,6 +1,6 @@
 # AGENTS.md: working in the rayfin-local repo
 
-`rayfin-local` is a Rust CLI that runs an existing [Rayfin](https://rayfin.ai) project (SDK 1.36.x) entirely on the developer's machine.
+`rayfin-local` is a Rust CLI that runs an existing [Rayfin](https://rayfin.ai) project (SDK 1.36.x or 2.0.x) entirely on the developer's machine.
 `rayfin-local serve`, run in the project, starts every backend service locally and the unmodified app works against it through the Rayfin SDK.
 Each service has a local stand-in:
 
@@ -30,7 +30,7 @@ Each service has a local stand-in:
 | `crates/rl-server` | Router composition: `/rayfin.config.json`, CORS, publishable-key and Host checks, static hosting. |
 | `js/` | JS helpers embedded in the binary (see `js/README.md`). |
 | `vendor/tiberius` | The TDS driver (tiberius 0.12.3) with Fabric fixes, used through `[patch.crates-io]`; changes are marked `rayfin-local patch` (see `docs/sql-connectors.md`). |
-| `tests/` | Fixture projects, SDK conformance suite (Node + real `@microsoft/rayfin-*` 1.36.2), e2e. |
+| `tests/` | Fixture projects, SDK conformance (1.36.2 and 2.0.0), e2e. |
 
 ## Commands
 
@@ -45,15 +45,16 @@ Each service has a local stand-in:
 
 ## Sources of truth for Rayfin behavior
 
-Do not rely on memory for Rayfin APIs or wire formats; they are version-locked (1.36.2).
+Do not rely on memory for Rayfin APIs or wire formats; fixtures are version-locked (1.36.2 and 2.0.0).
 These are the sources of truth:
 
 The paths below are relative to this repository's parent folder, where the related repositories are checked out side by side.
 
 - The SDK 1.36.2 dist installed in the reference app: `fabric-apps/apps/explorer/node_modules/@microsoft/rayfin-*` (and `rayfin/functions/node_modules/@microsoft/fabric-user-data-functions`).
+- The SDK 2.0 fixture's installed packages: `rayfin-local/tests/fixtures/apps/sdk-v2/node_modules/@microsoft/rayfin-*` (including its workspace Functions worker).
 - The wire contract written up by micro-fabric: `micro-fabric/docs/compatibility.md`.
   It is a reference only; this project is a clean-room implementation, so never copy micro-fabric code.
-- Rayfin's source (1.37 alpha; may differ from 1.36.2): `project-rayfin/packages/*`.
+- Rayfin's source: `project-rayfin/packages/*`; use the `npm/v1.36.2` and `npm/v2.0.0` tags for supported contracts rather than assuming the default branch matches.
 - The docs: `https://rayfin.ai/docs/...`; append `.md` to any page for Markdown.
 
 The reference app for end-to-end checks is `fabric-apps/apps/explorer`.

@@ -1,0 +1,14 @@
+{
+  "name": "rayfin-local-fixture-sdk-v2-functions",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "main": "dist/src/function_app.js",
+  "scripts": {
+    "build": "tsc --build"
+  },
+  "dependencies": {
+    "@azure/functions": "^4.16.2",
+    "@microsoft/fabric-user-data-functions": "2.0.0"
+  }
+}

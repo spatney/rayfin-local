@@ -280,15 +280,16 @@ impl Project {
             .find(|package| package.version().is_some())
     }
 
-    /// A warning when the SDK is not 1.36.x, the contract rayfin-local implements.
+    /// A warning when the SDK is outside the lines rayfin-local implements.
     pub fn sdk_version_warning(&self) -> Option<String> {
         let package = self.sdk_package()?;
         let version = package.version()?;
         let line = supported_sdk_line();
         (!is_supported_sdk_version(version)).then(|| {
             format!(
-                "{} {version} is not the {line} SDK rayfin-local implements; some behavior may \
-                 differ from Fabric. Use @microsoft/rayfin-* {line}.x for full fidelity.",
+                "{} {version} is not a supported SDK; rayfin-local implements {line}. Some \
+                 behavior may differ from Fabric. Use matching @microsoft/rayfin-* packages \
+                 from a supported SDK line for full fidelity.",
                 package.name
             )
         })

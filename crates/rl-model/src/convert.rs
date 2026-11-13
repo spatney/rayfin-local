@@ -206,12 +206,15 @@ struct Analysis<'a> {
     /// A Category A connector's entities: keys are optional (keyless entities) and may span
     /// several columns of any type.
     connector: bool,
+    /// SDK 2 connector permissions use backing columns; 1.36 used exposed names.
+    column_field_permissions: bool,
 }
 
 /// One element of `connectors` in the result of `js/analyze.mjs` (connectors mode).
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ConnectorOutput {
+    core_version: Option<String>,
     entities: Vec<AnalyzedEntity>,
     config: DabConfig,
     #[serde(default)]
@@ -233,6 +236,7 @@ impl AppModel {
             config: &output.config,
             policies: &output.policies,
             connector: false,
+            column_field_permissions: false,
         };
         let entities = output
             .config
@@ -266,6 +270,10 @@ impl AppModel {
             config: &output.config,
             policies: &output.policies,
             connector: true,
+            column_field_permissions: output
+                .core_version
+                .as_deref()
+                .is_some_and(|version| version.starts_with("2.")),
         };
         let entities = output
             .config
@@ -274,7 +282,7 @@ impl AppModel {
             .map(|(name, dab)| entity(&view, name, dab))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(AppModel {
-            core_version: None,
+            core_version: output.core_version,
             typescript_version: None,
             dialect: Dialect::Mssql,
             feature_flags: None,
@@ -576,7 +584,7 @@ fn role_permission(
                 let action = parse_action(action).map_err(&malformed)?;
                 let fields = object
                     .get("fields")
-                    .map(field_access)
+                    .map(|value| field_access(value, columns, output.column_field_permissions))
                     .transpose()
                     .map_err(&malformed)?;
                 let policy = match object.get("policy") {
@@ -612,7 +620,11 @@ fn expect_keys(object: &Map<String, Value>, keys: &[&str]) -> Result<(), String>
     }
 }
 
-fn field_access(value: &Value) -> Result<FieldAccess, String> {
+fn field_access(
+    value: &Value,
+    columns: &[Column],
+    column_field_permissions: bool,
+) -> Result<FieldAccess, String> {
     let object = value
         .as_object()
         .ok_or_else(|| format!("`fields` is not an object: {value}"))?;
@@ -623,10 +635,18 @@ fn field_access(value: &Value) -> Result<FieldAccess, String> {
             .map(|v| Vec::<String>::deserialize(v).map_err(|e| format!("`fields.{key}`: {e}")))
             .transpose()
     };
-    Ok(FieldAccess {
+    let mut fields = FieldAccess {
         include: list("include")?.unwrap_or_else(|| vec!["*".to_owned()]),
         exclude: list("exclude")?.unwrap_or_default(),
-    })
+    };
+    if column_field_permissions {
+        for field in fields.include.iter_mut().chain(&mut fields.exclude) {
+            if let Some(column) = columns.iter().find(|column| column.name == *field) {
+                field.clone_from(&column.field);
+            }
+        }
+    }
+    Ok(fields)
 }
 
 fn entity_policy(

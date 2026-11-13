@@ -10,10 +10,14 @@ use crate::{ProjectError, resolve_node_package};
 pub const CLIENT_PACKAGE: &str = "@microsoft/rayfin-client";
 /// Entities, analysis and the shared runtime; every Rayfin project depends on it.
 pub const CORE_PACKAGE: &str = "@microsoft/rayfin-core";
-/// The SDK minor version rayfin-local implements (`major`, `minor`).
-pub const SUPPORTED_SDK_VERSION: (u64, u64) = (1, 36);
-/// The SDK version the conformance tests and the fixture app use.
-pub const TESTED_SDK_VERSION: &str = "1.36.2";
+/// The newest SDK line rayfin-local implements (`major`, `minor`).
+pub const SUPPORTED_SDK_VERSION: (u64, u64) = (2, 0);
+/// The SDK lines rayfin-local implements, oldest first.
+pub const SUPPORTED_SDK_VERSIONS: &[(u64, u64)] = &[(1, 36), SUPPORTED_SDK_VERSION];
+/// The newest SDK version exercised by the integration tests.
+pub const TESTED_SDK_VERSION: &str = "2.0.0";
+/// The SDK versions exercised by the integration tests.
+pub const TESTED_SDK_VERSIONS: &[&str] = &["1.36.2", TESTED_SDK_VERSION];
 
 const RAYFIN_PACKAGE_PREFIX: &str = "@microsoft/rayfin-";
 
@@ -186,21 +190,27 @@ fn installed_version(dir: &Path) -> Option<String> {
     manifest.version
 }
 
-/// Whether a version (or a range such as `^1.36.2`) is in the SDK line rayfin-local implements.
+/// Whether a version (or a range such as `^2.0.0`) is in a supported SDK line.
 pub fn is_supported_sdk_version(version: &str) -> bool {
-    major_minor(version) == Some(SUPPORTED_SDK_VERSION)
+    major_minor(version).is_some_and(|version| SUPPORTED_SDK_VERSIONS.contains(&version))
 }
 
-/// The SDK line rayfin-local implements as a semver range, such as `>=1.36.0 <1.37.0`.
+/// The supported SDK lines as a semver range.
 pub fn supported_sdk_range() -> String {
-    let (major, minor) = SUPPORTED_SDK_VERSION;
-    format!(">={major}.{minor}.0 <{major}.{}.0", minor + 1)
+    SUPPORTED_SDK_VERSIONS
+        .iter()
+        .map(|(major, minor)| format!(">={major}.{minor}.0-0 <{major}.{}.0", minor + 1))
+        .collect::<Vec<_>>()
+        .join(" || ")
 }
 
-/// The SDK line rayfin-local implements, such as `1.36`.
+/// The supported SDK lines, such as `1.36 or 2.0`.
 pub fn supported_sdk_line() -> String {
-    let (major, minor) = SUPPORTED_SDK_VERSION;
-    format!("{major}.{minor}")
+    SUPPORTED_SDK_VERSIONS
+        .iter()
+        .map(|(major, minor)| format!("{major}.{minor}"))
+        .collect::<Vec<_>>()
+        .join(" or ")
 }
 
 fn major_minor(version: &str) -> Option<(u64, u64)> {
@@ -249,18 +259,42 @@ mod tests {
     }
 
     #[test]
-    fn checks_the_sdk_line() {
-        for version in ["1.36.2", "1.36.0-beta.1", "^1.36.2", "~1.36.0", ">=1.36.1"] {
+    fn checks_the_sdk_lines() {
+        for version in [
+            "1.36.2",
+            "1.36.0-beta.1",
+            "^1.36.2",
+            "~1.36.0",
+            ">=1.36.1",
+            "2.0.0",
+            "2.0.1",
+            "2.0.0-beta.0",
+            "^2.0.0",
+            "~2.0.0",
+        ] {
             assert!(is_supported_sdk_version(version), "{version}");
         }
-        for version in ["1.37.0", "1.3.6", "2.36.0", "latest", "workspace:*"] {
+        for version in [
+            "1.37.0",
+            "1.3.6",
+            "2.1.0-alpha",
+            "2.36.0",
+            "3.0.0",
+            "latest",
+            "workspace:*",
+        ] {
             assert!(!is_supported_sdk_version(version), "{version}");
         }
     }
 
     #[test]
-    fn the_supported_range_covers_the_sdk_line_and_the_tested_version() {
-        assert_eq!(supported_sdk_range(), ">=1.36.0 <1.37.0");
-        assert!(is_supported_sdk_version(TESTED_SDK_VERSION));
+    fn the_supported_range_covers_both_sdk_lines() {
+        assert_eq!(
+            supported_sdk_range(),
+            ">=1.36.0-0 <1.37.0 || >=2.0.0-0 <2.1.0"
+        );
+        for version in TESTED_SDK_VERSIONS {
+            assert!(is_supported_sdk_version(version), "{version}");
+        }
     }
 }

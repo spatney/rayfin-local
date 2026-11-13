@@ -1,6 +1,6 @@
 # Differences from Fabric
 
-rayfin-local runs an unmodified Rayfin app (SDK 1.36.x) against local stand-ins for the Rayfin services.
+rayfin-local runs an unmodified Rayfin app (SDK 1.36.x or 2.0.x) against local stand-ins for the Rayfin services.
 It answers the SDK with the same routes, bodies, statuses and errors as Fabric wherever it can.
 This page lists where it can't, per SDK surface.
 
@@ -33,6 +33,7 @@ Keep the backend on loopback (the default `--host 127.0.0.1`): any other address
 | Username/password sign-up and sign-in | Supported | Users live in `.rayfin-local/db.sqlite`, with argon2id password hashes. |
 | Password sign-in for an unknown email | Differs | Creates the account (when sign-up is allowed, even if `password.enabled` is false) instead of answering `invalid_grant`, so app templates that sign in with a fixed dev account work; SDK 1.36.2 breaks their sign-up fallback. `[auth] auto_create_users = false` restores Fabric's answer. |
 | Static `customClaims` | Differs | A custom claim named like a reserved claim (`sub`, `email`, `role`, `name`, `scope`, `sid`, `iss`, `aud`, `exp`, `iat`, `nbf`, `jti`) is ignored with a warning; Fabric's token issuer would put it in place of the standard claim in every user's token. Other custom claims are added as on Fabric. |
+| Dynamic claims (`udf.authClaims`, SDK 2.0) | Not supported | Use static `customClaims` for local runs. |
 | Sessions: access tokens, refresh-token rotation, sign-out, sign-out everywhere | Supported | ES256 access tokens shaped like the service's, with the lifetimes of `services.auth` in `rayfin.yml`. |
 | JWKS and runtime settings (`/.well-known/jwks.json`, `/api/projectRuntimeSettings`) | Supported | The settings mirror `services.auth` in `rayfin.yml`. |
 | "Sign in with Fabric" (`ensureSignedInWithFabric`) | Differs | The popup opens rayfin-local's sign-in page (`/.rayfin-local/portal`) instead of the Fabric portal. As Fabric signs in whoever is signed in to it, the page signs in as the sign-in identity (`--sign-in-as`, `[auth] sign_in_as`) without asking, and closes, when it's opened on localhost. With `none`, it offers local sign-in, sign-up and "Continue as &lt;you&gt;". The handshake with the app is the SDK's own (`brokeredAuth.*` messages, then a one-time handoff code). |
@@ -74,6 +75,7 @@ rayfin-local builds your functions package and runs it on your Node.js, with the
 | Invocation and the response envelope | Supported | HTTP 200 with `x-fabric-udf-status`, so failed functions surface as `FunctionsError`, as deployed. This holds even when `local.settings.json` sets `IsLocal` to true. Anonymous calls are allowed, as deployed. |
 | Arguments and return values | Supported | Parsed and serialized by the UDF package itself. |
 | `ctx.getDataClient()` | Supported | Calls the local data API as the caller. |
+| `ctx.sql` SQL capabilities (SDK 2.0) | Not supported | Use the app's SQL connectors or `ctx.Tokens.Sql` with a database client instead. |
 | `ctx.Tokens.<Audience>` (`Sql`, `Storage`, `Fabric`, `AzureAI`, `ADO`) | Differs | Tokens for you, not the app's identity. A token that can't be minted is left out: the function still runs, reading it throws "No token available for audience…", and `serve` logs why. |
 | `ctx.Secrets.<NAME>` | Differs | Local values, from `local.settings.json` `Values`, the environment, or `.rayfin-local/secrets.json` (`rayfin-local secret set`). |
 | Error messages | Differs | Deployed, 5xx bodies hide their cause behind `internal_server_error`; locally the message says what failed. |
@@ -99,7 +101,7 @@ rayfin-local builds your functions package and runs it on your Node.js, with the
 
 | Feature | Status | Notes |
 | --- | --- | --- |
-| Upload, download, list and delete (`StorageFolderClient`) | Supported | The 1.36.2 routes and answers, on files under `.rayfin-local/storage`. |
+| Upload, download, list and delete (`StorageFolderClient`) | Supported | The SDK's routes and answers, on files under `.rayfin-local/storage`. |
 | `@blob` folder rules and checks | Supported | `anonymous` and `authenticated` rules; checks compare strings case-insensitively, as Fabric's collation does. |
 | Signed URLs | Differs | They point at the backend (`/.rayfin-local/storage/…`), not Azure Blob Storage; the HMAC token in the URL is the credential. The default lifetime is 15 minutes. |
 | Long-running operations | Differs | Every step completes at once, so the first status poll already sees the result. |
@@ -119,7 +121,7 @@ rayfin-local builds your functions package and runs it on your Node.js, with the
 | --- | --- | --- |
 | Deployment (`rayfin up`), Fabric items, workspaces and their permissions | Not supported | Nothing is deployed, and no Fabric item is created or changed. |
 | Workspace, item and tenant ids | Differs | Taken from `rayfin/.env` when the app was deployed, else generated. The app id and the publishable key (`pk-local-…`) are local. |
-| SDK versions | Differs | rayfin-local implements 1.36.x; with another version, `serve` warns that behavior may differ. Before 1.36, apps with database policies (`@role` with `policy`) can't be analyzed, and `serve` says to upgrade. |
+| SDK versions | Differs | rayfin-local implements 1.36.x and 2.0.x, including prereleases; with another version, `serve` warns that behavior may differ. Before 1.36, apps with database policies (`@role` with `policy`) can't be analyzed, and `serve` says to upgrade. |
 
 ## Local only
 

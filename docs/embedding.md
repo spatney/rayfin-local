@@ -11,11 +11,20 @@ Anything else bumps it.
 `rayfin-local version --json` prints one JSON object and exits 0:
 
 ```json
-{"version":"0.2.0","contract":1,"sdk":{"supported":">=1.36.0 <1.37.0","tested":"1.36.2"}}
+{
+  "version": "0.2.0",
+  "contract": 1,
+  "sdk": {
+    "supported": ">=1.36.0-0 <1.37.0 || >=2.0.0-0 <2.1.0",
+    "tested": "2.0.0",
+    "testedVersions": ["1.36.2", "2.0.0"]
+  }
+}
 ```
 
 - `contract` is the version of this contract.
-- `sdk.supported` is the semver range of `@microsoft/rayfin-*` packages rayfin-local implements; `sdk.tested` is the version its conformance tests use.
+- `sdk.supported` is the semver range of `@microsoft/rayfin-*` packages rayfin-local implements, including prereleases of the supported lines.
+- `sdk.tested` is the newest SDK fixture version; `sdk.testedVersions` lists every SDK fixture version.
 
 `rayfin-local version` without `--json` prints `rayfin-local 0.2.0`, as `--version` does.
 
