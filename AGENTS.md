@@ -23,7 +23,7 @@ Each service has a local stand-in:
 | `crates/rl-graphql` | `POST /graphql`: DAB-compatible queries, mutations, aggregations and policies over SQLite; the same front end over T-SQL (`tsql`) for SQL connectors. |
 | `crates/rl-auth` | `/api/auth/v1/*`, JWKS, runtime settings, the sign-in popup portal, the Entra exchange; implements `CallerResolver`. |
 | `crates/rl-tokens` | `TokenSource`: Azure tokens for the developer (az CLI, Rayfin CLI login, env overrides); `Audience` scopes. |
-| `crates/rl-functions` | Functions build/watch, `runtimemetadata.json`, the Node function host, `/functions/<name>/invoke`. |
+| `crates/rl-functions` | Functions build/watch, `runtimemetadata.json`, the generated types (`types.ts`), the Node function host, `/functions/<name>/invoke`. |
 | `crates/rl-connectors` | `/connector-invoke/<name>`: `fabric-semanticmodel` through Power BI; `/connectors/<name>/graphql`: SQL connectors over TDS (see `docs/sql-connectors.md`); 501 for other types. |
 | `crates/rl-storage` | `/api/storage/*` on the local file system. |
 | `crates/rl-frontend` | The project's Vite dev server or static build, with the local Rayfin env. |

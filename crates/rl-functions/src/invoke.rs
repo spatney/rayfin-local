@@ -1,6 +1,7 @@
 //! The function invoke routes, `POST /functions/<name>/invoke` and
 //! `POST /.rayfin-local/functions/api/<name>`, and [`FunctionsService`], which keeps the app's
-//! functions built, described (`runtimemetadata.json`) and running on a [`HostManager`].
+//! functions built, described (`runtimemetadata.json`), typed for the frontend (`src/types.ts`)
+//! and running on a [`HostManager`].
 //!
 //! # The wire contract (1.36.2)
 //!
@@ -74,6 +75,7 @@ use std::{path::PathBuf, time::Duration};
 use rl_node::{LineSink, NodeRuntime};
 
 use crate::state::StateObserver;
+use crate::typegen::TypegenObserver;
 
 pub use service::FunctionsService;
 
@@ -108,6 +110,9 @@ pub struct FunctionsConfig {
     pub sink: LineSink,
     /// Told what the functions are doing: building, ready or failed.
     pub on_state: Option<StateObserver>,
+    /// Told how each generation of their generated types went: when they start, and after each
+    /// change to their sources or secrets.
+    pub on_typegen: Option<TypegenObserver>,
 }
 
 impl FunctionsConfig {
@@ -133,6 +138,7 @@ impl FunctionsConfig {
             invoke_timeout: DEFAULT_INVOKE_TIMEOUT,
             sink: rl_node::default_sink(),
             on_state: None,
+            on_typegen: None,
         }
     }
 }

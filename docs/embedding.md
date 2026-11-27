@@ -107,11 +107,14 @@ The database was brought up to date with the model, or wasn't.
 ### `functions`
 
 ```json
-{"v":1,"type":"functions","time":"…","state":"ready","names":["getBacklog","askAnalyst"],"errors":[],"message":null}
+{"v":1,"type":"functions","time":"…","state":"ready","names":["getBacklog","askAnalyst"],"errors":[],"message":null,"typesError":null}
 ```
 
 `state` is `building`, `ready`, `failed` (with the build's `errors`, one string per compiler message, and the previous build keeps serving if there was one) or `off` (with the reason in `message`).
 With `failed`, `names` lists the functions that still run: those of the previous build, or of output the compiler emitted despite the errors (`tsc` does), which is loaded but stays `failed` until a build succeeds.
+`typesError` says why the functions' generated types could not be regenerated, or is `null` while they are current.
+These are `src/types.ts`, whose `AppFunctionsSchema` types the app's calls to its functions, and `src/secrets.generated.ts`, which types `ctx.Secrets`; rayfin-local regenerates them with the project's Rayfin CLI when the functions start, after each change to the functions' sources and when the secrets change, as `rayfin dev` does.
+When a generation's outcome changes, the last `functions` event comes again with the new `typesError` (unless it is `building`: its outcome carries it).
 `serve` starts without a `functions` event when the service is off (`--no-functions`, or `services.functions` disabled in `rayfin.yml`).
 Turning `services.functions` off while serving emits `off`; turning it on emits `building`, then `ready` or `failed`.
 New secret values restart the function host, which then emits `ready` again.
@@ -216,6 +219,7 @@ A `fatal` error is followed by `stopped`; other errors leave `serve` running.
 | `already-serving` | error | Another `serve` runs this project. `details`: `{"pid","appUrl","apiUrl"}` from `.rayfin-local/serve.json`. |
 | `vite-failed` | error | Vite could not start (fatal at start; while running, see `vite` events). |
 | `functions-build-failed` | warning | The functions' build failed (once per failure; the `functions` event has the compiler's messages). Until a build succeeds, invocations answer 503, or run what the compiler emitted despite the errors. |
+| `functions-types-failed` | warning | The functions' generated types (`src/types.ts`, `src/secrets.generated.ts`) could not be regenerated; the message ends with the Rayfin CLI's reason (once per failure; the `functions` event's `typesError` holds it until a generation succeeds). The files keep what they had, so the app's frontend may be typed with an old `AppFunctionsSchema`. |
 | `secret-missing` | warning | A declared secret has no local value. `details`: `{"name"}`. |
 | `anonymous-role` | warning | Entities grant the `anonymous` role, which most Fabric tenants refuse. `details`: `{"entities"}`. |
 | `connector-unsupported` | warning | A connector's type runs only on Fabric. `details`: `{"name","type"}`. |

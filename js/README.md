@@ -9,6 +9,7 @@ They run on the developer's own Node.js (20 or later), in a folder of the projec
 | `analyze.mjs` | `rl-model` | One-shot | Compile `rayfin/data` (and `rayfin/storage`) and run the project's `@microsoft/rayfin-core` analyzer, as `rayfin dev db apply` does; in connectors mode, analyze the SQL connectors' entities in `rayfin/connectors`, as `rayfin up` does. |
 | `rayfin-token.mjs` | `rl-tokens` | One-shot | Mint a token with the developer's Rayfin CLI login, using its `/_internal/auth` (2.0) or `/auth` (1.36) export. |
 | `udf-metadata.mjs` | `rl-functions` | One-shot | Generate worker-compatible `runtimemetadata.json` from `udf.func(...)`, preserving 1.36 metadata and canonicalizing context types for the 2.0 worker. |
+| `functions-types.mjs` | `rl-functions` | One-shot | Regenerate the functions' `src/types.ts` (`AppFunctionsSchema`) and `src/secrets.generated.ts` with the project's Rayfin CLI (`generateFunctionsTypes`), as `rayfin dev` does, keeping rayfin-local's `runtimemetadata.json`. |
 | `function-host.mjs` | `rl-functions` | Long-running: stdout announcements, then TCP JSON lines | Host the app's functions on the real UDF package, without Azure Functions Core Tools. |
 | `vite-dev.mjs` | `rl-frontend` | Long-running: stdout announcements and signals | Run the app's own Vite dev server, with the `rayfin-local:shim` plugin that wires it to the local backend, the `rayfin-local:sign-in` plugin that signs the app in automatically, and the `rayfin-local:session-stamp` plugin that makes pages forget stale sessions (with `session-stamp.mjs`, written next to it). |
 
@@ -32,6 +33,7 @@ Both files live in `.rayfin-local/cache/tmp/` and are deleted after the run.
 | `analyze.mjs` with `mode: "connectors"` | `projectRoot`, `tsconfigPath`, `outDir`, `connectors` (`name`, `dir`, `dialect`), `verbose?` | `coreVersion`, `typescriptVersion`, `featureFlags`, `connectors` (`name`, `dialect`, `coreVersion?` for SDK 2.0's column-based permissions, then `entities`, `config` and `policies`, or `error`), `sources`, `diagnostics` |
 | `rayfin-token.mjs` | `scopes`, `tenantId?`, `silent?` (fail rather than sign in interactively) | `token`, `expiresOnTimestamp` (ms since the epoch), `tenantId?` |
 | `udf-metadata.mjs` | `functionsDir`, `resolvePaths?`, `outputPath?` | `json`, `metadata`, `written`, `diagnostics`, `typescript` (`version`, `path`), `typeChecked`, `sourceFiles` |
+| `functions-types.mjs` | `functionsDir`, `secretsOnly?` (only `src/secrets.generated.ts`, as before a build) | `cliVersion`, `written` (the generated files it changed, relative to `functionsDir`) |
 
 ## Long-running helpers
 

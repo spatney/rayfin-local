@@ -97,6 +97,10 @@ pub struct Functions {
     pub names: Vec<String>,
     pub errors: Vec<String>,
     pub message: Option<String>,
+    /// Why the generated types could not be regenerated the last time; `None` while they are
+    /// current.
+    #[serde(rename = "typesError")]
+    pub types_error: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -295,6 +299,7 @@ pub enum WarningCode {
     SecretMissing,
     ConnectorUnsupported,
     FunctionsBuildFailed,
+    FunctionsTypesFailed,
     AzureSignIn,
 }
 
@@ -912,11 +917,12 @@ mod tests {
             names: vec!["getBacklog".into(), "askAnalyst".into()],
             errors: vec![],
             message: None,
+            types_error: None,
         });
         assert_eq!(
             line(functions),
             parse(
-                r#"{"v":1,"type":"functions","time":"2026-10-30T03:12:09.512Z","state":"ready","names":["getBacklog","askAnalyst"],"errors":[],"message":null}"#
+                r#"{"v":1,"type":"functions","time":"2026-10-30T03:12:09.512Z","state":"ready","names":["getBacklog","askAnalyst"],"errors":[],"message":null,"typesError":null}"#
             )
         );
         let vite = Event::Vite(Vite {

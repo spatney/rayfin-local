@@ -24,6 +24,7 @@ use crate::{
     },
     metadata,
     state::{CompilerOutput, FunctionsState, Milestone, Reporter},
+    typegen::{self, TypegenOutcome},
 };
 
 /// How long [`FunctionsService::stop`] waits for the watcher (and `npm run build:watch`).
@@ -38,7 +39,8 @@ const SETTLE: Duration = Duration::from_secs(3);
 
 /// The app's functions, served locally: built with the package's build command, described by a
 /// current `runtimemetadata.json`, run on a supervised [`HostManager`], and rebuilt and reloaded
-/// when they change. See the [module docs](super) for the routes.
+/// when they change. Their generated types (`src/types.ts`) are regenerated when they start and
+/// when their sources or secrets change. See the [module docs](super) for the routes.
 ///
 /// A build that fails at startup does not fail [`start`](Self::start): the service starts
 /// unavailable, invocations answer 503 with the build error, and the first build output the
@@ -64,6 +66,9 @@ pub struct FunctionsService {
     /// The last compilation's failure (message and compiler messages), until one succeeds: a
     /// compiler that emits despite errors (`tsc`) gets the output loaded, still failed.
     compile_failure: Mutex<Option<(String, Vec<String>)>>,
+    /// Held while the generated types are generated, one generation at a time: each one puts
+    /// `runtimemetadata.json` back as it found it.
+    typegen: tokio::sync::Mutex<()>,
     /// The command line of the build, for messages.
     build_command: String,
 }
@@ -91,10 +96,10 @@ impl Secrets {
 }
 
 impl FunctionsService {
-    /// Builds the functions, refreshes their metadata, starts the host (waiting until the package
-    /// is loaded) and watches the package. Fails only when the package can't be served at all
-    /// (no folder, no usable `package.json` or `local.settings.json`); a failed build or load is
-    /// logged and answered with 503 until a rebuild fixes it.
+    /// Builds the functions, refreshes their metadata and generated types, starts the host
+    /// (waiting until the package is loaded) and watches the package. Fails only when the package
+    /// can't be served at all (no folder, no usable `package.json` or `local.settings.json`); a
+    /// failed build or load is logged and answered with 503 until a rebuild fixes it.
     pub async fn start(
         mut config: FunctionsConfig,
         callers: Arc<dyn CallerResolver>,
@@ -118,6 +123,7 @@ impl FunctionsService {
         };
 
         reporter.report(FunctionsState::Building);
+        generate_secrets(&config).await;
         let mut unavailable = None;
         let built = builder::build(&build).await;
         let mut errors = Vec::new();
@@ -134,6 +140,9 @@ impl FunctionsService {
                 unavailable = Some(error.to_string());
             }
         }
+        // After the build, which may have compiled packages the functions import types from;
+        // even after a failed one, so that the frontend's types follow the sources.
+        generate_types(&config).await;
         let entry = match builder::entry_point(&config.functions_dir) {
             Ok(entry) => entry,
             Err(BuildError::NotBuilt { entry, dir }) => {
@@ -168,6 +177,7 @@ impl FunctionsService {
             reporter,
             compiler,
             compile_failure: Mutex::new(None),
+            typegen: tokio::sync::Mutex::new(()),
         });
 
         match service.unavailable() {
@@ -242,12 +252,20 @@ impl FunctionsService {
     /// `local.settings.json` read again (the secret values changed); the build and the watcher
     /// keep running. Invocations meanwhile wait for the new host, as after a rebuild, and the
     /// outcome is reported ([`FunctionsConfig::on_state`]). While the functions are not built,
-    /// the values are kept for the host a fixed build starts.
+    /// the values are kept for the host a fixed build starts. The generated types are
+    /// regenerated first: `ctx.Secrets` is typed with the secrets `rayfin.yml` declares.
     pub async fn restart_host(&self, secrets: Vec<(String, String)>) {
         *lock(&self.secrets) = Secrets::new(secrets);
+        self.regenerate_types().await;
         if self.unavailable().is_none() {
             self.reload(true).await;
         }
+    }
+
+    /// [`generate_types`], unless another generation runs: then after it.
+    async fn regenerate_types(&self) {
+        let _turn = self.typegen.lock().await;
+        generate_types(&self.config).await;
     }
 
     /// The `x-ms-rayfin-secrets` header of invocations.
@@ -448,6 +466,7 @@ async fn watch_loop(
                     service.reporter.report(FunctionsState::Building);
                 }
                 refresh_metadata(&service.config).await;
+                service.regenerate_types().await;
             }
             Next::Watch(Some(WatchEvent::Rebuilt { ok })) => {
                 compiling = false;
@@ -552,6 +571,63 @@ async fn refresh_metadata(config: &FunctionsConfig) {
     .await;
     if let Err(error) = refreshed {
         tracing::error!("{error}");
+    }
+}
+
+/// Regenerates `src/secrets.generated.ts` before the first build, as `rayfin dev` does. What goes
+/// wrong is only logged: the generation after the build reports it.
+async fn generate_secrets(config: &FunctionsConfig) {
+    let generated = typegen::generate_secrets(
+        &config.node,
+        &config.functions_dir,
+        &config.cache_dir,
+        config.sink.clone(),
+    )
+    .await;
+    match generated {
+        Ok(generated) => {
+            for file in &generated.written {
+                tracing::info!(
+                    "regenerated {file} with the Rayfin CLI {}",
+                    generated.cli_version
+                );
+            }
+        }
+        Err(error) => tracing::debug!("{error}"),
+    }
+}
+
+/// Regenerates the functions' generated types and tells [`FunctionsConfig::on_typegen`] how it
+/// went.
+async fn generate_types(config: &FunctionsConfig) {
+    let generated = typegen::generate(
+        &config.node,
+        &config.functions_dir,
+        &config.cache_dir,
+        config.sink.clone(),
+    )
+    .await;
+    let outcome = match generated {
+        Ok(generated) => {
+            for file in &generated.written {
+                tracing::info!(
+                    "regenerated {file} with the Rayfin CLI {}",
+                    generated.cli_version
+                );
+            }
+            TypegenOutcome::Current {
+                written: generated.written,
+            }
+        }
+        Err(error) => {
+            tracing::warn!("{error}");
+            TypegenOutcome::Failed {
+                message: error.to_string(),
+            }
+        }
+    };
+    if let Some(observer) = &config.on_typegen {
+        observer(&outcome);
     }
 }
 

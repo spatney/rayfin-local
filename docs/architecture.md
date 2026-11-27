@@ -43,7 +43,7 @@ The app is unchanged: the SDK receives a different URL, and everything behind it
 3. **Leave the project alone.**
    All state lives in `.rayfin-local/`, which carries its own `.gitignore`.
    Local settings reach Vite through the process environment rather than `.env` files.
-   The only files written outside `.rayfin-local/` are build outputs the Rayfin CLI writes too: the app's build folder and the functions' `runtimemetadata.json`.
+   The only files written outside `.rayfin-local/` are files `rayfin dev` writes too: the app's build folder, the functions' `runtimemetadata.json` and their generated types (`src/types.ts`, `src/secrets.generated.ts`).
 4. **Local and safe by default.**
    The backend listens on `127.0.0.1`, checks the `Host` header against DNS rebinding, and requires the publishable key, as Fabric does.
    Tokens and secret values are never logged.
@@ -131,7 +131,7 @@ docs/              this document, differences.md, development.md, embedding.md
 | `rl-graphql` | `/graphql`: DAB-compatible queries, mutations, aggregations and policies, compiled to SQL; the same front end over T-SQL for SQL connectors (`tsql`). | `rl-model`, `rl-db` |
 | `rl-auth` | `/api/auth/v1/*`, JWKS, runtime settings, the sign-in portal, the Entra exchange; implements `CallerResolver`. | `rl-model`, `rl-db`, `rl-tokens` |
 | `rl-tokens` | `TokenSource` and `TokenBroker`: Azure tokens for the developer; `Audience` scopes. | `rl-node` |
-| `rl-functions` | Functions build and watch, `runtimemetadata.json`, the Node function host, `/functions/<name>/invoke`. | `rl-model`, `rl-node`, `rl-tokens` |
+| `rl-functions` | Functions build and watch, `runtimemetadata.json`, the generated types (`types.ts`), the Node function host, `/functions/<name>/invoke`. | `rl-model`, `rl-node`, `rl-tokens` |
 | `rl-connectors` | `/connector-invoke/<name>`: `fabric-semanticmodel` through Power BI; `/connectors/<name>/graphql`: SQL connectors over their Fabric items (TDS); 501 for other types. | `rl-model`, `rl-tokens`, `rl-graphql` |
 | `rl-storage` | `/api/storage/*` on the local file system, with `@blob` folder rules. | `rl-model`, `rl-db` |
 | `rl-frontend` | The app's Vite dev server or static build, with the local Rayfin environment. | `rl-node` |
@@ -174,7 +174,7 @@ It waits for edits to settle (500 ms), and handles one change at a time.
   Changes that can't apply in place (where the frontend is, ports, the token source) are reported as needing a restart; a file that can't be read keeps the previous configuration.
 - **SQL connectors.** Changes in `rayfin/connectors/` analyze the connectors' entities again and rebuild their routes.
 - **Secret values.** Changes to `.rayfin-local/secrets.json` or the functions' `local.settings.json` restart only the function host, with the new values (`FunctionsService::restart_host`).
-- **Function changes.** The functions package's `build:watch` script (or the build command, when it has none) rebuilds it; the host restarts when the compiled output changes.
+- **Function changes.** The functions package's `build:watch` script (or the build command, when it has none) rebuilds it, and its generated types are regenerated; the host restarts when the compiled output changes.
 - **Frontend changes.** Vite's hot module replacement, as usual.
   When Vite stops by itself, `serve` starts it again on the same port, after 1, 2 and then 5 seconds, and gives up after a fourth stop within two minutes; a restarted Vite gets the run's sign-in secret too.
 
@@ -345,6 +345,10 @@ With `--reuse-build`, an output folder that already holds it is served as it is,
   Without `build:watch`, source changes rerun the build command.
 - **Metadata.** `@microsoft/fabric-user-data-functions` registers functions from `runtimemetadata.json` in the package folder, which lists each `udf.func(...)` with its parameters and the audiences of its `RayfinContext` annotation.
   `js/udf-metadata.mjs` regenerates it with the package's own TypeScript type checker when the sources change, byte for byte as the Rayfin CLI writes it, and only writes it when its content changes.
+- **Types.** `src/types.ts` (the `AppFunctionsSchema` that types `client.functions.<name>.invoke(...)` in the frontend) and `src/secrets.generated.ts` (the secret names that type `ctx.Secrets`) are regenerated after the first build, after each source change and when the secrets change, as `rayfin dev` regenerates them.
+  As in `rayfin dev`, `src/secrets.generated.ts` is also regenerated before the first build, which fails on handlers that read `ctx.Secrets.<NAME>` without it.
+  `js/functions-types.mjs` runs the project's own Rayfin CLI's `generateFunctionsTypes`, whose output depends on the CLI's version, and puts `runtimemetadata.json` back as rayfin-local wrote it (the 2.0 CLI writes schema 3.0).
+  A failure leaves the files as they were, and is reported (`typesError` on the `functions` event, a `functions-types-failed` warning) until a generation succeeds.
 - **Host.** `node function-host.mjs --entry <main>` runs in the functions folder, with the package's `local.settings.json` `Values` in its environment.
   It provides `@azure/functions-core`, the module the worker injects, then imports the package's entry point, so the app's own `@azure/functions` and `@microsoft/fabric-user-data-functions` register the functions.
   It announces `@@rayfin-local:ready {"port":N}` (or `load-error`) on stdout, and takes requests on `127.0.0.1:<port>`: one TCP connection per request, one JSON line each way (`describe`, `invoke`, `shutdown`), each carrying a per-process secret.

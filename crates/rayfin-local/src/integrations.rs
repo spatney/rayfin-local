@@ -20,7 +20,7 @@ use rl_connectors::{
 };
 use rl_db::Db;
 use rl_frontend::{DevServer, DevServerConfig, RayfinEnv, StaticBuildConfig};
-use rl_functions::{FunctionsConfig, FunctionsService, FunctionsState};
+use rl_functions::{FunctionsConfig, FunctionsService, FunctionsState, TypegenOutcome};
 use rl_graphql::{DataApi, DataApiSettings};
 use rl_model::{AppModel, CallerResolver};
 use rl_node::NodeRuntime;
@@ -480,9 +480,13 @@ pub async fn start_functions(
         .inspect
         .or(ctx.project.local_config().functions.inspect_port);
     config.sink = ui::functions_sink();
-    let warned = Mutex::new(None);
-    config.on_state = Some(Arc::new(move |state: &FunctionsState| {
-        report_functions_state(state, &warned);
+    let reports = Arc::new(Mutex::new(FunctionsEvents::new(events::emit)));
+    config.on_state = Some(Arc::new({
+        let reports = Arc::clone(&reports);
+        move |state: &FunctionsState| lock(&reports).state(state)
+    }));
+    config.on_typegen = Some(Arc::new(move |outcome: &TypegenOutcome| {
+        lock(&reports).typegen(outcome);
     }));
     if let Some(missing) = still_missing_packages(functions_dir, PACKAGES_GRACE).await {
         let dir = functions_dir.display().to_string();
@@ -509,51 +513,120 @@ pub async fn start_functions(
     Ok(Some(service))
 }
 
-/// The functions' state as a `functions` event; a failed build is also a
-/// `functions-build-failed` warning, once per failure (`warned` is the last one warned about).
-fn report_functions_state(state: &FunctionsState, warned: &Mutex<Option<(String, Vec<String>)>>) {
-    let mut warned = warned.lock().unwrap_or_else(PoisonError::into_inner);
-    let event = match state {
-        FunctionsState::Building => Functions {
-            state: FunctionsStatus::Building,
-            names: Vec::new(),
-            errors: Vec::new(),
-            message: None,
-        },
-        FunctionsState::Ready { names } => {
-            *warned = None;
-            Functions {
-                state: FunctionsStatus::Ready,
-                names: names.clone(),
+/// The `functions` events of one functions service, and the warnings that go with them.
+struct FunctionsEvents {
+    /// Where they go ([`events::emit`]).
+    emit: Box<dyn Fn(Event) + Send>,
+    /// The last `functions` event.
+    last: Option<Functions>,
+    /// The build failure last warned about (`functions-build-failed`).
+    build_warned: Option<(String, Vec<String>)>,
+    /// Why the generated types could not be regenerated the last time (`typesError`), which
+    /// `functions-types-failed` warned about.
+    types_error: Option<String>,
+}
+
+impl FunctionsEvents {
+    fn new(emit: impl Fn(Event) + Send + 'static) -> Self {
+        Self {
+            emit: Box::new(emit),
+            last: None,
+            build_warned: None,
+            types_error: None,
+        }
+    }
+
+    /// The functions' state as a `functions` event; a failed build is also a
+    /// `functions-build-failed` warning, once per failure.
+    fn state(&mut self, state: &FunctionsState) {
+        let types_error = self.types_error.clone();
+        let event = match state {
+            FunctionsState::Building => Functions {
+                state: FunctionsStatus::Building,
+                names: Vec::new(),
                 errors: Vec::new(),
                 message: None,
+                types_error,
+            },
+            FunctionsState::Ready { names } => {
+                self.build_warned = None;
+                Functions {
+                    state: FunctionsStatus::Ready,
+                    names: names.clone(),
+                    errors: Vec::new(),
+                    message: None,
+                    types_error,
+                }
             }
+            FunctionsState::Failed {
+                message,
+                errors,
+                build,
+                names,
+            } => {
+                let failure = Some((message.clone(), errors.clone()));
+                if *build && self.build_warned != failure {
+                    self.warn(WarningCode::FunctionsBuildFailed, message, None);
+                    self.build_warned = failure;
+                }
+                Functions {
+                    state: FunctionsStatus::Failed,
+                    names: names.clone(),
+                    errors: errors.clone(),
+                    message: Some(message.clone()),
+                    types_error,
+                }
+            }
+        };
+        self.functions(event);
+    }
+
+    /// How a generation of the functions' types went: a failure is a `functions-types-failed`
+    /// warning, once per failure. A new outcome comes with the last `functions` event again,
+    /// unless that is `building`, whose outcome will carry it.
+    fn typegen(&mut self, outcome: &TypegenOutcome) {
+        let error = match outcome {
+            TypegenOutcome::Current { .. } => None,
+            TypegenOutcome::Failed { message } => Some(message.clone()),
+        };
+        if error == self.types_error {
+            return;
         }
-        FunctionsState::Failed {
-            message,
-            errors,
-            build,
-            names,
-        } => {
-            let failure = Some((message.clone(), errors.clone()));
-            if *build && *warned != failure {
-                events::warning(
-                    WarningCode::FunctionsBuildFailed,
-                    format!("{}.", message.trim_end_matches('.')),
-                    None,
-                    events::no_details(),
-                );
-                *warned = failure;
-            }
-            Functions {
-                state: FunctionsStatus::Failed,
-                names: names.clone(),
-                errors: errors.clone(),
-                message: Some(message.clone()),
-            }
+        if let Some(message) = &error {
+            let hint = "They are generated again after the next change to the functions' \
+                        sources; until then, the app's frontend is typed with the previous ones.";
+            self.warn(
+                WarningCode::FunctionsTypesFailed,
+                message,
+                Some(hint.to_owned()),
+            );
         }
-    };
-    events::emit(Event::Functions(event));
+        self.types_error = error;
+        if let Some(last) = self
+            .last
+            .clone()
+            .filter(|last| last.state != FunctionsStatus::Building)
+        {
+            self.functions(Functions {
+                types_error: self.types_error.clone(),
+                ..last
+            });
+        }
+    }
+
+    fn warn(&self, code: WarningCode, message: &str, hint: Option<String>) {
+        (self.emit)(Event::Warning(events::Warning {
+            code,
+            message: format!("{}.", message.trim_end_matches('.')),
+            hint,
+            details: events::no_details(),
+        }));
+    }
+
+    fn functions(&mut self, event: Functions) {
+        self.last = Some(event.clone());
+        (self.emit)(Event::Functions(event));
+    }
 }
 
 /// The packages the functions' `package.json` declares that Node.js can't find from their
@@ -968,8 +1041,75 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use rl_project::RayfinConfig;
+    use serde_json::Value;
 
     use super::*;
+
+    /// What [`FunctionsEvents`] emitted, as `(type, state or code, typesError)`.
+    type Seen = Arc<Mutex<Vec<(String, String, Value)>>>;
+
+    fn recorded() -> (FunctionsEvents, Seen) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let reports = FunctionsEvents::new({
+            let seen = Arc::clone(&seen);
+            move |event: Event| {
+                let line = event.to_json("t");
+                let what = line.get("state").or(line.get("code")).unwrap().clone();
+                lock(&seen).push((
+                    line["type"].as_str().unwrap().to_owned(),
+                    what.as_str().unwrap().to_owned(),
+                    line.get("typesError").cloned().unwrap_or(Value::Null),
+                ));
+            }
+        });
+        (reports, seen)
+    }
+
+    #[test]
+    fn functions_events_say_why_their_types_are_stale_until_they_are_generated() {
+        let (mut reports, seen) = recorded();
+        let failed = TypegenOutcome::Failed {
+            message: "no Rayfin CLI".into(),
+        };
+        let current = |written: &[&str]| TypegenOutcome::Current {
+            written: written.iter().map(|file| (*file).to_owned()).collect(),
+        };
+        let event = |kind: &str, what: &str, error: Value| (kind.into(), what.into(), error);
+        let stale = json!("no Rayfin CLI");
+
+        reports.state(&FunctionsState::Building);
+        reports.typegen(&failed);
+        reports.state(&FunctionsState::Ready {
+            names: vec!["greet".into()],
+        });
+        assert_eq!(
+            std::mem::take(&mut *lock(&seen)),
+            [
+                event("functions", "building", Value::Null),
+                event("warning", "functions-types-failed", Value::Null),
+                event("functions", "ready", stale.clone()),
+            ],
+            "the outcome of a build in progress carries the error"
+        );
+
+        reports.typegen(&failed);
+        reports.typegen(&current(&["src/types.ts"]));
+        reports.typegen(&current(&[]));
+        assert_eq!(
+            std::mem::take(&mut *lock(&seen)),
+            [event("functions", "ready", Value::Null)],
+            "the same failure warns once; once they are generated, the last state says so"
+        );
+
+        reports.typegen(&failed);
+        assert_eq!(
+            std::mem::take(&mut *lock(&seen)),
+            [
+                event("warning", "functions-types-failed", Value::Null),
+                event("functions", "ready", stale),
+            ]
+        );
+    }
 
     #[test]
     fn connectors_map_from_rayfin_yml() {

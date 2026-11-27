@@ -682,6 +682,103 @@ fn new_secret_values_restart_only_the_function_host() {
 }
 
 #[test]
+fn the_generated_types_follow_the_functions_and_their_secrets() {
+    let Some(app) = App::copy() else {
+        return;
+    };
+    let functions = app.path().join("rayfin").join("functions");
+    let types = functions.join("src").join("types.ts");
+    let secrets = functions.join("src").join("secrets.generated.ts");
+    let source = functions.join("src").join("function_app.ts");
+    let add_function = |code: &str| {
+        let mut text = std::fs::read_to_string(&source).unwrap();
+        text.push_str(code);
+        std::fs::write(&source, text).unwrap();
+    };
+    let ready_with = |name: &'static str| {
+        move |event: &Value| {
+            event["type"] == "functions"
+                && event["state"] == "ready"
+                && event["names"]
+                    .as_array()
+                    .is_some_and(|names| names.contains(&json!(name)))
+        }
+    };
+
+    // Declared while `serve` wasn't running: the first build needs the secret's name.
+    app.edit_config(&[("secrets:\n", "secrets:\n  - name: STARTUP_SECRET\n")]);
+    add_function(
+        "\nudf.func('hasStartupSecret', async (ctx: RayfinContext<AppSchema>): Promise<boolean> => \
+         typeof ctx.Secrets.STARTUP_SECRET === 'string', []);\n",
+    );
+    let mut serve = Serve::start(app.path(), &["--no-frontend", "--port", "0"]);
+    let ready = serve.next("ready");
+    let api_url = ready["apiUrl"].as_str().unwrap().to_owned();
+    let functions_event = serve
+        .seen
+        .iter()
+        .rev()
+        .find(|event| event["type"] == "functions");
+    assert!(
+        functions_event.is_some_and(|event| ready_with("hasStartupSecret")(event)),
+        "{}",
+        serve.report()
+    );
+    assert!(
+        !serve
+            .seen
+            .iter()
+            .any(|event| event["code"] == "functions-build-failed"
+                || (event["type"] == "functions" && !event["typesError"].is_null())),
+        "{}",
+        serve.report()
+    );
+    assert!(
+        std::fs::read_to_string(&secrets)
+            .unwrap()
+            .contains("    STARTUP_SECRET: string;")
+    );
+    assert!(std::fs::read_to_string(&types).unwrap().contains(
+        "  hasStartupSecret: {\n    input: Record<string, never>;\n    output: boolean;\n  };"
+    ));
+
+    add_function(
+        "\nudf.func('shout', async (text: string): Promise<string> => text.toUpperCase(), []);\n",
+    );
+    let built = serve.until("the new function", STEP, ready_with("shout"));
+    assert!(built["typesError"].is_null(), "{built}");
+    let regenerated = std::fs::read_to_string(&types).unwrap();
+    assert!(
+        regenerated.contains("  shout: {\n    input: { text: string };\n    output: string;\n  };"),
+        "{regenerated}"
+    );
+    let metadata = std::fs::read_to_string(functions.join("runtimemetadata.json")).unwrap();
+    assert!(metadata.contains(r#""schemaVersion": "2.0""#), "{metadata}");
+    let key = publishable_key(&api_url);
+    assert_eq!(invoke(&api_url, &key, "ping"), (200, json!("pong")));
+
+    let from = serve.seen.len();
+    app.edit_config(&[("secrets:\n", "secrets:\n  - name: SHOUT_SECRET\n")]);
+    let changed = serve.next("config-changed");
+    assert_eq!(changed["what"], json!(["secrets"]), "{changed}");
+    serve.until("the restarted host", STEP, |event| {
+        event["type"] == "functions" && event["state"] == "ready"
+    });
+    assert!(
+        serve
+            .seen_since(from, "functions")
+            .iter()
+            .all(|event| event["typesError"].is_null()),
+        "{}",
+        serve.report()
+    );
+    let registry = std::fs::read_to_string(&secrets).unwrap();
+    assert!(registry.contains("    SHOUT_SECRET: string;"), "{registry}");
+
+    assert_eq!(serve.close_stdin().code(), Some(0), "{}", serve.report());
+}
+
+#[test]
 fn vite_starts_again_on_its_port_after_it_is_killed() {
     let Some(app) = App::copy() else {
         return;

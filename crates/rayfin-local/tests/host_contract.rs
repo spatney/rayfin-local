@@ -234,6 +234,11 @@ fn serves_the_v2_sdk_with_explicit_auth_and_services() {
     ) else {
         return;
     };
+    let generated = ["types.ts", "secrets.generated.ts"].map(|file| {
+        let path = project.join("rayfin/functions/src").join(file);
+        let committed = std::fs::read_to_string(&path).unwrap();
+        (path, committed)
+    });
     let mut serve = Serve::start(
         &project,
         &[
@@ -257,6 +262,24 @@ fn serves_the_v2_sdk_with_explicit_auth_and_services() {
         "{}",
         serve.report()
     );
+    // The 2.0 CLI generates the functions' types as the fixture has them.
+    assert!(
+        serve
+            .seen
+            .iter()
+            .filter(|event| event["type"] == "functions")
+            .all(|event| event["typesError"].is_null()),
+        "{}",
+        serve.report()
+    );
+    for (path, committed) in &generated {
+        assert_eq!(
+            &std::fs::read_to_string(path).unwrap(),
+            committed,
+            "{}",
+            path.display()
+        );
+    }
     let settings = serde_json::json!({
         "apiUrl": ready["apiUrl"],
         "appUrl": ready["appUrl"],

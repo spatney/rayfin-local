@@ -9,6 +9,10 @@ pub mod invoke;
 /// `runtimemetadata.json`: freshness checks and generation (`js/udf-metadata.mjs`).
 pub mod metadata;
 mod state;
+/// `src/types.ts` and `src/secrets.generated.ts`, generated with the project's Rayfin CLI
+/// (`js/functions-types.mjs`).
+pub mod typegen;
 
 pub use invoke::{FunctionsConfig, FunctionsError, FunctionsService};
 pub use state::{FunctionsState, StateObserver};
+pub use typegen::{TypegenObserver, TypegenOutcome};

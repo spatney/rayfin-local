@@ -3,8 +3,8 @@
 //! As `rayfin dev` does: one build with `services.functions.buildCommand` (default
 //! `npm run build`) in the functions directory, then `npm run build:watch` when the package has
 //! that script. rayfin-local also watches the compiled output, to restart the function host, and
-//! the sources, to refresh `runtimemetadata.json`. A package without `build:watch` is rebuilt
-//! with the build command when its sources change.
+//! the sources, to refresh `runtimemetadata.json` and the generated types (`src/types.ts`). A
+//! package without `build:watch` is rebuilt with the build command when its sources change.
 
 mod package;
 mod watch;

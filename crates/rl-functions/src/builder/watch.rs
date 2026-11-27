@@ -37,7 +37,7 @@ pub enum WatchEvent {
     /// `runtimemetadata.json` when it starts.
     OutputChanged,
     /// A TypeScript source, `package.json` or `tsconfig*.json` changed: `runtimemetadata.json`
-    /// may be stale.
+    /// and the generated types may be stale.
     SourceChanged,
     /// The build command, run again after source changes ([`WatchMode::Rebuild`]), finished:
     /// `ok` when it succeeded.

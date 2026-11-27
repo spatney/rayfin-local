@@ -101,6 +101,7 @@ flowchart LR
 2. Creates or migrates a SQLite database in `.rayfin-local/`.
 3. Starts one backend that answers every route the SDK calls: auth, `/graphql`, functions, connectors and storage, with your `@role` policies enforced.
 4. Builds your functions and runs them on a Node.js host with the real `@microsoft/fabric-user-data-functions` package, without Azure Functions Core Tools.
+   As `rayfin dev` does, it keeps their generated types current with your project's Rayfin CLI: `types.ts`, whose `AppFunctionsSchema` types your frontend's calls to them.
 5. Starts your app's own Vite dev server with environment variables that point the SDK at the local backend; your `.env` files are not changed.
 
 [docs/architecture.md](docs/architecture.md) explains the design in depth.
@@ -116,7 +117,7 @@ flowchart LR
 | "Sign in with Fabric" (`ensureSignedInWithFabric`) | Emulated | A local sign-in page: create an account, or continue as your Azure identity. |
 | Embedded sign-in (`initEmbeddedAuth`) | Emulated | A local page plays the Fabric host: it frames the app and signs it in. |
 | Automatic sign-in in development (`rayfinLocalDev({ autoLogin: true })`) | Emulated | Signs the app in as you, without an Entra prompt, or as a local user you choose. |
-| Functions, `ctx.getDataClient()`, secrets | Yes | Rebuilt and reloaded when the sources change. |
+| Functions, `ctx.getDataClient()`, secrets | Yes | Rebuilt and reloaded when the sources change, and their generated types regenerated. |
 | Function connections (`ctx.Tokens.ADO`, `.AzureAI`, `.Fabric`, `.Sql`, `.Storage`) | As you | Tokens for your own Azure account, not the app's identity. |
 | `fabric-semanticmodel` connectors | As you | Real Power BI queries with your token. |
 | SQL connectors (`fabric-sqldatabase`, `fabric-warehouse`, `fabric-sqlanalytics`) | As you | The real Fabric database, queried and written as you, with your entities' `@role` grants and policies; aggregations don't run yet. See [docs/sql-connectors.md](docs/sql-connectors.md). |
@@ -307,12 +308,13 @@ Functions read the secrets declared in `rayfin.yml` as `ctx.Secrets.<NAME>`.
 Locally, a secret's value comes from the environment, from `.rayfin-local/secrets.json`, or from the `Values` of `rayfin/functions/local.settings.json`, in that order.
 `rayfin-local secret set`, `secret list` and `secret delete` manage `.rayfin-local/secrets.json`, which is never committed.
 A running `serve` picks up a changed value there or in `local.settings.json` by itself, and restarts only its function host with it.
+When `rayfin.yml` declares other secrets, it also regenerates the functions' `src/secrets.generated.ts`, which types `ctx.Secrets`.
 
 ## Local state and reset
 
 rayfin-local keeps its state in `.rayfin-local/` at the project root.
 The folder has its own `.gitignore` (`*`), so none of it is committed.
-Outside it, rayfin-local writes only build output: what your build commands produce (such as `dist/`) and the functions' `runtimemetadata.json`, which `rayfin dev` also generates.
+Outside it, rayfin-local writes only what `rayfin dev` also writes: what your build commands produce (such as `dist/`), the functions' `runtimemetadata.json`, and their generated types (`src/types.ts` and `src/secrets.generated.ts`, which your project's Rayfin CLI generates).
 
 | Path | Holds |
 | --- | --- |
@@ -367,6 +369,7 @@ While `serve` runs, it applies these changes in place, on the same ports, so the
 | `rayfin.yml`: `services` (`auth`, `data`, `functions`, `storage`), `connectors`, `secrets`, `name` | The services whose settings changed are rebuilt: turned on or off, or started again with the new settings. Users, sessions, data, signing keys and the sign-in identity stay. |
 | The storage folders (`rayfin/storage`) | The storage service is rebuilt with the new folders. |
 | The SQL connectors' entities (`rayfin/connectors/<name>/`, `metadata.json`) | They are analyzed again, and the connectors' routes rebuilt. |
+| The functions' sources (`src/`, `package.json`, `tsconfig*.json`) | They are rebuilt, their generated types (`src/types.ts`, `src/secrets.generated.ts`) are regenerated with your project's Rayfin CLI, and the function host restarts with the new build. |
 | A secret's value (`secret set`, `secret delete`, `local.settings.json`) | Only the function host restarts, with the new values. |
 | `rayfin-local.toml`: `[auth]`, `[fabric]`, `[connectors]`, `[functions]` | As for `rayfin.yml`. A new `[auth] sign_in_as` (unless you passed `--sign-in-as`) signs every session out, so the app signs in again as the new identity. |
 
@@ -507,6 +510,10 @@ Run `rayfin-local doctor` first: it checks what `serve` needs and says what to f
   Before 1.36, `@microsoft/rayfin-core` can't describe database policies to rayfin-local, so apps with `@role` policies fail to analyze: upgrade the app's packages to a supported SDK line.
 - **"Cannot find type definition file for …" (TS2688) when the entities are analyzed.**
   TypeScript also loads the `@types` packages in the `node_modules` of every parent folder; set `"types"` (or `"typeRoots"`) in `rayfin/tsconfig.json`, or remove the stray folder the message names.
+- **"Could not regenerate the functions' generated types (src/types.ts)".**
+  rayfin-local generates them with your project's own Rayfin CLI (`@microsoft/rayfin-cli`), as `rayfin dev` does, and the message ends with the CLI's reason.
+  Usually the CLI isn't installed (run `npm install` in the project), or the Functions worker doesn't match it (run the `npm install` the message names).
+  They are generated again after the next change to the functions' sources; until then, `types.ts` keeps the previous `AppFunctionsSchema`.
 - **"rayfin-local serve is already running this project".**
   Only one `serve` runs a project at a time; the message gives the other one's process id and URLs.
   Use it, or stop it (Ctrl+C in its terminal) and start again.

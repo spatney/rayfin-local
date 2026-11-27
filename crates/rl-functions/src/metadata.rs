@@ -471,7 +471,7 @@ fn replace(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 /// An absolute path as Node and TypeScript expect it (no `\\?\` prefix on Windows).
-fn node_path(path: &Path) -> PathBuf {
+pub(crate) fn node_path(path: &Path) -> PathBuf {
     let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
     if cfg!(windows)
         && let Some(stripped) = absolute
